@@ -1,0 +1,872 @@
+openapi: 3.0.3
+info:
+  title: SoccerKit API
+  description: >-
+    Backend for the SoccerKit app: authentication, player profiles, pickup
+    matches & RSVPs, teams, leagues (fixtures & standings) and player statistics.
+  version: 0.1.0
+servers:
+  - url: /
+    description: Current host
+tags:
+  - name: auth
+  - name: users
+  - name: venues
+  - name: matches
+  - name: teams
+  - name: leagues
+  - name: stats
+
+paths:
+  /health:
+    get:
+      tags: [system]
+      summary: Liveness probe
+      responses:
+        "200":
+          description: OK
+
+  /api/v1/auth/register:
+    post:
+      tags: [auth]
+      summary: Create a new account
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/RegisterRequest" }
+      responses:
+        "201":
+          description: Created
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/AuthResponse" }
+        "409": { $ref: "#/components/responses/Error" }
+  /api/v1/auth/login:
+    post:
+      tags: [auth]
+      summary: Exchange credentials for tokens
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/LoginRequest" }
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/AuthResponse" }
+        "401": { $ref: "#/components/responses/Error" }
+  /api/v1/auth/refresh:
+    post:
+      tags: [auth]
+      summary: Rotate a refresh token for a new token pair
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/RefreshRequest" }
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/AuthResponse" }
+        "401": { $ref: "#/components/responses/Error" }
+  /api/v1/auth/logout:
+    post:
+      tags: [auth]
+      summary: Revoke a refresh token
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/RefreshRequest" }
+      responses:
+        "200": { $ref: "#/components/responses/Ok" }
+
+  /api/v1/me:
+    get:
+      tags: [users]
+      summary: Get the authenticated player's profile
+      security: [{ bearerAuth: [] }]
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/PublicUser" }
+        "401": { $ref: "#/components/responses/Error" }
+    patch:
+      tags: [users]
+      summary: Update the authenticated player's profile
+      security: [{ bearerAuth: [] }]
+      requestBody:
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/UpdateProfileRequest" }
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/PublicUser" }
+        "401": { $ref: "#/components/responses/Error" }
+  /api/v1/players:
+    get:
+      tags: [users]
+      summary: Search the player directory
+      parameters:
+        - { in: query, name: q, schema: { type: string } }
+        - { in: query, name: position, schema: { $ref: "#/components/schemas/Position" } }
+        - { in: query, name: minSkill, schema: { type: integer, minimum: 1, maximum: 5 } }
+        - { in: query, name: limit, schema: { type: integer, default: 20 } }
+        - { in: query, name: offset, schema: { type: integer, default: 0 } }
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  items:
+                    type: array
+                    items: { $ref: "#/components/schemas/PublicUser" }
+                  total: { type: integer }
+  /api/v1/players/{id}:
+    get:
+      tags: [users]
+      summary: Get a player's public profile
+      parameters: [{ $ref: "#/components/parameters/Id" }]
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/PublicUser" }
+        "404": { $ref: "#/components/responses/Error" }
+  /api/v1/players/{id}/stats:
+    get:
+      tags: [users]
+      summary: Get a player's aggregated career stats
+      parameters: [{ $ref: "#/components/parameters/Id" }]
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/CareerStats" }
+        "404": { $ref: "#/components/responses/Error" }
+
+  /api/v1/venues:
+    get:
+      tags: [venues]
+      summary: List venues
+      parameters:
+        - { in: query, name: city, schema: { type: string } }
+        - { in: query, name: limit, schema: { type: integer, default: 50 } }
+        - { in: query, name: offset, schema: { type: integer, default: 0 } }
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema: { type: array, items: { $ref: "#/components/schemas/Venue" } }
+    post:
+      tags: [venues]
+      summary: Create a venue
+      security: [{ bearerAuth: [] }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/CreateVenueRequest" }
+      responses:
+        "201":
+          description: Created
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Venue" }
+  /api/v1/venues/{id}:
+    get:
+      tags: [venues]
+      summary: Get a venue
+      parameters: [{ $ref: "#/components/parameters/Id" }]
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Venue" }
+        "404": { $ref: "#/components/responses/Error" }
+
+  /api/v1/matches:
+    get:
+      tags: [matches]
+      summary: List pickup matches
+      parameters:
+        - { in: query, name: status, schema: { $ref: "#/components/schemas/MatchStatus" } }
+        - { in: query, name: upcoming, schema: { type: boolean } }
+        - { in: query, name: venueId, schema: { type: string, format: uuid } }
+        - { in: query, name: hostId, schema: { type: string, format: uuid } }
+        - { in: query, name: limit, schema: { type: integer, default: 20 } }
+        - { in: query, name: offset, schema: { type: integer, default: 0 } }
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema: { type: array, items: { $ref: "#/components/schemas/Match" } }
+    post:
+      tags: [matches]
+      summary: Host a new pickup match
+      security: [{ bearerAuth: [] }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/CreateMatchRequest" }
+      responses:
+        "201":
+          description: Created
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Match" }
+        "400": { $ref: "#/components/responses/Error" }
+  /api/v1/matches/{id}:
+    get:
+      tags: [matches]
+      summary: Get a match with its roster
+      parameters: [{ $ref: "#/components/parameters/Id" }]
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/MatchDetail" }
+        "404": { $ref: "#/components/responses/Error" }
+    patch:
+      tags: [matches]
+      summary: Update a match (host only)
+      security: [{ bearerAuth: [] }]
+      parameters: [{ $ref: "#/components/parameters/Id" }]
+      requestBody:
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/UpdateMatchRequest" }
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Match" }
+        "403": { $ref: "#/components/responses/Error" }
+        "404": { $ref: "#/components/responses/Error" }
+    delete:
+      tags: [matches]
+      summary: Cancel a match (host only)
+      security: [{ bearerAuth: [] }]
+      parameters: [{ $ref: "#/components/parameters/Id" }]
+      responses:
+        "200": { $ref: "#/components/responses/Ok" }
+        "403": { $ref: "#/components/responses/Error" }
+  /api/v1/matches/{id}/rsvp:
+    put:
+      tags: [matches]
+      summary: RSVP to a match (going / maybe / declined)
+      description: Setting status to GOING when the match is full places you on the waitlist.
+      security: [{ bearerAuth: [] }]
+      parameters: [{ $ref: "#/components/parameters/Id" }]
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                status: { type: string, enum: [GOING, MAYBE, DECLINED] }
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  status: { $ref: "#/components/schemas/RsvpStatus" }
+        "400": { $ref: "#/components/responses/Error" }
+    delete:
+      tags: [matches]
+      summary: Leave a match
+      security: [{ bearerAuth: [] }]
+      parameters: [{ $ref: "#/components/parameters/Id" }]
+      responses:
+        "200": { $ref: "#/components/responses/Ok" }
+  /api/v1/matches/{id}/stats:
+    get:
+      tags: [stats]
+      summary: List stat lines for a pickup match
+      parameters: [{ $ref: "#/components/parameters/Id" }]
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema: { type: array, items: { $ref: "#/components/schemas/PlayerStat" } }
+    put:
+      tags: [stats]
+      summary: Record a player's stat line for a pickup match
+      security: [{ bearerAuth: [] }]
+      parameters: [{ $ref: "#/components/parameters/Id" }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/RecordStatRequest" }
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/PlayerStat" }
+        "404": { $ref: "#/components/responses/Error" }
+
+  /api/v1/teams:
+    get:
+      tags: [teams]
+      summary: List teams
+      parameters:
+        - { in: query, name: q, schema: { type: string } }
+        - { in: query, name: limit, schema: { type: integer, default: 20 } }
+        - { in: query, name: offset, schema: { type: integer, default: 0 } }
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema: { type: array, items: { $ref: "#/components/schemas/Team" } }
+    post:
+      tags: [teams]
+      summary: Create a team
+      security: [{ bearerAuth: [] }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/CreateTeamRequest" }
+      responses:
+        "201":
+          description: Created
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Team" }
+  /api/v1/teams/{id}:
+    get:
+      tags: [teams]
+      summary: Get a team with its roster
+      parameters: [{ $ref: "#/components/parameters/Id" }]
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/TeamDetail" }
+        "404": { $ref: "#/components/responses/Error" }
+    patch:
+      tags: [teams]
+      summary: Update a team (owner only)
+      security: [{ bearerAuth: [] }]
+      parameters: [{ $ref: "#/components/parameters/Id" }]
+      requestBody:
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/UpdateTeamRequest" }
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Team" }
+        "403": { $ref: "#/components/responses/Error" }
+    delete:
+      tags: [teams]
+      summary: Delete a team (owner only)
+      security: [{ bearerAuth: [] }]
+      parameters: [{ $ref: "#/components/parameters/Id" }]
+      responses:
+        "200": { $ref: "#/components/responses/Ok" }
+        "403": { $ref: "#/components/responses/Error" }
+  /api/v1/teams/{id}/members:
+    post:
+      tags: [teams]
+      summary: Add a player to the team (owner only)
+      security: [{ bearerAuth: [] }]
+      parameters: [{ $ref: "#/components/parameters/Id" }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/AddMemberRequest" }
+      responses:
+        "201":
+          description: Created
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/TeamMember" }
+        "409": { $ref: "#/components/responses/Error" }
+  /api/v1/teams/{id}/members/{userId}:
+    delete:
+      tags: [teams]
+      summary: Remove a player from the team (owner only)
+      security: [{ bearerAuth: [] }]
+      parameters:
+        - { $ref: "#/components/parameters/Id" }
+        - { in: path, name: userId, required: true, schema: { type: string, format: uuid } }
+      responses:
+        "200": { $ref: "#/components/responses/Ok" }
+        "404": { $ref: "#/components/responses/Error" }
+
+  /api/v1/leagues:
+    get:
+      tags: [leagues]
+      summary: List leagues
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema: { type: array, items: { $ref: "#/components/schemas/League" } }
+    post:
+      tags: [leagues]
+      summary: Create a league
+      security: [{ bearerAuth: [] }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/CreateLeagueRequest" }
+      responses:
+        "201":
+          description: Created
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/League" }
+  /api/v1/leagues/{id}:
+    get:
+      tags: [leagues]
+      summary: Get a league
+      parameters: [{ $ref: "#/components/parameters/Id" }]
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/League" }
+        "404": { $ref: "#/components/responses/Error" }
+  /api/v1/leagues/{id}/teams:
+    post:
+      tags: [leagues]
+      summary: Register a team in the league
+      security: [{ bearerAuth: [] }]
+      parameters: [{ $ref: "#/components/parameters/Id" }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [teamId]
+              properties:
+                teamId: { type: string, format: uuid }
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/League" }
+        "409": { $ref: "#/components/responses/Error" }
+  /api/v1/leagues/{id}/fixtures:
+    get:
+      tags: [leagues]
+      summary: List a league's fixtures
+      parameters: [{ $ref: "#/components/parameters/Id" }]
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema: { type: array, items: { $ref: "#/components/schemas/Fixture" } }
+    post:
+      tags: [leagues]
+      summary: Schedule a fixture
+      security: [{ bearerAuth: [] }]
+      parameters: [{ $ref: "#/components/parameters/Id" }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/CreateFixtureRequest" }
+      responses:
+        "201":
+          description: Created
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Fixture" }
+        "400": { $ref: "#/components/responses/Error" }
+  /api/v1/leagues/{id}/standings:
+    get:
+      tags: [leagues]
+      summary: Get the computed league table
+      parameters: [{ $ref: "#/components/parameters/Id" }]
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema: { type: array, items: { $ref: "#/components/schemas/StandingRow" } }
+  /api/v1/leagues/fixtures/{fixtureId}/result:
+    put:
+      tags: [leagues]
+      summary: Record a fixture's final score
+      security: [{ bearerAuth: [] }]
+      parameters:
+        - { in: path, name: fixtureId, required: true, schema: { type: string, format: uuid } }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/RecordResultRequest" }
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Fixture" }
+        "404": { $ref: "#/components/responses/Error" }
+
+  /api/v1/fixtures/{id}/stats:
+    get:
+      tags: [stats]
+      summary: List stat lines for a league fixture
+      parameters: [{ $ref: "#/components/parameters/Id" }]
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema: { type: array, items: { $ref: "#/components/schemas/PlayerStat" } }
+    put:
+      tags: [stats]
+      summary: Record a player's stat line for a league fixture
+      security: [{ bearerAuth: [] }]
+      parameters: [{ $ref: "#/components/parameters/Id" }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/RecordStatRequest" }
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/PlayerStat" }
+
+components:
+  securitySchemes:
+    bearerAuth:
+      type: http
+      scheme: bearer
+      bearerFormat: JWT
+  parameters:
+    Id:
+      in: path
+      name: id
+      required: true
+      schema: { type: string, format: uuid }
+  responses:
+    Error:
+      description: Error
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/Error" }
+    Ok:
+      description: OK
+      content:
+        application/json:
+          schema:
+            type: object
+            properties:
+              ok: { type: boolean }
+  schemas:
+    Position:
+      type: string
+      enum: [GK, DEF, MID, FWD]
+    MatchStatus:
+      type: string
+      enum: [SCHEDULED, IN_PROGRESS, COMPLETED, CANCELLED]
+    RsvpStatus:
+      type: string
+      enum: [GOING, MAYBE, WAITLIST, DECLINED]
+    TeamRole:
+      type: string
+      enum: [OWNER, CAPTAIN, PLAYER]
+    Surface:
+      type: string
+      enum: [GRASS, TURF, INDOOR, CONCRETE]
+    Error:
+      type: object
+      properties:
+        error:
+          type: object
+          properties:
+            code: { type: string }
+            message: { type: string }
+    PublicUser:
+      type: object
+      properties:
+        id: { type: string, format: uuid }
+        email: { type: string, format: email }
+        displayName: { type: string }
+        position: { $ref: "#/components/schemas/Position", nullable: true }
+        skillLevel: { type: integer }
+        bio: { type: string, nullable: true }
+        avatarUrl: { type: string, nullable: true }
+        createdAt: { type: string, format: date-time }
+    AuthResponse:
+      type: object
+      properties:
+        accessToken: { type: string }
+        refreshToken: { type: string }
+        user: { $ref: "#/components/schemas/PublicUser" }
+    RegisterRequest:
+      type: object
+      required: [email, password, displayName]
+      properties:
+        email: { type: string, format: email }
+        password: { type: string, minLength: 8 }
+        displayName: { type: string }
+        position: { $ref: "#/components/schemas/Position" }
+        skillLevel: { type: integer, minimum: 1, maximum: 5 }
+    LoginRequest:
+      type: object
+      required: [email, password]
+      properties:
+        email: { type: string, format: email }
+        password: { type: string }
+    RefreshRequest:
+      type: object
+      required: [refreshToken]
+      properties:
+        refreshToken: { type: string }
+    UpdateProfileRequest:
+      type: object
+      properties:
+        displayName: { type: string }
+        position: { $ref: "#/components/schemas/Position", nullable: true }
+        skillLevel: { type: integer, minimum: 1, maximum: 5 }
+        bio: { type: string, nullable: true }
+        avatarUrl: { type: string, nullable: true }
+    CareerStats:
+      type: object
+      properties:
+        appearances: { type: integer }
+        goals: { type: integer }
+        assists: { type: integer }
+        yellowCards: { type: integer }
+        redCards: { type: integer }
+        minutesPlayed: { type: integer }
+    Venue:
+      type: object
+      properties:
+        id: { type: string, format: uuid }
+        name: { type: string }
+        address: { type: string, nullable: true }
+        city: { type: string, nullable: true }
+        latitude: { type: number, nullable: true }
+        longitude: { type: number, nullable: true }
+        surface: { $ref: "#/components/schemas/Surface", nullable: true }
+        createdAt: { type: string, format: date-time }
+    CreateVenueRequest:
+      type: object
+      required: [name]
+      properties:
+        name: { type: string }
+        address: { type: string }
+        city: { type: string }
+        latitude: { type: number }
+        longitude: { type: number }
+        surface: { $ref: "#/components/schemas/Surface" }
+    Match:
+      type: object
+      properties:
+        id: { type: string, format: uuid }
+        title: { type: string }
+        description: { type: string, nullable: true }
+        format: { type: string }
+        maxPlayers: { type: integer }
+        kickoffAt: { type: string, format: date-time }
+        durationMin: { type: integer }
+        status: { $ref: "#/components/schemas/MatchStatus" }
+        hostId: { type: string, format: uuid }
+        venueId: { type: string, format: uuid, nullable: true }
+        goingCount: { type: integer }
+        spotsLeft: { type: integer }
+        createdAt: { type: string, format: date-time }
+    Rsvp:
+      type: object
+      properties:
+        id: { type: string, format: uuid }
+        status: { $ref: "#/components/schemas/RsvpStatus" }
+        createdAt: { type: string, format: date-time }
+        user: { $ref: "#/components/schemas/PublicUser" }
+    MatchDetail:
+      allOf:
+        - $ref: "#/components/schemas/Match"
+        - type: object
+          properties:
+            rsvps:
+              type: array
+              items: { $ref: "#/components/schemas/Rsvp" }
+    CreateMatchRequest:
+      type: object
+      required: [title, format, maxPlayers, kickoffAt]
+      properties:
+        title: { type: string }
+        description: { type: string }
+        format: { type: string, example: "5v5" }
+        maxPlayers: { type: integer, minimum: 2, maximum: 40 }
+        kickoffAt: { type: string, format: date-time }
+        durationMin: { type: integer }
+        venueId: { type: string, format: uuid }
+    UpdateMatchRequest:
+      type: object
+      properties:
+        title: { type: string }
+        description: { type: string, nullable: true }
+        format: { type: string }
+        maxPlayers: { type: integer }
+        kickoffAt: { type: string, format: date-time }
+        durationMin: { type: integer }
+        venueId: { type: string, format: uuid, nullable: true }
+        status: { $ref: "#/components/schemas/MatchStatus" }
+    Team:
+      type: object
+      properties:
+        id: { type: string, format: uuid }
+        name: { type: string }
+        crestUrl: { type: string, nullable: true }
+        ownerId: { type: string, format: uuid }
+        memberCount: { type: integer }
+        createdAt: { type: string, format: date-time }
+    TeamMember:
+      type: object
+      properties:
+        id: { type: string, format: uuid }
+        role: { $ref: "#/components/schemas/TeamRole" }
+        jerseyNumber: { type: integer, nullable: true }
+        joinedAt: { type: string, format: date-time }
+        user: { $ref: "#/components/schemas/PublicUser" }
+    TeamDetail:
+      allOf:
+        - $ref: "#/components/schemas/Team"
+        - type: object
+          properties:
+            members:
+              type: array
+              items: { $ref: "#/components/schemas/TeamMember" }
+    CreateTeamRequest:
+      type: object
+      required: [name]
+      properties:
+        name: { type: string }
+        crestUrl: { type: string }
+    UpdateTeamRequest:
+      type: object
+      properties:
+        name: { type: string }
+        crestUrl: { type: string, nullable: true }
+    AddMemberRequest:
+      type: object
+      required: [userId]
+      properties:
+        userId: { type: string, format: uuid }
+        role: { type: string, enum: [CAPTAIN, PLAYER] }
+        jerseyNumber: { type: integer }
+    League:
+      type: object
+      properties:
+        id: { type: string, format: uuid }
+        name: { type: string }
+        season: { type: string }
+        teamCount: { type: integer }
+        createdAt: { type: string, format: date-time }
+    CreateLeagueRequest:
+      type: object
+      required: [name, season]
+      properties:
+        name: { type: string }
+        season: { type: string }
+    Fixture:
+      type: object
+      properties:
+        id: { type: string, format: uuid }
+        leagueId: { type: string, format: uuid }
+        homeTeamId: { type: string, format: uuid }
+        awayTeamId: { type: string, format: uuid }
+        homeTeamName: { type: string }
+        awayTeamName: { type: string }
+        kickoffAt: { type: string, format: date-time }
+        homeScore: { type: integer, nullable: true }
+        awayScore: { type: integer, nullable: true }
+        status: { $ref: "#/components/schemas/MatchStatus" }
+    CreateFixtureRequest:
+      type: object
+      required: [homeTeamId, awayTeamId, kickoffAt]
+      properties:
+        homeTeamId: { type: string, format: uuid }
+        awayTeamId: { type: string, format: uuid }
+        kickoffAt: { type: string, format: date-time }
+    RecordResultRequest:
+      type: object
+      required: [homeScore, awayScore]
+      properties:
+        homeScore: { type: integer, minimum: 0 }
+        awayScore: { type: integer, minimum: 0 }
+    StandingRow:
+      type: object
+      properties:
+        teamId: { type: string, format: uuid }
+        teamName: { type: string }
+        played: { type: integer }
+        won: { type: integer }
+        drawn: { type: integer }
+        lost: { type: integer }
+        goalsFor: { type: integer }
+        goalsAgainst: { type: integer }
+        goalDifference: { type: integer }
+        points: { type: integer }
+    PlayerStat:
+      type: object
+      properties:
+        id: { type: string, format: uuid }
+        userId: { type: string, format: uuid }
+        matchId: { type: string, format: uuid, nullable: true }
+        fixtureId: { type: string, format: uuid, nullable: true }
+        goals: { type: integer }
+        assists: { type: integer }
+        yellowCards: { type: integer }
+        redCards: { type: integer }
+        minutesPlayed: { type: integer }
+        user: { $ref: "#/components/schemas/PublicUser" }
+    RecordStatRequest:
+      type: object
+      required: [userId]
+      properties:
+        userId: { type: string, format: uuid }
+        goals: { type: integer, minimum: 0 }
+        assists: { type: integer, minimum: 0 }
+        yellowCards: { type: integer, minimum: 0 }
+        redCards: { type: integer, minimum: 0 }
+        minutesPlayed: { type: integer, minimum: 0 }

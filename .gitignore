@@ -1,0 +1,15 @@
+# Binaries
+/bin/
+soccerkit-api
+*.exe
+
+# Env
+.env
+.env.local
+
+# OS / editor
+.DS_Store
+
+# Go test/coverage
+*.out
+coverage.txt
