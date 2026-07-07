@@ -16,29 +16,40 @@ type Querier interface {
 	// The moat query: cross-instance aggregation of scored fields for one athlete,
 	// optionally scoped to a context. Powers readiness means, effort trends, etc.
 	AggregateScoresForPerson(ctx context.Context, arg AggregateScoresForPersonParams) ([]AggregateScoresForPersonRow, error)
+	// Drills --------------------------------------------------------------------
+	CreateDrill(ctx context.Context, arg CreateDrillParams) (Drill, error)
 	CreateFormAnswer(ctx context.Context, arg CreateFormAnswerParams) (FormAnswer, error)
 	CreateFormField(ctx context.Context, arg CreateFormFieldParams) (FormField, error)
 	// Instances & answers -------------------------------------------------------
 	CreateFormInstance(ctx context.Context, arg CreateFormInstanceParams) (FormInstance, error)
 	// Templates ----------------------------------------------------------------
 	CreateFormTemplate(ctx context.Context, arg CreateFormTemplateParams) (FormTemplate, error)
+	// Games (game day) ----------------------------------------------------------
+	CreateGame(ctx context.Context, arg CreateGameParams) (Game, error)
 	CreateGuardianship(ctx context.Context, arg CreateGuardianshipParams) (Guardianship, error)
 	CreateMembership(ctx context.Context, arg CreateMembershipParams) (Membership, error)
 	CreateOrganization(ctx context.Context, arg CreateOrganizationParams) (Organization, error)
 	CreatePerson(ctx context.Context, arg CreatePersonParams) (Person, error)
 	CreateRefreshToken(ctx context.Context, arg CreateRefreshTokenParams) (RefreshToken, error)
+	// Sessions ------------------------------------------------------------------
+	CreateSession(ctx context.Context, arg CreateSessionParams) (Session, error)
+	CreateSessionBlock(ctx context.Context, arg CreateSessionBlockParams) (SessionBlock, error)
 	CreateTeam(ctx context.Context, arg CreateTeamParams) (Team, error)
 	CreateUserAccount(ctx context.Context, arg CreateUserAccountParams) (UserAccount, error)
+	DeleteSession(ctx context.Context, id uuid.UUID) error
 	DeleteTeam(ctx context.Context, id uuid.UUID) error
 	EndRosterMembership(ctx context.Context, arg EndRosterMembershipParams) (RosterMembership, error)
 	GetActiveRosterMembership(ctx context.Context, arg GetActiveRosterMembershipParams) (RosterMembership, error)
+	GetDrill(ctx context.Context, id uuid.UUID) (Drill, error)
 	GetFormFieldByKey(ctx context.Context, arg GetFormFieldByKeyParams) (FormField, error)
 	GetFormInstance(ctx context.Context, id uuid.UUID) (FormInstance, error)
 	GetFormTemplate(ctx context.Context, id uuid.UUID) (FormTemplate, error)
+	GetGame(ctx context.Context, id uuid.UUID) (Game, error)
 	GetOrganization(ctx context.Context, id uuid.UUID) (Organization, error)
 	GetPerson(ctx context.Context, id uuid.UUID) (Person, error)
 	GetRefreshToken(ctx context.Context, token string) (RefreshToken, error)
 	GetRosterMembership(ctx context.Context, id uuid.UUID) (RosterMembership, error)
+	GetSession(ctx context.Context, id uuid.UUID) (Session, error)
 	GetTeam(ctx context.Context, id uuid.UUID) (Team, error)
 	GetUserAccountByEmail(ctx context.Context, email string) (UserAccount, error)
 	GetUserAccountByID(ctx context.Context, id uuid.UUID) (UserAccount, error)
@@ -46,15 +57,20 @@ type Querier interface {
 	ListActiveRoster(ctx context.Context, teamID uuid.UUID) ([]ListActiveRosterRow, error)
 	ListAnswersForInstance(ctx context.Context, instanceID uuid.UUID) ([]ListAnswersForInstanceRow, error)
 	ListChildren(ctx context.Context, guardianPersonID uuid.UUID) ([]Person, error)
+	ListDrillsInOrg(ctx context.Context, organizationID uuid.UUID) ([]Drill, error)
 	ListFormFields(ctx context.Context, templateID uuid.UUID) ([]FormField, error)
 	ListFormTemplates(ctx context.Context, arg ListFormTemplatesParams) ([]FormTemplate, error)
+	ListGamesForTeam(ctx context.Context, teamID uuid.UUID) ([]Game, error)
 	ListInstancesForPerson(ctx context.Context, arg ListInstancesForPersonParams) ([]ListInstancesForPersonRow, error)
 	ListMembershipsForPerson(ctx context.Context, personID uuid.UUID) ([]ListMembershipsForPersonRow, error)
 	ListRolesInOrg(ctx context.Context, arg ListRolesInOrgParams) ([]string, error)
+	ListSessionBlocks(ctx context.Context, sessionID uuid.UUID) ([]ListSessionBlocksRow, error)
+	ListSessionsInOrg(ctx context.Context, arg ListSessionsInOrgParams) ([]Session, error)
 	ListTeamsForPerson(ctx context.Context, personID uuid.UUID) ([]ListTeamsForPersonRow, error)
 	ListTeamsInOrg(ctx context.Context, organizationID uuid.UUID) ([]ListTeamsInOrgRow, error)
 	RevokeRefreshToken(ctx context.Context, id uuid.UUID) error
 	RevokeRefreshTokenByToken(ctx context.Context, token string) error
+	UpdateGame(ctx context.Context, arg UpdateGameParams) (Game, error)
 	UpdatePerson(ctx context.Context, arg UpdatePersonParams) (Person, error)
 	UpdateTeam(ctx context.Context, arg UpdateTeamParams) (Team, error)
 }

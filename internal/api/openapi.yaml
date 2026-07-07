@@ -321,6 +321,149 @@ paths:
               schema: { $ref: "#/components/schemas/FormInstance" }
         "404": { $ref: "#/components/responses/Error" }
 
+  /api/v1/drills:
+    get:
+      tags: [content]
+      summary: List drills in your organization
+      security: [{ bearerAuth: [] }]
+      parameters: [{ $ref: "#/components/parameters/OrgHeader" }]
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema: { type: array, items: { $ref: "#/components/schemas/Drill" } }
+    post:
+      tags: [content]
+      summary: Create a drill
+      security: [{ bearerAuth: [] }]
+      parameters: [{ $ref: "#/components/parameters/OrgHeader" }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [name]
+              properties:
+                name: { type: string }
+                description: { type: string }
+      responses:
+        "201":
+          description: Created
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Drill" }
+
+  /api/v1/sessions:
+    get:
+      tags: [content]
+      summary: List training sessions
+      security: [{ bearerAuth: [] }]
+      parameters:
+        - { $ref: "#/components/parameters/OrgHeader" }
+        - { in: query, name: teamId, schema: { type: string, format: uuid } }
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema: { type: array, items: { $ref: "#/components/schemas/Session" } }
+    post:
+      tags: [content]
+      summary: Create a training session with blocks
+      security: [{ bearerAuth: [] }]
+      parameters: [{ $ref: "#/components/parameters/OrgHeader" }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/CreateSessionRequest" }
+      responses:
+        "201":
+          description: Created
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Session" }
+  /api/v1/sessions/{id}:
+    get:
+      tags: [content]
+      summary: Get a session with its blocks
+      security: [{ bearerAuth: [] }]
+      parameters: [{ $ref: "#/components/parameters/Id" }]
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Session" }
+        "404": { $ref: "#/components/responses/Error" }
+    delete:
+      tags: [content]
+      summary: Delete a session
+      security: [{ bearerAuth: [] }]
+      parameters: [{ $ref: "#/components/parameters/Id" }]
+      responses:
+        "200": { $ref: "#/components/responses/Ok" }
+
+  /api/v1/teams/{id}/games:
+    get:
+      tags: [games]
+      summary: List a team's games
+      security: [{ bearerAuth: [] }]
+      parameters: [{ $ref: "#/components/parameters/Id" }]
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema: { type: array, items: { $ref: "#/components/schemas/Game" } }
+    post:
+      tags: [games]
+      summary: Schedule a game
+      security: [{ bearerAuth: [] }]
+      parameters: [{ $ref: "#/components/parameters/Id" }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/CreateGameRequest" }
+      responses:
+        "201":
+          description: Created
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Game" }
+  /api/v1/games/{id}:
+    get:
+      tags: [games]
+      summary: Get a game
+      security: [{ bearerAuth: [] }]
+      parameters: [{ $ref: "#/components/parameters/Id" }]
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Game" }
+        "404": { $ref: "#/components/responses/Error" }
+    patch:
+      tags: [games]
+      summary: Update a game (record kickoff, status, and result)
+      security: [{ bearerAuth: [] }]
+      parameters: [{ $ref: "#/components/parameters/Id" }]
+      requestBody:
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/UpdateGameRequest" }
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Game" }
+        "400": { $ref: "#/components/responses/Error" }
+
 components:
   securitySchemes:
     bearerAuth: { type: http, scheme: bearer, bearerFormat: JWT }
@@ -565,3 +708,76 @@ components:
         average: { type: number }
         minimum: { type: number }
         maximum: { type: number }
+    Drill:
+      type: object
+      properties:
+        id: { type: string, format: uuid }
+        name: { type: string }
+        description: { type: string, nullable: true }
+        createdAt: { type: string, format: date-time }
+    SessionBlock:
+      type: object
+      properties:
+        id: { type: string, format: uuid }
+        title: { type: string }
+        drillId: { type: string, format: uuid, nullable: true }
+        drillName: { type: string, nullable: true }
+        durationMin: { type: integer, nullable: true }
+        position: { type: integer }
+        notes: { type: string, nullable: true }
+    Session:
+      type: object
+      properties:
+        id: { type: string, format: uuid }
+        teamId: { type: string, format: uuid, nullable: true }
+        title: { type: string }
+        scheduledAt: { type: string, format: date-time, nullable: true }
+        notes: { type: string, nullable: true }
+        createdAt: { type: string, format: date-time }
+        blocks: { type: array, items: { $ref: "#/components/schemas/SessionBlock" } }
+    CreateSessionRequest:
+      type: object
+      required: [title]
+      properties:
+        title: { type: string }
+        teamId: { type: string, format: uuid }
+        scheduledAt: { type: string, format: date-time }
+        notes: { type: string }
+        blocks:
+          type: array
+          items:
+            type: object
+            required: [title]
+            properties:
+              title: { type: string }
+              drillId: { type: string, format: uuid }
+              durationMin: { type: integer }
+              notes: { type: string }
+    Game:
+      type: object
+      properties:
+        id: { type: string, format: uuid }
+        teamId: { type: string, format: uuid }
+        opponent: { type: string, nullable: true }
+        kickoffAt: { type: string, format: date-time, nullable: true }
+        homeAway: { type: string, enum: [home, away, neutral], nullable: true }
+        ourScore: { type: integer, nullable: true }
+        opponentScore: { type: integer, nullable: true }
+        status: { type: string, enum: [scheduled, in_progress, completed, cancelled] }
+        createdAt: { type: string, format: date-time }
+    CreateGameRequest:
+      type: object
+      properties:
+        opponent: { type: string }
+        kickoffAt: { type: string, format: date-time }
+        homeAway: { type: string, enum: [home, away, neutral] }
+    UpdateGameRequest:
+      type: object
+      description: Send ourScore and opponentScore together to record a result.
+      properties:
+        opponent: { type: string, nullable: true }
+        kickoffAt: { type: string, format: date-time }
+        homeAway: { type: string, enum: [home, away, neutral], nullable: true }
+        ourScore: { type: integer }
+        opponentScore: { type: integer }
+        status: { type: string, enum: [scheduled, in_progress, completed, cancelled] }

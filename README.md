@@ -43,10 +43,11 @@ exist in the schema now:
 | **persons** | `POST /persons` (add an athlete), `GET /persons/:id`, `GET /persons/:id/instances`, `GET /persons/:id/aggregate` |
 | **teams** | `GET/POST /teams`, `GET/DELETE /teams/:id`, `POST /teams/:id/roster`, `DELETE /teams/:id/roster/:personId` |
 | **evaluation** | `GET/POST /templates`, `GET /templates/:id`, `POST /form-instances`, `GET /form-instances/:id` |
+| **content** | `GET/POST /drills`, `GET/POST /sessions`, `GET/DELETE /sessions/:id` (sessions carry ordered blocks that can reference drills) |
+| **game day** | `GET/POST /teams/:id/games`, `GET/PATCH /games/:id` (record kickoff, status, and result); post-game reports attach via a form instance's `contextRef` |
 
-**Next up (schema already present):** sessions & drills, game day, ShareGrant
-scopes (coach-to-coach + club library), the director tier, and parent/player
-self-service.
+**Next up (schema already present):** `ShareGrant` scopes (coach-to-coach +
+club library), the director tier, and parent/player self-service.
 
 ### The moat, concretely
 

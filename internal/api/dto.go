@@ -188,6 +188,83 @@ func instanceSummaryDTO(r store.ListInstancesForPersonRow) InstanceSummary {
 	}
 }
 
+// ---- content & game day --------------------------------------------------
+
+type Drill struct {
+	ID          uuid.UUID `json:"id"`
+	Name        string    `json:"name"`
+	Description *string   `json:"description"`
+	CreatedAt   string    `json:"createdAt"`
+}
+
+func drillDTO(d store.Drill) Drill {
+	return Drill{ID: d.ID, Name: d.Name, Description: d.Description, CreatedAt: rfc3339(d.CreatedAt)}
+}
+
+type SessionBlock struct {
+	ID          uuid.UUID  `json:"id"`
+	Title       string     `json:"title"`
+	DrillID     *uuid.UUID `json:"drillId"`
+	DrillName   *string    `json:"drillName"`
+	DurationMin *int32     `json:"durationMin"`
+	Position    int32      `json:"position"`
+	Notes       *string    `json:"notes"`
+}
+
+func sessionBlockRowDTO(b store.ListSessionBlocksRow) SessionBlock {
+	return SessionBlock{
+		ID: b.ID, Title: b.Title, DrillID: b.DrillID, DrillName: b.DrillName,
+		DurationMin: b.DurationMin, Position: b.Position, Notes: b.Notes,
+	}
+}
+
+type Session struct {
+	ID          uuid.UUID      `json:"id"`
+	TeamID      *uuid.UUID     `json:"teamId"`
+	Title       string         `json:"title"`
+	ScheduledAt *string        `json:"scheduledAt"`
+	Notes       *string        `json:"notes"`
+	CreatedAt   string         `json:"createdAt"`
+	Blocks      []SessionBlock `json:"blocks,omitempty"`
+}
+
+func sessionDTO(s store.Session, blocks []SessionBlock) Session {
+	var scheduled *string
+	if s.ScheduledAt.Valid {
+		v := rfc3339(s.ScheduledAt)
+		scheduled = &v
+	}
+	return Session{
+		ID: s.ID, TeamID: s.TeamID, Title: s.Title, ScheduledAt: scheduled,
+		Notes: s.Notes, CreatedAt: rfc3339(s.CreatedAt), Blocks: blocks,
+	}
+}
+
+type Game struct {
+	ID            uuid.UUID `json:"id"`
+	TeamID        uuid.UUID `json:"teamId"`
+	Opponent      *string   `json:"opponent"`
+	KickoffAt     *string   `json:"kickoffAt"`
+	HomeAway      *string   `json:"homeAway"`
+	OurScore      *int32    `json:"ourScore"`
+	OpponentScore *int32    `json:"opponentScore"`
+	Status        string    `json:"status"`
+	CreatedAt     string    `json:"createdAt"`
+}
+
+func gameDTO(g store.Game) Game {
+	var kickoff *string
+	if g.KickoffAt.Valid {
+		v := rfc3339(g.KickoffAt)
+		kickoff = &v
+	}
+	return Game{
+		ID: g.ID, TeamID: g.TeamID, Opponent: g.Opponent, KickoffAt: kickoff,
+		HomeAway: g.HomeAway, OurScore: g.OurScore, OpponentScore: g.OpponentScore,
+		Status: g.Status, CreatedAt: rfc3339(g.CreatedAt),
+	}
+}
+
 type ScoreAggregate struct {
 	Key     string  `json:"key"`
 	Label   string  `json:"label"`

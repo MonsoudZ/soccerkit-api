@@ -82,6 +82,25 @@ func (s *Server) Router() http.Handler {
 				r.Delete("/{id}", s.handleDeleteTeam)
 				r.Post("/{id}/roster", s.handleAddRoster)
 				r.Delete("/{id}/roster/{personId}", s.handleEndRoster)
+				// Game day
+				r.Get("/{id}/games", s.handleListGames)
+				r.Post("/{id}/games", s.handleCreateGame)
+			})
+			r.Route("/games", func(r chi.Router) {
+				r.Get("/{id}", s.handleGetGame)
+				r.Patch("/{id}", s.handleUpdateGame)
+			})
+
+			// Training content
+			r.Route("/drills", func(r chi.Router) {
+				r.Get("/", s.handleListDrills)
+				r.Post("/", s.handleCreateDrill)
+			})
+			r.Route("/sessions", func(r chi.Router) {
+				r.Get("/", s.handleListSessions)
+				r.Post("/", s.handleCreateSession)
+				r.Get("/{id}", s.handleGetSession)
+				r.Delete("/{id}", s.handleDeleteSession)
 			})
 
 			// Evaluation engine
