@@ -5,31 +5,61 @@ import (
 	"testing"
 )
 
-func TestRegisterAndMe(t *testing.T) {
+func TestRegisterCreatesIdentityGraph(t *testing.T) {
 	resetDB(t)
 
 	r := do(t, http.MethodPost, "/api/v1/auth/register", "", map[string]any{
-		"email": "New@Example.com", "password": "password123", "displayName": "New User",
+		"email": "Coach@Example.com", "password": "password123", "displayName": "Coach Kim",
 	})
 	if r.status != http.StatusCreated {
 		t.Fatalf("expected 201, got %d: %s", r.status, r.raw)
 	}
-	user := r.body["user"].(map[string]any)
-	if user["email"] != "new@example.com" {
-		t.Errorf("email should be lowercased, got %v", user["email"])
+	me := r.body["me"].(map[string]any)
+	person := me["person"].(map[string]any)
+	if person["displayName"] != "Coach Kim" {
+		t.Errorf("unexpected person: %v", person)
 	}
-	if _, leaked := user["passwordHash"]; leaked {
-		t.Error("passwordHash must not be exposed")
+	// Personal org with admin+director+coach memberships.
+	memberships := me["memberships"].([]any)
+	if len(memberships) != 3 {
+		t.Fatalf("expected 3 memberships (admin/director/coach), got %d", len(memberships))
 	}
-
-	token := r.body["accessToken"].(string)
-	me := do(t, http.MethodGet, "/api/v1/me", token, nil)
-	if me.status != http.StatusOK || me.body["email"] != "new@example.com" {
-		t.Fatalf("GET /me failed: %d %s", me.status, me.raw)
+	roles := map[string]bool{}
+	for _, m := range memberships {
+		roles[m.(map[string]any)["role"].(string)] = true
+	}
+	for _, want := range []string{"admin", "director", "coach"} {
+		if !roles[want] {
+			t.Errorf("missing role %q", want)
+		}
+	}
+	if r.body["accessToken"] == nil || r.body["refreshToken"] == nil {
+		t.Error("expected tokens")
 	}
 }
 
-func TestRegisterDuplicateAndValidation(t *testing.T) {
+func TestRegisterSeedsTemplates(t *testing.T) {
+	resetDB(t)
+	token, _ := registerUser(t, "seeded@e.com")
+
+	list := do(t, http.MethodGet, "/api/v1/templates", token, nil)
+	if list.status != http.StatusOK {
+		t.Fatalf("list templates: %d %s", list.status, list.raw)
+	}
+	templates := list.arr()
+	if len(templates) < 2 {
+		t.Fatalf("expected seeded pre/post-game templates, got %d", len(templates))
+	}
+	contexts := map[string]bool{}
+	for _, tpl := range templates {
+		contexts[tpl.(map[string]any)["context"].(string)] = true
+	}
+	if !contexts["pre_game"] || !contexts["post_game"] {
+		t.Errorf("expected pre_game and post_game seed templates, got %v", contexts)
+	}
+}
+
+func TestDuplicateEmailAndValidation(t *testing.T) {
 	resetDB(t)
 	payload := map[string]any{"email": "dup@e.com", "password": "password123", "displayName": "Dup"}
 	do(t, http.MethodPost, "/api/v1/auth/register", "", payload)
@@ -37,7 +67,6 @@ func TestRegisterDuplicateAndValidation(t *testing.T) {
 	if r := do(t, http.MethodPost, "/api/v1/auth/register", "", payload); r.status != http.StatusConflict {
 		t.Errorf("expected 409 on duplicate, got %d", r.status)
 	}
-
 	bad := do(t, http.MethodPost, "/api/v1/auth/register", "", map[string]any{
 		"email": "notanemail", "password": "short", "displayName": "Z",
 	})
@@ -46,44 +75,29 @@ func TestRegisterDuplicateAndValidation(t *testing.T) {
 	}
 }
 
-func TestLogin(t *testing.T) {
-	resetDB(t)
-	do(t, http.MethodPost, "/api/v1/auth/register", "", map[string]any{
-		"email": "log@e.com", "password": "password123", "displayName": "Log",
-	})
-
-	ok := do(t, http.MethodPost, "/api/v1/auth/login", "", map[string]any{
-		"email": "log@e.com", "password": "password123",
-	})
-	if ok.status != http.StatusOK || ok.body["accessToken"] == nil {
-		t.Fatalf("valid login failed: %d %s", ok.status, ok.raw)
-	}
-
-	bad := do(t, http.MethodPost, "/api/v1/auth/login", "", map[string]any{
-		"email": "log@e.com", "password": "wrongpassword",
-	})
-	if bad.status != http.StatusUnauthorized {
-		t.Errorf("expected 401 on bad password, got %d", bad.status)
-	}
-}
-
-func TestRefreshRotation(t *testing.T) {
+func TestLoginAndRefreshRotation(t *testing.T) {
 	resetDB(t)
 	reg := do(t, http.MethodPost, "/api/v1/auth/register", "", map[string]any{
-		"email": "rot@e.com", "password": "password123", "displayName": "Rot",
+		"email": "log@e.com", "password": "password123", "displayName": "Log",
 	})
 	refresh := reg.body["refreshToken"].(string)
 
-	first := do(t, http.MethodPost, "/api/v1/auth/refresh", "", map[string]any{"refreshToken": refresh})
-	if first.status != http.StatusOK {
-		t.Fatalf("first refresh failed: %d %s", first.status, first.raw)
+	if ok := do(t, http.MethodPost, "/api/v1/auth/login", "", map[string]any{
+		"email": "log@e.com", "password": "password123",
+	}); ok.status != http.StatusOK || ok.body["accessToken"] == nil {
+		t.Fatalf("valid login failed: %d %s", ok.status, ok.raw)
 	}
-	if first.body["refreshToken"] == refresh {
-		t.Error("refresh token should rotate")
+	if bad := do(t, http.MethodPost, "/api/v1/auth/login", "", map[string]any{
+		"email": "log@e.com", "password": "wrongpassword",
+	}); bad.status != http.StatusUnauthorized {
+		t.Errorf("expected 401 on bad password, got %d", bad.status)
 	}
 
-	reuse := do(t, http.MethodPost, "/api/v1/auth/refresh", "", map[string]any{"refreshToken": refresh})
-	if reuse.status != http.StatusUnauthorized {
+	first := do(t, http.MethodPost, "/api/v1/auth/refresh", "", map[string]any{"refreshToken": refresh})
+	if first.status != http.StatusOK || first.body["refreshToken"] == refresh {
+		t.Fatalf("refresh should rotate: %d %s", first.status, first.raw)
+	}
+	if reuse := do(t, http.MethodPost, "/api/v1/auth/refresh", "", map[string]any{"refreshToken": refresh}); reuse.status != http.StatusUnauthorized {
 		t.Errorf("reusing rotated token should 401, got %d", reuse.status)
 	}
 }

@@ -15,7 +15,7 @@ import (
 
 type ctxKey string
 
-const userIDKey ctxKey = "userID"
+const personIDKey ctxKey = "personID"
 
 // --- password hashing -----------------------------------------------------
 
@@ -29,11 +29,14 @@ func verifyPassword(plain, hash string) bool {
 }
 
 // --- access tokens (JWT) --------------------------------------------------
+// The access token identifies a Person (the authenticated human). Org and role
+// are resolved per-request from memberships, not baked into the token, so a
+// person who gains/loses a role or org doesn't need to re-authenticate.
 
-func (s *Server) signAccessToken(userID uuid.UUID, email string) (string, error) {
+func (s *Server) signAccessToken(personID uuid.UUID, email string) (string, error) {
 	now := time.Now()
 	claims := jwt.MapClaims{
-		"sub":   userID.String(),
+		"sub":   personID.String(),
 		"email": email,
 		"iat":   now.Unix(),
 		"exp":   now.Add(s.cfg.JWTAccessTTL).Unix(),
@@ -79,20 +82,73 @@ func (s *Server) requireAuth(next http.Handler) http.Handler {
 			writeError(w, errUnauthorized("Authentication required"))
 			return
 		}
-		userID, err := s.parseAccessToken(strings.TrimPrefix(header, "Bearer "))
+		personID, err := s.parseAccessToken(strings.TrimPrefix(header, "Bearer "))
 		if err != nil {
 			writeError(w, errUnauthorized("Invalid or expired access token"))
 			return
 		}
-		ctx := context.WithValue(r.Context(), userIDKey, userID)
+		ctx := context.WithValue(r.Context(), personIDKey, personID)
 		next.ServeHTTP(w, r.WithContext(ctx))
 	})
 }
 
-// userID extracts the authenticated user id set by requireAuth.
-func userIDFrom(ctx context.Context) uuid.UUID {
-	if id, ok := ctx.Value(userIDKey).(uuid.UUID); ok {
+// personIDFrom returns the authenticated person's id set by requireAuth.
+func personIDFrom(ctx context.Context) uuid.UUID {
+	if id, ok := ctx.Value(personIDKey).(uuid.UUID); ok {
 		return id
 	}
 	return uuid.Nil
+}
+
+// orgContext resolves the organization the caller is acting in for this request
+// and the roles they hold there. The org is taken from the X-Organization-ID
+// header when present (and validated against membership); otherwise it falls
+// back to the caller's single/first org — the common solo-coach case.
+type orgContext struct {
+	orgID uuid.UUID
+	roles map[string]bool
+}
+
+func (o orgContext) hasAnyRole(roles ...string) bool {
+	for _, r := range roles {
+		if o.roles[r] {
+			return true
+		}
+	}
+	return false
+}
+
+func (s *Server) resolveOrg(r *http.Request) (orgContext, error) {
+	personID := personIDFrom(r.Context())
+	memberships, err := s.store.ListMembershipsForPerson(r.Context(), personID)
+	if err != nil {
+		return orgContext{}, err
+	}
+	if len(memberships) == 0 {
+		return orgContext{}, errForbidden("you do not belong to any organization")
+	}
+
+	var chosen uuid.UUID
+	if h := r.Header.Get("X-Organization-ID"); h != "" {
+		id, perr := uuid.Parse(h)
+		if perr != nil {
+			return orgContext{}, errBadRequest("invalid X-Organization-ID header")
+		}
+		chosen = id
+	} else {
+		chosen = memberships[0].OrganizationID
+	}
+
+	roles := map[string]bool{}
+	found := false
+	for _, m := range memberships {
+		if m.OrganizationID == chosen {
+			roles[m.Role] = true
+			found = true
+		}
+	}
+	if !found {
+		return orgContext{}, errForbidden("you are not a member of that organization")
+	}
+	return orgContext{orgID: chosen, roles: roles}, nil
 }

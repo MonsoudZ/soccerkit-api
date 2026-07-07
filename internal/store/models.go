@@ -9,117 +9,185 @@ import (
 	"github.com/jackc/pgx/v5/pgtype"
 )
 
-type Fixture struct {
-	ID         uuid.UUID          `json:"id"`
-	LeagueID   uuid.UUID          `json:"league_id"`
-	HomeTeamID uuid.UUID          `json:"home_team_id"`
-	AwayTeamID uuid.UUID          `json:"away_team_id"`
-	KickoffAt  pgtype.Timestamptz `json:"kickoff_at"`
-	HomeScore  *int32             `json:"home_score"`
-	AwayScore  *int32             `json:"away_score"`
-	Status     string             `json:"status"`
-	CreatedAt  pgtype.Timestamptz `json:"created_at"`
-	UpdatedAt  pgtype.Timestamptz `json:"updated_at"`
+type Drill struct {
+	ID             uuid.UUID          `json:"id"`
+	OrganizationID uuid.UUID          `json:"organization_id"`
+	AuthorPersonID *uuid.UUID         `json:"author_person_id"`
+	Name           string             `json:"name"`
+	Description    *string            `json:"description"`
+	CreatedAt      pgtype.Timestamptz `json:"created_at"`
+	UpdatedAt      pgtype.Timestamptz `json:"updated_at"`
 }
 
-type League struct {
+type FormAnswer struct {
+	ID           uuid.UUID `json:"id"`
+	InstanceID   uuid.UUID `json:"instance_id"`
+	FieldID      uuid.UUID `json:"field_id"`
+	NumericValue *float64  `json:"numeric_value"`
+	BoolValue    *bool     `json:"bool_value"`
+	TextValue    *string   `json:"text_value"`
+}
+
+type FormField struct {
+	ID         uuid.UUID `json:"id"`
+	TemplateID uuid.UUID `json:"template_id"`
+	Key        string    `json:"key"`
+	Label      string    `json:"label"`
+	Kind       string    `json:"kind"`
+	Position   int32     `json:"position"`
+	Config     []byte    `json:"config"`
+}
+
+type FormInstance struct {
+	ID                  uuid.UUID          `json:"id"`
+	TemplateID          uuid.UUID          `json:"template_id"`
+	SubjectPersonID     *uuid.UUID         `json:"subject_person_id"`
+	SubjectTeamID       *uuid.UUID         `json:"subject_team_id"`
+	ContextRefType      *string            `json:"context_ref_type"`
+	ContextRefID        *uuid.UUID         `json:"context_ref_id"`
+	SubmittedByPersonID *uuid.UUID         `json:"submitted_by_person_id"`
+	SubmittedAt         pgtype.Timestamptz `json:"submitted_at"`
+	Extra               []byte             `json:"extra"`
+	CreatedAt           pgtype.Timestamptz `json:"created_at"`
+}
+
+type FormTemplate struct {
+	ID             uuid.UUID          `json:"id"`
+	OrganizationID *uuid.UUID         `json:"organization_id"`
+	AuthorPersonID *uuid.UUID         `json:"author_person_id"`
+	Context        string             `json:"context"`
+	Name           string             `json:"name"`
+	SubjectType    string             `json:"subject_type"`
+	Version        int32              `json:"version"`
+	IsSeed         bool               `json:"is_seed"`
+	CreatedAt      pgtype.Timestamptz `json:"created_at"`
+	UpdatedAt      pgtype.Timestamptz `json:"updated_at"`
+}
+
+type Game struct {
+	ID             uuid.UUID          `json:"id"`
+	OrganizationID uuid.UUID          `json:"organization_id"`
+	TeamID         uuid.UUID          `json:"team_id"`
+	Opponent       *string            `json:"opponent"`
+	KickoffAt      pgtype.Timestamptz `json:"kickoff_at"`
+	HomeAway       *string            `json:"home_away"`
+	OurScore       *int32             `json:"our_score"`
+	OpponentScore  *int32             `json:"opponent_score"`
+	Status         string             `json:"status"`
+	CreatedAt      pgtype.Timestamptz `json:"created_at"`
+	UpdatedAt      pgtype.Timestamptz `json:"updated_at"`
+}
+
+type Guardianship struct {
+	ID               uuid.UUID          `json:"id"`
+	GuardianPersonID uuid.UUID          `json:"guardian_person_id"`
+	ChildPersonID    uuid.UUID          `json:"child_person_id"`
+	CreatedAt        pgtype.Timestamptz `json:"created_at"`
+}
+
+type Membership struct {
+	ID             uuid.UUID          `json:"id"`
+	PersonID       uuid.UUID          `json:"person_id"`
+	OrganizationID uuid.UUID          `json:"organization_id"`
+	Role           string             `json:"role"`
+	CreatedAt      pgtype.Timestamptz `json:"created_at"`
+}
+
+type Organization struct {
 	ID        uuid.UUID          `json:"id"`
 	Name      string             `json:"name"`
-	Season    string             `json:"season"`
-	CreatedAt pgtype.Timestamptz `json:"created_at"`
-}
-
-type LeagueTeam struct {
-	ID       uuid.UUID `json:"id"`
-	LeagueID uuid.UUID `json:"league_id"`
-	TeamID   uuid.UUID `json:"team_id"`
-}
-
-type Match struct {
-	ID          uuid.UUID          `json:"id"`
-	HostID      uuid.UUID          `json:"host_id"`
-	VenueID     *uuid.UUID         `json:"venue_id"`
-	Title       string             `json:"title"`
-	Description *string            `json:"description"`
-	Format      string             `json:"format"`
-	MaxPlayers  int32              `json:"max_players"`
-	KickoffAt   pgtype.Timestamptz `json:"kickoff_at"`
-	DurationMin int32              `json:"duration_min"`
-	Status      string             `json:"status"`
-	CreatedAt   pgtype.Timestamptz `json:"created_at"`
-	UpdatedAt   pgtype.Timestamptz `json:"updated_at"`
-}
-
-type MatchRsvp struct {
-	ID        uuid.UUID          `json:"id"`
-	MatchID   uuid.UUID          `json:"match_id"`
-	UserID    uuid.UUID          `json:"user_id"`
-	Status    string             `json:"status"`
+	Kind      string             `json:"kind"`
 	CreatedAt pgtype.Timestamptz `json:"created_at"`
 	UpdatedAt pgtype.Timestamptz `json:"updated_at"`
 }
 
-type PlayerMatchStat struct {
-	ID            uuid.UUID          `json:"id"`
-	UserID        uuid.UUID          `json:"user_id"`
-	MatchID       *uuid.UUID         `json:"match_id"`
-	FixtureID     *uuid.UUID         `json:"fixture_id"`
-	Goals         int32              `json:"goals"`
-	Assists       int32              `json:"assists"`
-	YellowCards   int32              `json:"yellow_cards"`
-	RedCards      int32              `json:"red_cards"`
-	MinutesPlayed int32              `json:"minutes_played"`
-	CreatedAt     pgtype.Timestamptz `json:"created_at"`
-	UpdatedAt     pgtype.Timestamptz `json:"updated_at"`
+type Person struct {
+	ID                    uuid.UUID          `json:"id"`
+	DisplayName           string             `json:"display_name"`
+	GivenName             *string            `json:"given_name"`
+	FamilyName            *string            `json:"family_name"`
+	Birthdate             pgtype.Date        `json:"birthdate"`
+	Email                 *string            `json:"email"`
+	Phone                 *string            `json:"phone"`
+	EmergencyContactName  *string            `json:"emergency_contact_name"`
+	EmergencyContactPhone *string            `json:"emergency_contact_phone"`
+	MedicalNotes          *string            `json:"medical_notes"`
+	CreatedAt             pgtype.Timestamptz `json:"created_at"`
+	UpdatedAt             pgtype.Timestamptz `json:"updated_at"`
 }
 
 type RefreshToken struct {
-	ID        uuid.UUID          `json:"id"`
-	Token     string             `json:"token"`
-	UserID    uuid.UUID          `json:"user_id"`
-	ExpiresAt pgtype.Timestamptz `json:"expires_at"`
-	RevokedAt pgtype.Timestamptz `json:"revoked_at"`
-	CreatedAt pgtype.Timestamptz `json:"created_at"`
+	ID            uuid.UUID          `json:"id"`
+	Token         string             `json:"token"`
+	UserAccountID uuid.UUID          `json:"user_account_id"`
+	ExpiresAt     pgtype.Timestamptz `json:"expires_at"`
+	RevokedAt     pgtype.Timestamptz `json:"revoked_at"`
+	CreatedAt     pgtype.Timestamptz `json:"created_at"`
 }
 
-type Team struct {
-	ID        uuid.UUID          `json:"id"`
-	Name      string             `json:"name"`
-	CrestUrl  *string            `json:"crest_url"`
-	OwnerID   uuid.UUID          `json:"owner_id"`
-	CreatedAt pgtype.Timestamptz `json:"created_at"`
-	UpdatedAt pgtype.Timestamptz `json:"updated_at"`
-}
-
-type TeamMember struct {
+type RosterMembership struct {
 	ID           uuid.UUID          `json:"id"`
+	PersonID     uuid.UUID          `json:"person_id"`
 	TeamID       uuid.UUID          `json:"team_id"`
-	UserID       uuid.UUID          `json:"user_id"`
-	Role         string             `json:"role"`
 	JerseyNumber *int32             `json:"jersey_number"`
-	JoinedAt     pgtype.Timestamptz `json:"joined_at"`
-}
-
-type User struct {
-	ID           uuid.UUID          `json:"id"`
-	Email        string             `json:"email"`
-	PasswordHash string             `json:"password_hash"`
-	DisplayName  string             `json:"display_name"`
 	Position     *string            `json:"position"`
-	SkillLevel   int32              `json:"skill_level"`
-	Bio          *string            `json:"bio"`
-	AvatarUrl    *string            `json:"avatar_url"`
+	JoinedOn     pgtype.Date        `json:"joined_on"`
+	LeftOn       pgtype.Date        `json:"left_on"`
+	Status       string             `json:"status"`
 	CreatedAt    pgtype.Timestamptz `json:"created_at"`
 	UpdatedAt    pgtype.Timestamptz `json:"updated_at"`
 }
 
-type Venue struct {
-	ID        uuid.UUID          `json:"id"`
-	Name      string             `json:"name"`
-	Address   *string            `json:"address"`
-	City      *string            `json:"city"`
-	Latitude  *float64           `json:"latitude"`
-	Longitude *float64           `json:"longitude"`
-	Surface   *string            `json:"surface"`
-	CreatedAt pgtype.Timestamptz `json:"created_at"`
+type Session struct {
+	ID             uuid.UUID          `json:"id"`
+	OrganizationID uuid.UUID          `json:"organization_id"`
+	AuthorPersonID *uuid.UUID         `json:"author_person_id"`
+	TeamID         *uuid.UUID         `json:"team_id"`
+	Title          string             `json:"title"`
+	ScheduledAt    pgtype.Timestamptz `json:"scheduled_at"`
+	Notes          *string            `json:"notes"`
+	CreatedAt      pgtype.Timestamptz `json:"created_at"`
+	UpdatedAt      pgtype.Timestamptz `json:"updated_at"`
+}
+
+type SessionBlock struct {
+	ID          uuid.UUID  `json:"id"`
+	SessionID   uuid.UUID  `json:"session_id"`
+	DrillID     *uuid.UUID `json:"drill_id"`
+	Title       string     `json:"title"`
+	DurationMin *int32     `json:"duration_min"`
+	Position    int32      `json:"position"`
+	Notes       *string    `json:"notes"`
+}
+
+type ShareGrant struct {
+	ID                uuid.UUID          `json:"id"`
+	ShareableType     string             `json:"shareable_type"`
+	ShareableID       uuid.UUID          `json:"shareable_id"`
+	Scope             string             `json:"scope"`
+	OrganizationID    *uuid.UUID         `json:"organization_id"`
+	TeamID            *uuid.UUID         `json:"team_id"`
+	GrantedByPersonID *uuid.UUID         `json:"granted_by_person_id"`
+	ExpiresAt         pgtype.Timestamptz `json:"expires_at"`
+	CreatedAt         pgtype.Timestamptz `json:"created_at"`
+}
+
+type Team struct {
+	ID             uuid.UUID          `json:"id"`
+	OrganizationID uuid.UUID          `json:"organization_id"`
+	Name           string             `json:"name"`
+	AgeGroup       *string            `json:"age_group"`
+	Season         *string            `json:"season"`
+	CreatedAt      pgtype.Timestamptz `json:"created_at"`
+	UpdatedAt      pgtype.Timestamptz `json:"updated_at"`
+}
+
+type UserAccount struct {
+	ID           uuid.UUID          `json:"id"`
+	PersonID     uuid.UUID          `json:"person_id"`
+	Email        string             `json:"email"`
+	PasswordHash *string            `json:"password_hash"`
+	AppleSub     *string            `json:"apple_sub"`
+	CreatedAt    pgtype.Timestamptz `json:"created_at"`
+	UpdatedAt    pgtype.Timestamptz `json:"updated_at"`
 }

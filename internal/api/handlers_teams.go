@@ -4,7 +4,6 @@ import (
 	"errors"
 	"net/http"
 
-	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
 
 	"github.com/monsoudz/soccerkit-api/internal/store"
@@ -12,10 +11,16 @@ import (
 
 type createTeamRequest struct {
 	Name     string  `json:"name"`
-	CrestURL *string `json:"crestUrl"`
+	AgeGroup *string `json:"ageGroup"`
+	Season   *string `json:"season"`
 }
 
 func (s *Server) handleCreateTeam(w http.ResponseWriter, r *http.Request) {
+	oc, err := s.requireCoach(r)
+	if err != nil {
+		writeError(w, err)
+		return
+	}
 	var req createTeamRequest
 	if err := decodeJSON(r, &req); err != nil {
 		writeError(w, err)
@@ -25,42 +30,23 @@ func (s *Server) handleCreateTeam(w http.ResponseWriter, r *http.Request) {
 		writeError(w, errValidation("name is required"))
 		return
 	}
-	ownerID := userIDFrom(r.Context())
-
-	tx, err := s.pool.Begin(r.Context())
-	if err != nil {
-		writeError(w, err)
-		return
-	}
-	defer tx.Rollback(r.Context())
-	q := s.store.WithTx(tx)
-
-	team, err := q.CreateTeam(r.Context(), store.CreateTeamParams{
-		Name: req.Name, CrestUrl: req.CrestURL, OwnerID: ownerID,
+	team, err := s.store.CreateTeam(r.Context(), store.CreateTeamParams{
+		OrganizationID: oc.orgID, Name: req.Name, AgeGroup: req.AgeGroup, Season: req.Season,
 	})
 	if err != nil {
 		writeError(w, err)
 		return
 	}
-	if _, err := q.AddTeamMember(r.Context(), store.AddTeamMemberParams{
-		TeamID: team.ID, UserID: ownerID, Role: "OWNER",
-	}); err != nil {
-		writeError(w, err)
-		return
-	}
-	if err := tx.Commit(r.Context()); err != nil {
-		writeError(w, err)
-		return
-	}
-	writeJSON(w, http.StatusCreated, teamDTO(team, 1))
+	writeJSON(w, http.StatusCreated, teamDTO(team, 0))
 }
 
 func (s *Server) handleListTeams(w http.ResponseWriter, r *http.Request) {
-	rows, err := s.store.ListTeams(r.Context(), store.ListTeamsParams{
-		Q:   queryStrPtr(r, "q"),
-		Lim: queryInt(r, "limit", 20, 1, 100),
-		Off: queryInt(r, "offset", 0, 0, 1_000_000),
-	})
+	oc, err := s.resolveOrg(r)
+	if err != nil {
+		writeError(w, err)
+		return
+	}
+	rows, err := s.store.ListTeamsInOrg(r.Context(), oc.orgID)
 	if err != nil {
 		writeError(w, err)
 		return
@@ -68,214 +54,180 @@ func (s *Server) handleListTeams(w http.ResponseWriter, r *http.Request) {
 	out := make([]Team, len(rows))
 	for i, t := range rows {
 		out[i] = teamDTO(store.Team{
-			ID: t.ID, Name: t.Name, CrestUrl: t.CrestUrl, OwnerID: t.OwnerID,
-			CreatedAt: t.CreatedAt, UpdatedAt: t.UpdatedAt,
-		}, t.MemberCount)
+			ID: t.ID, OrganizationID: t.OrganizationID, Name: t.Name, AgeGroup: t.AgeGroup,
+			Season: t.Season, CreatedAt: t.CreatedAt, UpdatedAt: t.UpdatedAt,
+		}, t.ActiveRosterCount)
 	}
 	writeJSON(w, http.StatusOK, out)
 }
 
 func (s *Server) handleGetTeam(w http.ResponseWriter, r *http.Request) {
-	id, err := pathUUID(r, "id")
+	oc, err := s.resolveOrg(r)
 	if err != nil {
 		writeError(w, err)
 		return
 	}
-	team, err := s.store.GetTeam(r.Context(), id)
-	if errors.Is(err, pgx.ErrNoRows) {
-		writeError(w, errNotFound("team not found"))
-		return
-	} else if err != nil {
-		writeError(w, err)
-		return
-	}
-	memberRows, err := s.store.ListTeamMembers(r.Context(), id)
+	team, err := s.teamInOrg(r, oc)
 	if err != nil {
 		writeError(w, err)
 		return
 	}
-	members := make([]TeamMember, len(memberRows))
-	for i, m := range memberRows {
-		members[i] = teamMemberRowDTO(m)
+	roster, err := s.store.ListActiveRoster(r.Context(), team.ID)
+	if err != nil {
+		writeError(w, err)
+		return
 	}
-	writeJSON(w, http.StatusOK, TeamDetail{
-		Team: teamDTO(team, int64(len(members))), Members: members,
+	entries := make([]RosterEntry, len(roster))
+	for i, row := range roster {
+		entries[i] = rosterRowDTO(row)
+	}
+	writeJSON(w, http.StatusOK, map[string]any{
+		"team":   teamDTO(team, int64(len(entries))),
+		"roster": entries,
 	})
 }
 
-func (s *Server) handleUpdateTeam(w http.ResponseWriter, r *http.Request) {
-	id, err := pathUUID(r, "id")
-	if err != nil {
-		writeError(w, err)
-		return
-	}
-	team, err := s.requireTeamOwner(r, id)
-	if err != nil {
-		writeError(w, err)
-		return
-	}
-	_ = team
-
-	var raw map[string]any
-	if err := decodeJSON(r, &raw); err != nil {
-		writeError(w, err)
-		return
-	}
-	params := store.UpdateTeamParams{ID: id}
-	if v, ok := raw["name"].(string); ok {
-		if v == "" {
-			writeError(w, errValidation("name cannot be empty"))
-			return
-		}
-		params.Name = &v
-	}
-	if _, ok := raw["crestUrl"]; ok {
-		params.SetCrestUrl = true
-		if v, ok := raw["crestUrl"].(string); ok {
-			params.CrestUrl = &v
-		}
-	}
-
-	updated, err := s.store.UpdateTeam(r.Context(), params)
-	if err != nil {
-		writeError(w, err)
-		return
-	}
-	count, err := s.store.CountTeamMembers(r.Context(), id)
-	if err != nil {
-		writeError(w, err)
-		return
-	}
-	writeJSON(w, http.StatusOK, teamDTO(updated, count))
-}
-
-func (s *Server) handleDeleteTeam(w http.ResponseWriter, r *http.Request) {
-	id, err := pathUUID(r, "id")
-	if err != nil {
-		writeError(w, err)
-		return
-	}
-	if _, err := s.requireTeamOwner(r, id); err != nil {
-		writeError(w, err)
-		return
-	}
-	if err := s.store.DeleteTeam(r.Context(), id); err != nil {
-		writeError(w, err)
-		return
-	}
-	writeJSON(w, http.StatusOK, map[string]bool{"ok": true})
-}
-
-type addMemberRequest struct {
-	UserID       string  `json:"userId"`
-	Role         *string `json:"role"`
+type addRosterRequest struct {
+	PersonID     string  `json:"personId"`
 	JerseyNumber *int32  `json:"jerseyNumber"`
+	Position     *string `json:"position"`
+	JoinedOn     *string `json:"joinedOn"`
 }
 
-func (s *Server) handleAddTeamMember(w http.ResponseWriter, r *http.Request) {
-	teamID, err := pathUUID(r, "id")
+func (s *Server) handleAddRoster(w http.ResponseWriter, r *http.Request) {
+	oc, err := s.requireCoach(r)
 	if err != nil {
 		writeError(w, err)
 		return
 	}
-	if _, err := s.requireTeamOwner(r, teamID); err != nil {
+	team, err := s.teamInOrg(r, oc)
+	if err != nil {
 		writeError(w, err)
 		return
 	}
-	var req addMemberRequest
+	var req addRosterRequest
 	if err := decodeJSON(r, &req); err != nil {
 		writeError(w, err)
 		return
 	}
-	userID, err := parseUUIDParam(req.UserID, "userId")
+	personID, err := parseUUIDParam(req.PersonID, "personId")
 	if err != nil {
 		writeError(w, err)
 		return
 	}
-	role := "PLAYER"
-	if req.Role != nil {
-		if *req.Role != "CAPTAIN" && *req.Role != "PLAYER" {
-			writeError(w, errValidation("role must be CAPTAIN or PLAYER"))
-			return
-		}
-		role = *req.Role
-	}
-
-	if _, err := s.store.GetUserByID(r.Context(), userID); errors.Is(err, pgx.ErrNoRows) {
-		writeError(w, errBadRequest("userId does not reference an existing player"))
+	if _, err := s.store.GetPerson(r.Context(), personID); errors.Is(err, pgx.ErrNoRows) {
+		writeError(w, errBadRequest("personId does not reference an existing person"))
 		return
 	} else if err != nil {
 		writeError(w, err)
 		return
 	}
-	if _, err := s.store.GetTeamMember(r.Context(), store.GetTeamMemberParams{TeamID: teamID, UserID: userID}); err == nil {
-		writeError(w, errConflict("that player is already on the team"))
-		return
-	} else if !errors.Is(err, pgx.ErrNoRows) {
+	joinedOn, err := parseDate(req.JoinedOn)
+	if err != nil {
 		writeError(w, err)
 		return
 	}
 
-	member, err := s.store.AddTeamMember(r.Context(), store.AddTeamMemberParams{
-		TeamID: teamID, UserID: userID, Role: role, JerseyNumber: req.JerseyNumber,
+	membership, err := s.store.AddRosterMembership(r.Context(), store.AddRosterMembershipParams{
+		PersonID: personID, TeamID: team.ID, JerseyNumber: req.JerseyNumber,
+		Position: req.Position, JoinedOn: joinedOn,
 	})
 	if err != nil {
+		if isUniqueViolation(err) {
+			writeError(w, errConflict("that person already has an active roster spot on this team"))
+			return
+		}
 		writeError(w, err)
 		return
 	}
-	user, err := s.store.GetUserByID(r.Context(), userID)
-	if err != nil {
-		writeError(w, err)
-		return
-	}
-	writeJSON(w, http.StatusCreated, TeamMember{
-		ID: member.ID, Role: member.Role, JerseyNumber: member.JerseyNumber,
-		JoinedAt: rfc3339(member.JoinedAt), User: publicUser(user),
+	writeJSON(w, http.StatusCreated, map[string]any{
+		"id": membership.ID, "personId": membership.PersonID, "teamId": membership.TeamID,
+		"jerseyNumber": membership.JerseyNumber, "position": membership.Position,
+		"joinedOn": dateStr(membership.JoinedOn), "status": membership.Status,
 	})
 }
 
-func (s *Server) handleRemoveTeamMember(w http.ResponseWriter, r *http.Request) {
-	teamID, err := pathUUID(r, "id")
+// handleEndRoster closes a player's active membership (they left the team, or
+// are being moved — the caller opens a new membership elsewhere).
+func (s *Server) handleEndRoster(w http.ResponseWriter, r *http.Request) {
+	oc, err := s.requireCoach(r)
 	if err != nil {
 		writeError(w, err)
 		return
 	}
-	team, err := s.requireTeamOwner(r, teamID)
+	team, err := s.teamInOrg(r, oc)
 	if err != nil {
 		writeError(w, err)
 		return
 	}
-	userID, err := pathUUID(r, "userId")
+	personID, err := pathUUID(r, "personId")
 	if err != nil {
 		writeError(w, err)
 		return
 	}
-	if userID == team.OwnerID {
-		writeError(w, errBadRequest("the owner cannot be removed from the team"))
+	membership, err := s.store.GetActiveRosterMembership(r.Context(), store.GetActiveRosterMembershipParams{
+		PersonID: personID, TeamID: team.ID,
+	})
+	if errors.Is(err, pgx.ErrNoRows) {
+		writeError(w, errNotFound("that person has no active roster spot on this team"))
 		return
-	}
-	rows, err := s.store.DeleteTeamMember(r.Context(), store.DeleteTeamMemberParams{TeamID: teamID, UserID: userID})
-	if err != nil {
+	} else if err != nil {
 		writeError(w, err)
 		return
 	}
-	if rows == 0 {
-		writeError(w, errNotFound("that player is not on the team"))
+	if _, err := s.store.EndRosterMembership(r.Context(), store.EndRosterMembershipParams{ID: membership.ID}); err != nil {
+		writeError(w, err)
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]bool{"ok": true})
 }
 
-// requireTeamOwner loads a team and verifies the caller owns it.
-func (s *Server) requireTeamOwner(r *http.Request, teamID uuid.UUID) (store.Team, error) {
-	team, err := s.store.GetTeam(r.Context(), teamID)
+func (s *Server) handleDeleteTeam(w http.ResponseWriter, r *http.Request) {
+	oc, err := s.requireCoach(r)
+	if err != nil {
+		writeError(w, err)
+		return
+	}
+	team, err := s.teamInOrg(r, oc)
+	if err != nil {
+		writeError(w, err)
+		return
+	}
+	if err := s.store.DeleteTeam(r.Context(), team.ID); err != nil {
+		writeError(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]bool{"ok": true})
+}
+
+// --- shared authorization helpers -----------------------------------------
+
+func (s *Server) requireCoach(r *http.Request) (orgContext, error) {
+	oc, err := s.resolveOrg(r)
+	if err != nil {
+		return orgContext{}, err
+	}
+	if !oc.hasAnyRole("admin", "director", "coach") {
+		return orgContext{}, errForbidden("only coaches can do that")
+	}
+	return oc, nil
+}
+
+// teamInOrg loads the team named in the path and verifies it belongs to the
+// caller's active organization.
+func (s *Server) teamInOrg(r *http.Request, oc orgContext) (store.Team, error) {
+	id, err := pathUUID(r, "id")
+	if err != nil {
+		return store.Team{}, err
+	}
+	team, err := s.store.GetTeam(r.Context(), id)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return store.Team{}, errNotFound("team not found")
 	} else if err != nil {
 		return store.Team{}, err
 	}
-	if team.OwnerID != userIDFrom(r.Context()) {
-		return store.Team{}, errForbidden("only the team owner can do that")
+	if team.OrganizationID != oc.orgID {
+		return store.Team{}, errForbidden("that team is not in your organization")
 	}
 	return team, nil
 }

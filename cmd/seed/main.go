@@ -1,5 +1,7 @@
-// Command seed loads idempotent sample data for local development.
-// Every player logs in with the password "password123".
+// Command seed loads idempotent sample data for local development: one coach
+// (login coach@soccerkit.dev / password123), their personal org, a team with a
+// few athletes on the roster, and a couple of pre-game check-ins to populate
+// the evaluation aggregates.
 package main
 
 import (
@@ -29,76 +31,115 @@ func main() {
 	if err != nil {
 		log.Fatal(err)
 	}
-
 	if err := seed(ctx, pool, string(hash)); err != nil {
 		log.Fatal(err)
 	}
-	log.Println("seed complete — players log in with password \"password123\"")
+	log.Println("seed complete — coach logs in as coach@soccerkit.dev / password123")
 }
 
+const (
+	orgID    = "00000000-0000-0000-0000-0000000000f0"
+	coachID  = "00000000-0000-0000-0000-000000000c01"
+	teamID   = "00000000-0000-0000-0000-000000000071"
+	preTplID = "00000000-0000-0000-0000-0000000000e1"
+)
+
 func seed(ctx context.Context, pool *pgxpool.Pool, hash string) error {
-	// Users are inserted first with the parameterised password hash.
-	if _, err := pool.Exec(ctx,
-		`INSERT INTO users (id, email, password_hash, display_name, position, skill_level) VALUES
-			('00000000-0000-0000-0000-000000000001', 'alice@soccerkit.dev', $1, 'Alice Ramos', 'FWD', 5),
-			('00000000-0000-0000-0000-000000000002', 'ben@soccerkit.dev',   $1, 'Ben Novak',   'GK',  4),
-			('00000000-0000-0000-0000-000000000003', 'chloe@soccerkit.dev', $1, 'Chloe Diallo','MID', 4),
-			('00000000-0000-0000-0000-000000000004', 'diego@soccerkit.dev', $1, 'Diego Costa', 'DEF', 3)
-		 ON CONFLICT (id) DO NOTHING`, hash); err != nil {
+	// Organization + coach identity.
+	if _, err := pool.Exec(ctx, `
+		INSERT INTO organizations (id, name, kind) VALUES ($1, 'Riverside FC', 'personal')
+		ON CONFLICT (id) DO NOTHING`, orgID); err != nil {
 		return err
 	}
-
-	stmts := []string{
-		`INSERT INTO venues (id, name, city, surface, latitude, longitude) VALUES
-			('00000000-0000-0000-0000-0000000000a1', 'Riverside Astro Pitches', 'Portland', 'TURF', 45.5231, -122.6765)
-		 ON CONFLICT (id) DO NOTHING`,
-
-		`INSERT INTO matches (id, host_id, venue_id, title, description, format, max_players, kickoff_at) VALUES
-			('00000000-0000-0000-0000-0000000000b1',
-			 '00000000-0000-0000-0000-000000000001',
-			 '00000000-0000-0000-0000-0000000000a1',
-			 'Sunday Morning Kickabout', 'Casual 5-a-side, all levels welcome.', '5v5', 10,
-			 '2026-08-02T10:00:00Z')
-		 ON CONFLICT (id) DO NOTHING`,
-
-		`INSERT INTO match_rsvps (match_id, user_id, status) VALUES
-			('00000000-0000-0000-0000-0000000000b1', '00000000-0000-0000-0000-000000000001', 'GOING'),
-			('00000000-0000-0000-0000-0000000000b1', '00000000-0000-0000-0000-000000000002', 'GOING'),
-			('00000000-0000-0000-0000-0000000000b1', '00000000-0000-0000-0000-000000000003', 'GOING')
-		 ON CONFLICT (match_id, user_id) DO NOTHING`,
-
-		`INSERT INTO teams (id, name, owner_id) VALUES
-			('00000000-0000-0000-0000-0000000000c1', 'Riverside Lions', '00000000-0000-0000-0000-000000000001'),
-			('00000000-0000-0000-0000-0000000000c2', 'East Side Tigers', '00000000-0000-0000-0000-000000000004')
-		 ON CONFLICT (id) DO NOTHING`,
-
-		`INSERT INTO team_members (team_id, user_id, role) VALUES
-			('00000000-0000-0000-0000-0000000000c1', '00000000-0000-0000-0000-000000000001', 'OWNER'),
-			('00000000-0000-0000-0000-0000000000c2', '00000000-0000-0000-0000-000000000004', 'OWNER')
-		 ON CONFLICT (team_id, user_id) DO NOTHING`,
-
-		`INSERT INTO leagues (id, name, season) VALUES
-			('00000000-0000-0000-0000-0000000000d1', 'City Sunday League', '2026 Summer')
-		 ON CONFLICT (id) DO NOTHING`,
-
-		`INSERT INTO league_teams (league_id, team_id) VALUES
-			('00000000-0000-0000-0000-0000000000d1', '00000000-0000-0000-0000-0000000000c1'),
-			('00000000-0000-0000-0000-0000000000d1', '00000000-0000-0000-0000-0000000000c2')
-		 ON CONFLICT (league_id, team_id) DO NOTHING`,
-
-		`INSERT INTO fixtures (id, league_id, home_team_id, away_team_id, kickoff_at, home_score, away_score, status) VALUES
-			('00000000-0000-0000-0000-0000000000e1', '00000000-0000-0000-0000-0000000000d1',
-			 '00000000-0000-0000-0000-0000000000c1', '00000000-0000-0000-0000-0000000000c2',
-			 '2026-08-09T15:00:00Z', 2, 1, 'COMPLETED')
-		 ON CONFLICT (id) DO NOTHING`,
-
-		`INSERT INTO player_match_stats (user_id, fixture_id, goals, assists, minutes_played) VALUES
-			('00000000-0000-0000-0000-000000000001', '00000000-0000-0000-0000-0000000000e1', 2, 0, 90)
-		 ON CONFLICT (user_id, fixture_id) DO NOTHING`,
+	if _, err := pool.Exec(ctx, `
+		INSERT INTO persons (id, display_name, email) VALUES ($1, 'Coach Rivera', 'coach@soccerkit.dev')
+		ON CONFLICT (id) DO NOTHING`, coachID); err != nil {
+		return err
+	}
+	if _, err := pool.Exec(ctx, `
+		INSERT INTO user_accounts (person_id, email, password_hash) VALUES ($1, 'coach@soccerkit.dev', $2)
+		ON CONFLICT (email) DO NOTHING`, coachID, hash); err != nil {
+		return err
+	}
+	for _, role := range []string{"admin", "director", "coach"} {
+		if _, err := pool.Exec(ctx, `
+			INSERT INTO memberships (person_id, organization_id, role) VALUES ($1, $2, $3)
+			ON CONFLICT (person_id, organization_id, role) DO NOTHING`, coachID, orgID, role); err != nil {
+			return err
+		}
 	}
 
-	for _, stmt := range stmts {
-		if _, err := pool.Exec(ctx, stmt); err != nil {
+	// A team and three athletes on its roster.
+	if _, err := pool.Exec(ctx, `
+		INSERT INTO teams (id, organization_id, name, age_group, season)
+		VALUES ($1, $2, 'Riverside U11', 'U11', '2026 Spring')
+		ON CONFLICT (id) DO NOTHING`, teamID, orgID); err != nil {
+		return err
+	}
+	athletes := []struct{ id, name string }{
+		{"00000000-0000-0000-0000-0000000000a1", "Ana Duarte"},
+		{"00000000-0000-0000-0000-0000000000a2", "Bruno Silva"},
+		{"00000000-0000-0000-0000-0000000000a3", "Cira Mendez"},
+	}
+	for i, a := range athletes {
+		if _, err := pool.Exec(ctx, `
+			INSERT INTO persons (id, display_name) VALUES ($1, $2)
+			ON CONFLICT (id) DO NOTHING`, a.id, a.name); err != nil {
+			return err
+		}
+		if _, err := pool.Exec(ctx, `
+			INSERT INTO memberships (person_id, organization_id, role) VALUES ($1, $2, 'player')
+			ON CONFLICT (person_id, organization_id, role) DO NOTHING`, a.id, orgID); err != nil {
+			return err
+		}
+		if _, err := pool.Exec(ctx, `
+			INSERT INTO roster_memberships (person_id, team_id, jersey_number)
+			SELECT $1, $2, $3
+			WHERE NOT EXISTS (
+				SELECT 1 FROM roster_memberships WHERE person_id = $1 AND team_id = $2 AND left_on IS NULL
+			)`, a.id, teamID, int32(i+7)); err != nil {
+			return err
+		}
+	}
+
+	// A pre-game template with two scored fields + two check-ins for Ana.
+	if _, err := pool.Exec(ctx, `
+		INSERT INTO form_templates (id, organization_id, author_person_id, context, name, subject_type, is_seed)
+		VALUES ($1, $2, $3, 'pre_game', 'Pre-Game Check-In', 'athlete', true)
+		ON CONFLICT (id) DO NOTHING`, preTplID, orgID, coachID); err != nil {
+		return err
+	}
+	fields := []struct{ id, key, label string }{
+		{"00000000-0000-0000-0000-0000000000f1", "sleep", "Sleep quality"},
+		{"00000000-0000-0000-0000-0000000000f2", "energy", "Energy"},
+	}
+	for i, f := range fields {
+		if _, err := pool.Exec(ctx, `
+			INSERT INTO form_fields (id, template_id, key, label, kind, position, config)
+			VALUES ($1, $2, $3, $4, 'scale', $5, '{"min":1,"max":5}')
+			ON CONFLICT (template_id, key) DO NOTHING`, f.id, preTplID, f.key, f.label, int32(i)); err != nil {
+			return err
+		}
+	}
+	checkIns := []struct {
+		id            string
+		sleep, energy float64
+	}{
+		{"00000000-0000-0000-0000-0000000000c1", 4, 5},
+		{"00000000-0000-0000-0000-0000000000c2", 2, 3},
+	}
+	for _, c := range checkIns {
+		if _, err := pool.Exec(ctx, `
+			INSERT INTO form_instances (id, template_id, subject_person_id, submitted_by_person_id)
+			VALUES ($1, $2, $3, $4) ON CONFLICT (id) DO NOTHING`,
+			c.id, preTplID, athletes[0].id, coachID); err != nil {
+			return err
+		}
+		if _, err := pool.Exec(ctx, `
+			INSERT INTO form_answers (instance_id, field_id, numeric_value) VALUES
+				($1, $2, $3), ($1, $4, $5)
+			ON CONFLICT (instance_id, field_id) DO NOTHING`,
+			c.id, fields[0].id, c.sleep, fields[1].id, c.energy); err != nil {
 			return err
 		}
 	}

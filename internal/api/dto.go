@@ -9,7 +9,6 @@ import (
 	"github.com/monsoudz/soccerkit-api/internal/store"
 )
 
-// rfc3339 formats a non-null timestamp; zero value for invalid.
 func rfc3339(ts pgtype.Timestamptz) string {
 	if !ts.Valid {
 		return ""
@@ -17,223 +16,190 @@ func rfc3339(ts pgtype.Timestamptz) string {
 	return ts.Time.UTC().Format(time.RFC3339)
 }
 
-// ---- users ---------------------------------------------------------------
-
-type PublicUser struct {
-	ID          uuid.UUID `json:"id"`
-	Email       string    `json:"email"`
-	DisplayName string    `json:"displayName"`
-	Position    *string   `json:"position"`
-	SkillLevel  int32     `json:"skillLevel"`
-	Bio         *string   `json:"bio"`
-	AvatarURL   *string   `json:"avatarUrl"`
-	CreatedAt   string    `json:"createdAt"`
+func dateStr(d pgtype.Date) *string {
+	if !d.Valid {
+		return nil
+	}
+	s := d.Time.UTC().Format("2006-01-02")
+	return &s
 }
 
-func publicUser(u store.User) PublicUser {
-	return PublicUser{
-		ID: u.ID, Email: u.Email, DisplayName: u.DisplayName,
-		Position: u.Position, SkillLevel: u.SkillLevel, Bio: u.Bio,
-		AvatarURL: u.AvatarUrl, CreatedAt: rfc3339(u.CreatedAt),
+// ---- identity ------------------------------------------------------------
+
+type Person struct {
+	ID                    uuid.UUID `json:"id"`
+	DisplayName           string    `json:"displayName"`
+	GivenName             *string   `json:"givenName"`
+	FamilyName            *string   `json:"familyName"`
+	Birthdate             *string   `json:"birthdate"`
+	Email                 *string   `json:"email"`
+	Phone                 *string   `json:"phone"`
+	EmergencyContactName  *string   `json:"emergencyContactName"`
+	EmergencyContactPhone *string   `json:"emergencyContactPhone"`
+	MedicalNotes          *string   `json:"medicalNotes"`
+	CreatedAt             string    `json:"createdAt"`
+}
+
+func personDTO(p store.Person) Person {
+	return Person{
+		ID: p.ID, DisplayName: p.DisplayName, GivenName: p.GivenName, FamilyName: p.FamilyName,
+		Birthdate: dateStr(p.Birthdate), Email: p.Email, Phone: p.Phone,
+		EmergencyContactName: p.EmergencyContactName, EmergencyContactPhone: p.EmergencyContactPhone,
+		MedicalNotes: p.MedicalNotes, CreatedAt: rfc3339(p.CreatedAt),
 	}
+}
+
+type MembershipView struct {
+	OrganizationID   uuid.UUID `json:"organizationId"`
+	OrganizationName string    `json:"organizationName"`
+	OrganizationKind string    `json:"organizationKind"`
+	Role             string    `json:"role"`
+}
+
+// Me bundles the authenticated person with their memberships (orgs + roles).
+type Me struct {
+	Person      Person           `json:"person"`
+	Memberships []MembershipView `json:"memberships"`
 }
 
 type AuthResponse struct {
-	AccessToken  string     `json:"accessToken"`
-	RefreshToken string     `json:"refreshToken"`
-	User         PublicUser `json:"user"`
+	AccessToken  string `json:"accessToken"`
+	RefreshToken string `json:"refreshToken"`
+	Me           Me     `json:"me"`
 }
 
-type CareerStats struct {
-	Appearances   int64 `json:"appearances"`
-	Goals         int64 `json:"goals"`
-	Assists       int64 `json:"assists"`
-	YellowCards   int64 `json:"yellowCards"`
-	RedCards      int64 `json:"redCards"`
-	MinutesPlayed int64 `json:"minutesPlayed"`
-}
-
-// ---- venues --------------------------------------------------------------
-
-type Venue struct {
-	ID        uuid.UUID `json:"id"`
-	Name      string    `json:"name"`
-	Address   *string   `json:"address"`
-	City      *string   `json:"city"`
-	Latitude  *float64  `json:"latitude"`
-	Longitude *float64  `json:"longitude"`
-	Surface   *string   `json:"surface"`
-	CreatedAt string    `json:"createdAt"`
-}
-
-func venueDTO(v store.Venue) Venue {
-	return Venue{
-		ID: v.ID, Name: v.Name, Address: v.Address, City: v.City,
-		Latitude: v.Latitude, Longitude: v.Longitude, Surface: v.Surface,
-		CreatedAt: rfc3339(v.CreatedAt),
-	}
-}
-
-// ---- matches -------------------------------------------------------------
-
-type Match struct {
-	ID          uuid.UUID  `json:"id"`
-	Title       string     `json:"title"`
-	Description *string    `json:"description"`
-	Format      string     `json:"format"`
-	MaxPlayers  int32      `json:"maxPlayers"`
-	KickoffAt   string     `json:"kickoffAt"`
-	DurationMin int32      `json:"durationMin"`
-	Status      string     `json:"status"`
-	HostID      uuid.UUID  `json:"hostId"`
-	VenueID     *uuid.UUID `json:"venueId"`
-	GoingCount  int64      `json:"goingCount"`
-	SpotsLeft   int64      `json:"spotsLeft"`
-	CreatedAt   string     `json:"createdAt"`
-}
-
-func matchDTO(m store.Match, goingCount int64) Match {
-	spots := int64(m.MaxPlayers) - goingCount
-	if spots < 0 {
-		spots = 0
-	}
-	return Match{
-		ID: m.ID, Title: m.Title, Description: m.Description, Format: m.Format,
-		MaxPlayers: m.MaxPlayers, KickoffAt: rfc3339(m.KickoffAt), DurationMin: m.DurationMin,
-		Status: m.Status, HostID: m.HostID, VenueID: m.VenueID,
-		GoingCount: goingCount, SpotsLeft: spots, CreatedAt: rfc3339(m.CreatedAt),
-	}
-}
-
-func matchRowDTO(m store.ListMatchesRow) Match {
-	return matchDTO(store.Match{
-		ID: m.ID, HostID: m.HostID, VenueID: m.VenueID, Title: m.Title,
-		Description: m.Description, Format: m.Format, MaxPlayers: m.MaxPlayers,
-		KickoffAt: m.KickoffAt, DurationMin: m.DurationMin, Status: m.Status,
-		CreatedAt: m.CreatedAt,
-	}, m.GoingCount)
-}
-
-type Rsvp struct {
-	ID        uuid.UUID  `json:"id"`
-	Status    string     `json:"status"`
-	CreatedAt string     `json:"createdAt"`
-	User      PublicUser `json:"user"`
-}
-
-func rsvpRowDTO(r store.ListMatchRsvpsRow) Rsvp {
-	return Rsvp{
-		ID: r.ID, Status: r.Status, CreatedAt: rfc3339(r.CreatedAt),
-		User: PublicUser{
-			ID: r.UserID, Email: r.Email, DisplayName: r.DisplayName,
-			Position: r.Position, SkillLevel: r.SkillLevel, Bio: r.Bio,
-			AvatarURL: r.AvatarUrl, CreatedAt: rfc3339(r.UserCreatedAt),
-		},
-	}
-}
-
-type MatchDetail struct {
-	Match
-	Rsvps []Rsvp `json:"rsvps"`
-}
-
-// ---- teams ---------------------------------------------------------------
+// ---- teams & roster ------------------------------------------------------
 
 type Team struct {
-	ID          uuid.UUID `json:"id"`
-	Name        string    `json:"name"`
-	CrestURL    *string   `json:"crestUrl"`
-	OwnerID     uuid.UUID `json:"ownerId"`
-	MemberCount int64     `json:"memberCount"`
-	CreatedAt   string    `json:"createdAt"`
+	ID                uuid.UUID `json:"id"`
+	OrganizationID    uuid.UUID `json:"organizationId"`
+	Name              string    `json:"name"`
+	AgeGroup          *string   `json:"ageGroup"`
+	Season            *string   `json:"season"`
+	ActiveRosterCount int64     `json:"activeRosterCount"`
+	CreatedAt         string    `json:"createdAt"`
 }
 
-func teamDTO(t store.Team, memberCount int64) Team {
+func teamDTO(t store.Team, activeRoster int64) Team {
 	return Team{
-		ID: t.ID, Name: t.Name, CrestURL: t.CrestUrl, OwnerID: t.OwnerID,
-		MemberCount: memberCount, CreatedAt: rfc3339(t.CreatedAt),
+		ID: t.ID, OrganizationID: t.OrganizationID, Name: t.Name, AgeGroup: t.AgeGroup,
+		Season: t.Season, ActiveRosterCount: activeRoster, CreatedAt: rfc3339(t.CreatedAt),
 	}
 }
 
-type TeamMember struct {
-	ID           uuid.UUID  `json:"id"`
-	Role         string     `json:"role"`
-	JerseyNumber *int32     `json:"jerseyNumber"`
-	JoinedAt     string     `json:"joinedAt"`
-	User         PublicUser `json:"user"`
-}
-
-func teamMemberRowDTO(m store.ListTeamMembersRow) TeamMember {
-	return TeamMember{
-		ID: m.ID, Role: m.Role, JerseyNumber: m.JerseyNumber, JoinedAt: rfc3339(m.JoinedAt),
-		User: PublicUser{
-			ID: m.UserID, Email: m.Email, DisplayName: m.DisplayName,
-			Position: m.Position, SkillLevel: m.SkillLevel, Bio: m.Bio,
-			AvatarURL: m.AvatarUrl, CreatedAt: rfc3339(m.UserCreatedAt),
-		},
-	}
-}
-
-type TeamDetail struct {
-	Team
-	Members []TeamMember `json:"members"`
-}
-
-// ---- leagues -------------------------------------------------------------
-
-type League struct {
-	ID        uuid.UUID `json:"id"`
-	Name      string    `json:"name"`
-	Season    string    `json:"season"`
-	TeamCount int64     `json:"teamCount"`
-	CreatedAt string    `json:"createdAt"`
-}
-
-type Fixture struct {
+type RosterEntry struct {
 	ID           uuid.UUID `json:"id"`
-	LeagueID     uuid.UUID `json:"leagueId"`
-	HomeTeamID   uuid.UUID `json:"homeTeamId"`
-	AwayTeamID   uuid.UUID `json:"awayTeamId"`
-	HomeTeamName string    `json:"homeTeamName"`
-	AwayTeamName string    `json:"awayTeamName"`
-	KickoffAt    string    `json:"kickoffAt"`
-	HomeScore    *int32    `json:"homeScore"`
-	AwayScore    *int32    `json:"awayScore"`
+	PersonID     uuid.UUID `json:"personId"`
+	DisplayName  string    `json:"displayName"`
+	Email        *string   `json:"email"`
+	Birthdate    *string   `json:"birthdate"`
+	JerseyNumber *int32    `json:"jerseyNumber"`
+	Position     *string   `json:"position"`
+	JoinedOn     *string   `json:"joinedOn"`
 	Status       string    `json:"status"`
 }
 
-type StandingRow struct {
-	TeamID         uuid.UUID `json:"teamId"`
-	TeamName       string    `json:"teamName"`
-	Played         int       `json:"played"`
-	Won            int       `json:"won"`
-	Drawn          int       `json:"drawn"`
-	Lost           int       `json:"lost"`
-	GoalsFor       int       `json:"goalsFor"`
-	GoalsAgainst   int       `json:"goalsAgainst"`
-	GoalDifference int       `json:"goalDifference"`
-	Points         int       `json:"points"`
+func rosterRowDTO(r store.ListActiveRosterRow) RosterEntry {
+	return RosterEntry{
+		ID: r.ID, PersonID: r.PersonID, DisplayName: r.DisplayName, Email: r.Email,
+		Birthdate: dateStr(r.Birthdate), JerseyNumber: r.JerseyNumber, Position: r.Position,
+		JoinedOn: dateStr(r.JoinedOn), Status: r.Status,
+	}
 }
 
-// ---- stats ---------------------------------------------------------------
+// ---- evaluation engine ---------------------------------------------------
 
-type PlayerStat struct {
-	ID            uuid.UUID   `json:"id"`
-	UserID        uuid.UUID   `json:"userId"`
-	MatchID       *uuid.UUID  `json:"matchId"`
-	FixtureID     *uuid.UUID  `json:"fixtureId"`
-	Goals         int32       `json:"goals"`
-	Assists       int32       `json:"assists"`
-	YellowCards   int32       `json:"yellowCards"`
-	RedCards      int32       `json:"redCards"`
-	MinutesPlayed int32       `json:"minutesPlayed"`
-	User          *PublicUser `json:"user,omitempty"`
+type FormField struct {
+	ID       uuid.UUID `json:"id"`
+	Key      string    `json:"key"`
+	Label    string    `json:"label"`
+	Kind     string    `json:"kind"`
+	Position int32     `json:"position"`
+	Config   any       `json:"config,omitempty"`
 }
 
-func playerStatDTO(s store.PlayerMatchStat, user *PublicUser) PlayerStat {
-	return PlayerStat{
-		ID: s.ID, UserID: s.UserID, MatchID: s.MatchID, FixtureID: s.FixtureID,
-		Goals: s.Goals, Assists: s.Assists, YellowCards: s.YellowCards,
-		RedCards: s.RedCards, MinutesPlayed: s.MinutesPlayed, User: user,
+func fieldDTO(f store.FormField) FormField {
+	return FormField{
+		ID: f.ID, Key: f.Key, Label: f.Label, Kind: f.Kind, Position: f.Position,
+		Config: rawJSON(f.Config),
+	}
+}
+
+type FormTemplate struct {
+	ID             uuid.UUID   `json:"id"`
+	OrganizationID *uuid.UUID  `json:"organizationId"`
+	Context        string      `json:"context"`
+	Name           string      `json:"name"`
+	SubjectType    string      `json:"subjectType"`
+	Version        int32       `json:"version"`
+	IsSeed         bool        `json:"isSeed"`
+	Fields         []FormField `json:"fields,omitempty"`
+}
+
+func templateDTO(t store.FormTemplate, fields []FormField) FormTemplate {
+	return FormTemplate{
+		ID: t.ID, OrganizationID: t.OrganizationID, Context: t.Context, Name: t.Name,
+		SubjectType: t.SubjectType, Version: t.Version, IsSeed: t.IsSeed, Fields: fields,
+	}
+}
+
+type Answer struct {
+	Key          string   `json:"key"`
+	Label        string   `json:"label"`
+	Kind         string   `json:"kind"`
+	NumericValue *float64 `json:"numericValue"`
+	BoolValue    *bool    `json:"boolValue"`
+	TextValue    *string  `json:"textValue"`
+}
+
+func answerRowDTO(a store.ListAnswersForInstanceRow) Answer {
+	return Answer{
+		Key: a.Key, Label: a.Label, Kind: a.Kind,
+		NumericValue: a.NumericValue, BoolValue: a.BoolValue, TextValue: a.TextValue,
+	}
+}
+
+type FormInstance struct {
+	ID              uuid.UUID  `json:"id"`
+	TemplateID      uuid.UUID  `json:"templateId"`
+	Context         string     `json:"context"`
+	SubjectPersonID *uuid.UUID `json:"subjectPersonId"`
+	SubjectTeamID   *uuid.UUID `json:"subjectTeamId"`
+	ContextRefType  *string    `json:"contextRefType"`
+	ContextRefID    *uuid.UUID `json:"contextRefId"`
+	SubmittedAt     string     `json:"submittedAt"`
+	Answers         []Answer   `json:"answers,omitempty"`
+}
+
+type InstanceSummary struct {
+	ID             uuid.UUID  `json:"id"`
+	TemplateID     uuid.UUID  `json:"templateId"`
+	Context        string     `json:"context"`
+	TemplateName   string     `json:"templateName"`
+	ContextRefType *string    `json:"contextRefType"`
+	ContextRefID   *uuid.UUID `json:"contextRefId"`
+	SubmittedAt    string     `json:"submittedAt"`
+}
+
+func instanceSummaryDTO(r store.ListInstancesForPersonRow) InstanceSummary {
+	return InstanceSummary{
+		ID: r.ID, TemplateID: r.TemplateID, Context: r.Context, TemplateName: r.TemplateName,
+		ContextRefType: r.ContextRefType, ContextRefID: r.ContextRefID, SubmittedAt: rfc3339(r.SubmittedAt),
+	}
+}
+
+type ScoreAggregate struct {
+	Key     string  `json:"key"`
+	Label   string  `json:"label"`
+	Samples int64   `json:"samples"`
+	Average float64 `json:"average"`
+	Minimum float64 `json:"minimum"`
+	Maximum float64 `json:"maximum"`
+}
+
+func aggregateDTO(r store.AggregateScoresForPersonRow) ScoreAggregate {
+	return ScoreAggregate{
+		Key: r.Key, Label: r.Label, Samples: r.Samples,
+		Average: r.Average, Minimum: r.Minimum, Maximum: r.Maximum,
 	}
 }

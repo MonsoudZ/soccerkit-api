@@ -12,69 +12,73 @@ import (
 	"github.com/jackc/pgx/v5/pgtype"
 )
 
-const addTeamMember = `-- name: AddTeamMember :one
-INSERT INTO team_members (team_id, user_id, role, jersey_number)
-VALUES ($1, $2, $3, $4)
-RETURNING id, team_id, user_id, role, jersey_number, joined_at
+const addRosterMembership = `-- name: AddRosterMembership :one
+
+INSERT INTO roster_memberships (person_id, team_id, jersey_number, position, joined_on)
+VALUES ($1, $2, $3, $4, COALESCE($5, CURRENT_DATE))
+RETURNING id, person_id, team_id, jersey_number, position, joined_on, left_on, status, created_at, updated_at
 `
 
-type AddTeamMemberParams struct {
-	TeamID       uuid.UUID `json:"team_id"`
-	UserID       uuid.UUID `json:"user_id"`
-	Role         string    `json:"role"`
-	JerseyNumber *int32    `json:"jersey_number"`
+type AddRosterMembershipParams struct {
+	PersonID     uuid.UUID   `json:"person_id"`
+	TeamID       uuid.UUID   `json:"team_id"`
+	JerseyNumber *int32      `json:"jersey_number"`
+	Position     *string     `json:"position"`
+	JoinedOn     interface{} `json:"joined_on"`
 }
 
-func (q *Queries) AddTeamMember(ctx context.Context, arg AddTeamMemberParams) (TeamMember, error) {
-	row := q.db.QueryRow(ctx, addTeamMember,
+// Roster (time-bounded memberships) ----------------------------------------
+func (q *Queries) AddRosterMembership(ctx context.Context, arg AddRosterMembershipParams) (RosterMembership, error) {
+	row := q.db.QueryRow(ctx, addRosterMembership,
+		arg.PersonID,
 		arg.TeamID,
-		arg.UserID,
-		arg.Role,
 		arg.JerseyNumber,
+		arg.Position,
+		arg.JoinedOn,
 	)
-	var i TeamMember
+	var i RosterMembership
 	err := row.Scan(
 		&i.ID,
+		&i.PersonID,
 		&i.TeamID,
-		&i.UserID,
-		&i.Role,
 		&i.JerseyNumber,
-		&i.JoinedAt,
+		&i.Position,
+		&i.JoinedOn,
+		&i.LeftOn,
+		&i.Status,
+		&i.CreatedAt,
+		&i.UpdatedAt,
 	)
 	return i, err
 }
 
-const countTeamMembers = `-- name: CountTeamMembers :one
-SELECT count(*)::bigint FROM team_members WHERE team_id = $1
-`
-
-func (q *Queries) CountTeamMembers(ctx context.Context, teamID uuid.UUID) (int64, error) {
-	row := q.db.QueryRow(ctx, countTeamMembers, teamID)
-	var column_1 int64
-	err := row.Scan(&column_1)
-	return column_1, err
-}
-
 const createTeam = `-- name: CreateTeam :one
-INSERT INTO teams (name, crest_url, owner_id)
-VALUES ($1, $2, $3)
-RETURNING id, name, crest_url, owner_id, created_at, updated_at
+INSERT INTO teams (organization_id, name, age_group, season)
+VALUES ($1, $2, $3, $4)
+RETURNING id, organization_id, name, age_group, season, created_at, updated_at
 `
 
 type CreateTeamParams struct {
-	Name     string    `json:"name"`
-	CrestUrl *string   `json:"crest_url"`
-	OwnerID  uuid.UUID `json:"owner_id"`
+	OrganizationID uuid.UUID `json:"organization_id"`
+	Name           string    `json:"name"`
+	AgeGroup       *string   `json:"age_group"`
+	Season         *string   `json:"season"`
 }
 
 func (q *Queries) CreateTeam(ctx context.Context, arg CreateTeamParams) (Team, error) {
-	row := q.db.QueryRow(ctx, createTeam, arg.Name, arg.CrestUrl, arg.OwnerID)
+	row := q.db.QueryRow(ctx, createTeam,
+		arg.OrganizationID,
+		arg.Name,
+		arg.AgeGroup,
+		arg.Season,
+	)
 	var i Team
 	err := row.Scan(
 		&i.ID,
+		&i.OrganizationID,
 		&i.Name,
-		&i.CrestUrl,
-		&i.OwnerID,
+		&i.AgeGroup,
+		&i.Season,
 		&i.CreatedAt,
 		&i.UpdatedAt,
 	)
@@ -90,25 +94,88 @@ func (q *Queries) DeleteTeam(ctx context.Context, id uuid.UUID) error {
 	return err
 }
 
-const deleteTeamMember = `-- name: DeleteTeamMember :execrows
-DELETE FROM team_members WHERE team_id = $1 AND user_id = $2
+const endRosterMembership = `-- name: EndRosterMembership :one
+UPDATE roster_memberships
+SET left_on = COALESCE($1, CURRENT_DATE), status = 'inactive', updated_at = now()
+WHERE id = $2
+RETURNING id, person_id, team_id, jersey_number, position, joined_on, left_on, status, created_at, updated_at
 `
 
-type DeleteTeamMemberParams struct {
-	TeamID uuid.UUID `json:"team_id"`
-	UserID uuid.UUID `json:"user_id"`
+type EndRosterMembershipParams struct {
+	LeftOn pgtype.Date `json:"left_on"`
+	ID     uuid.UUID   `json:"id"`
 }
 
-func (q *Queries) DeleteTeamMember(ctx context.Context, arg DeleteTeamMemberParams) (int64, error) {
-	result, err := q.db.Exec(ctx, deleteTeamMember, arg.TeamID, arg.UserID)
-	if err != nil {
-		return 0, err
-	}
-	return result.RowsAffected(), nil
+func (q *Queries) EndRosterMembership(ctx context.Context, arg EndRosterMembershipParams) (RosterMembership, error) {
+	row := q.db.QueryRow(ctx, endRosterMembership, arg.LeftOn, arg.ID)
+	var i RosterMembership
+	err := row.Scan(
+		&i.ID,
+		&i.PersonID,
+		&i.TeamID,
+		&i.JerseyNumber,
+		&i.Position,
+		&i.JoinedOn,
+		&i.LeftOn,
+		&i.Status,
+		&i.CreatedAt,
+		&i.UpdatedAt,
+	)
+	return i, err
+}
+
+const getActiveRosterMembership = `-- name: GetActiveRosterMembership :one
+SELECT id, person_id, team_id, jersey_number, position, joined_on, left_on, status, created_at, updated_at FROM roster_memberships
+WHERE person_id = $1 AND team_id = $2 AND left_on IS NULL
+`
+
+type GetActiveRosterMembershipParams struct {
+	PersonID uuid.UUID `json:"person_id"`
+	TeamID   uuid.UUID `json:"team_id"`
+}
+
+func (q *Queries) GetActiveRosterMembership(ctx context.Context, arg GetActiveRosterMembershipParams) (RosterMembership, error) {
+	row := q.db.QueryRow(ctx, getActiveRosterMembership, arg.PersonID, arg.TeamID)
+	var i RosterMembership
+	err := row.Scan(
+		&i.ID,
+		&i.PersonID,
+		&i.TeamID,
+		&i.JerseyNumber,
+		&i.Position,
+		&i.JoinedOn,
+		&i.LeftOn,
+		&i.Status,
+		&i.CreatedAt,
+		&i.UpdatedAt,
+	)
+	return i, err
+}
+
+const getRosterMembership = `-- name: GetRosterMembership :one
+SELECT id, person_id, team_id, jersey_number, position, joined_on, left_on, status, created_at, updated_at FROM roster_memberships WHERE id = $1
+`
+
+func (q *Queries) GetRosterMembership(ctx context.Context, id uuid.UUID) (RosterMembership, error) {
+	row := q.db.QueryRow(ctx, getRosterMembership, id)
+	var i RosterMembership
+	err := row.Scan(
+		&i.ID,
+		&i.PersonID,
+		&i.TeamID,
+		&i.JerseyNumber,
+		&i.Position,
+		&i.JoinedOn,
+		&i.LeftOn,
+		&i.Status,
+		&i.CreatedAt,
+		&i.UpdatedAt,
+	)
+	return i, err
 }
 
 const getTeam = `-- name: GetTeam :one
-SELECT id, name, crest_url, owner_id, created_at, updated_at FROM teams WHERE id = $1
+SELECT id, organization_id, name, age_group, season, created_at, updated_at FROM teams WHERE id = $1
 `
 
 func (q *Queries) GetTeam(ctx context.Context, id uuid.UUID) (Team, error) {
@@ -116,84 +183,56 @@ func (q *Queries) GetTeam(ctx context.Context, id uuid.UUID) (Team, error) {
 	var i Team
 	err := row.Scan(
 		&i.ID,
+		&i.OrganizationID,
 		&i.Name,
-		&i.CrestUrl,
-		&i.OwnerID,
+		&i.AgeGroup,
+		&i.Season,
 		&i.CreatedAt,
 		&i.UpdatedAt,
 	)
 	return i, err
 }
 
-const getTeamMember = `-- name: GetTeamMember :one
-SELECT id, team_id, user_id, role, jersey_number, joined_at FROM team_members WHERE team_id = $1 AND user_id = $2
+const listActiveRoster = `-- name: ListActiveRoster :many
+SELECT r.id, r.jersey_number, r.position, r.joined_on, r.status,
+    p.id AS person_id, p.display_name, p.email, p.birthdate
+FROM roster_memberships r
+JOIN persons p ON p.id = r.person_id
+WHERE r.team_id = $1 AND r.left_on IS NULL
+ORDER BY r.jersey_number NULLS LAST, p.display_name ASC
 `
 
-type GetTeamMemberParams struct {
-	TeamID uuid.UUID `json:"team_id"`
-	UserID uuid.UUID `json:"user_id"`
+type ListActiveRosterRow struct {
+	ID           uuid.UUID   `json:"id"`
+	JerseyNumber *int32      `json:"jersey_number"`
+	Position     *string     `json:"position"`
+	JoinedOn     pgtype.Date `json:"joined_on"`
+	Status       string      `json:"status"`
+	PersonID     uuid.UUID   `json:"person_id"`
+	DisplayName  string      `json:"display_name"`
+	Email        *string     `json:"email"`
+	Birthdate    pgtype.Date `json:"birthdate"`
 }
 
-func (q *Queries) GetTeamMember(ctx context.Context, arg GetTeamMemberParams) (TeamMember, error) {
-	row := q.db.QueryRow(ctx, getTeamMember, arg.TeamID, arg.UserID)
-	var i TeamMember
-	err := row.Scan(
-		&i.ID,
-		&i.TeamID,
-		&i.UserID,
-		&i.Role,
-		&i.JerseyNumber,
-		&i.JoinedAt,
-	)
-	return i, err
-}
-
-const listTeamMembers = `-- name: ListTeamMembers :many
-SELECT m.id, m.role, m.jersey_number, m.joined_at,
-    u.id AS user_id, u.email, u.display_name, u.position, u.skill_level, u.bio, u.avatar_url, u.created_at AS user_created_at
-FROM team_members m
-JOIN users u ON u.id = m.user_id
-WHERE m.team_id = $1
-ORDER BY m.joined_at ASC
-`
-
-type ListTeamMembersRow struct {
-	ID            uuid.UUID          `json:"id"`
-	Role          string             `json:"role"`
-	JerseyNumber  *int32             `json:"jersey_number"`
-	JoinedAt      pgtype.Timestamptz `json:"joined_at"`
-	UserID        uuid.UUID          `json:"user_id"`
-	Email         string             `json:"email"`
-	DisplayName   string             `json:"display_name"`
-	Position      *string            `json:"position"`
-	SkillLevel    int32              `json:"skill_level"`
-	Bio           *string            `json:"bio"`
-	AvatarUrl     *string            `json:"avatar_url"`
-	UserCreatedAt pgtype.Timestamptz `json:"user_created_at"`
-}
-
-func (q *Queries) ListTeamMembers(ctx context.Context, teamID uuid.UUID) ([]ListTeamMembersRow, error) {
-	rows, err := q.db.Query(ctx, listTeamMembers, teamID)
+func (q *Queries) ListActiveRoster(ctx context.Context, teamID uuid.UUID) ([]ListActiveRosterRow, error) {
+	rows, err := q.db.Query(ctx, listActiveRoster, teamID)
 	if err != nil {
 		return nil, err
 	}
 	defer rows.Close()
-	var items []ListTeamMembersRow
+	var items []ListActiveRosterRow
 	for rows.Next() {
-		var i ListTeamMembersRow
+		var i ListActiveRosterRow
 		if err := rows.Scan(
 			&i.ID,
-			&i.Role,
 			&i.JerseyNumber,
-			&i.JoinedAt,
-			&i.UserID,
-			&i.Email,
-			&i.DisplayName,
 			&i.Position,
-			&i.SkillLevel,
-			&i.Bio,
-			&i.AvatarUrl,
-			&i.UserCreatedAt,
+			&i.JoinedOn,
+			&i.Status,
+			&i.PersonID,
+			&i.DisplayName,
+			&i.Email,
+			&i.Birthdate,
 		); err != nil {
 			return nil, err
 		}
@@ -205,48 +244,87 @@ func (q *Queries) ListTeamMembers(ctx context.Context, teamID uuid.UUID) ([]List
 	return items, nil
 }
 
-const listTeams = `-- name: ListTeams :many
-SELECT t.id, t.name, t.crest_url, t.owner_id, t.created_at, t.updated_at,
-    (SELECT count(*) FROM team_members m WHERE m.team_id = t.id)::bigint AS member_count
-FROM teams t
-WHERE ($1::text IS NULL OR t.name ILIKE '%' || $1 || '%')
-ORDER BY t.name ASC
-LIMIT $3 OFFSET $2
+const listTeamsForPerson = `-- name: ListTeamsForPerson :many
+SELECT t.id AS team_id, t.name AS team_name, r.jersey_number, r.position, r.joined_on, r.left_on
+FROM roster_memberships r
+JOIN teams t ON t.id = r.team_id
+WHERE r.person_id = $1
+ORDER BY r.joined_on DESC
 `
 
-type ListTeamsParams struct {
-	Q   *string `json:"q"`
-	Off int32   `json:"off"`
-	Lim int32   `json:"lim"`
+type ListTeamsForPersonRow struct {
+	TeamID       uuid.UUID   `json:"team_id"`
+	TeamName     string      `json:"team_name"`
+	JerseyNumber *int32      `json:"jersey_number"`
+	Position     *string     `json:"position"`
+	JoinedOn     pgtype.Date `json:"joined_on"`
+	LeftOn       pgtype.Date `json:"left_on"`
 }
 
-type ListTeamsRow struct {
-	ID          uuid.UUID          `json:"id"`
-	Name        string             `json:"name"`
-	CrestUrl    *string            `json:"crest_url"`
-	OwnerID     uuid.UUID          `json:"owner_id"`
-	CreatedAt   pgtype.Timestamptz `json:"created_at"`
-	UpdatedAt   pgtype.Timestamptz `json:"updated_at"`
-	MemberCount int64              `json:"member_count"`
-}
-
-func (q *Queries) ListTeams(ctx context.Context, arg ListTeamsParams) ([]ListTeamsRow, error) {
-	rows, err := q.db.Query(ctx, listTeams, arg.Q, arg.Off, arg.Lim)
+func (q *Queries) ListTeamsForPerson(ctx context.Context, personID uuid.UUID) ([]ListTeamsForPersonRow, error) {
+	rows, err := q.db.Query(ctx, listTeamsForPerson, personID)
 	if err != nil {
 		return nil, err
 	}
 	defer rows.Close()
-	var items []ListTeamsRow
+	var items []ListTeamsForPersonRow
 	for rows.Next() {
-		var i ListTeamsRow
+		var i ListTeamsForPersonRow
+		if err := rows.Scan(
+			&i.TeamID,
+			&i.TeamName,
+			&i.JerseyNumber,
+			&i.Position,
+			&i.JoinedOn,
+			&i.LeftOn,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
+const listTeamsInOrg = `-- name: ListTeamsInOrg :many
+SELECT t.id, t.organization_id, t.name, t.age_group, t.season, t.created_at, t.updated_at,
+    (SELECT count(*) FROM roster_memberships r WHERE r.team_id = t.id AND r.left_on IS NULL)::bigint AS active_roster_count
+FROM teams t
+WHERE t.organization_id = $1
+ORDER BY t.name ASC
+`
+
+type ListTeamsInOrgRow struct {
+	ID                uuid.UUID          `json:"id"`
+	OrganizationID    uuid.UUID          `json:"organization_id"`
+	Name              string             `json:"name"`
+	AgeGroup          *string            `json:"age_group"`
+	Season            *string            `json:"season"`
+	CreatedAt         pgtype.Timestamptz `json:"created_at"`
+	UpdatedAt         pgtype.Timestamptz `json:"updated_at"`
+	ActiveRosterCount int64              `json:"active_roster_count"`
+}
+
+func (q *Queries) ListTeamsInOrg(ctx context.Context, organizationID uuid.UUID) ([]ListTeamsInOrgRow, error) {
+	rows, err := q.db.Query(ctx, listTeamsInOrg, organizationID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []ListTeamsInOrgRow
+	for rows.Next() {
+		var i ListTeamsInOrgRow
 		if err := rows.Scan(
 			&i.ID,
+			&i.OrganizationID,
 			&i.Name,
-			&i.CrestUrl,
-			&i.OwnerID,
+			&i.AgeGroup,
+			&i.Season,
 			&i.CreatedAt,
 			&i.UpdatedAt,
-			&i.MemberCount,
+			&i.ActiveRosterCount,
 		); err != nil {
 			return nil, err
 		}
@@ -261,32 +339,38 @@ func (q *Queries) ListTeams(ctx context.Context, arg ListTeamsParams) ([]ListTea
 const updateTeam = `-- name: UpdateTeam :one
 UPDATE teams
 SET name       = COALESCE($1, name),
-    crest_url  = CASE WHEN $2::bool THEN $3 ELSE crest_url END,
+    age_group  = CASE WHEN $2::bool THEN $3 ELSE age_group END,
+    season     = CASE WHEN $4::bool THEN $5 ELSE season END,
     updated_at = now()
-WHERE id = $4
-RETURNING id, name, crest_url, owner_id, created_at, updated_at
+WHERE id = $6
+RETURNING id, organization_id, name, age_group, season, created_at, updated_at
 `
 
 type UpdateTeamParams struct {
 	Name        *string   `json:"name"`
-	SetCrestUrl bool      `json:"set_crest_url"`
-	CrestUrl    *string   `json:"crest_url"`
+	SetAgeGroup bool      `json:"set_age_group"`
+	AgeGroup    *string   `json:"age_group"`
+	SetSeason   bool      `json:"set_season"`
+	Season      *string   `json:"season"`
 	ID          uuid.UUID `json:"id"`
 }
 
 func (q *Queries) UpdateTeam(ctx context.Context, arg UpdateTeamParams) (Team, error) {
 	row := q.db.QueryRow(ctx, updateTeam,
 		arg.Name,
-		arg.SetCrestUrl,
-		arg.CrestUrl,
+		arg.SetAgeGroup,
+		arg.AgeGroup,
+		arg.SetSeason,
+		arg.Season,
 		arg.ID,
 	)
 	var i Team
 	err := row.Scan(
 		&i.ID,
+		&i.OrganizationID,
 		&i.Name,
-		&i.CrestUrl,
-		&i.OwnerID,
+		&i.AgeGroup,
+		&i.Season,
 		&i.CreatedAt,
 		&i.UpdatedAt,
 	)

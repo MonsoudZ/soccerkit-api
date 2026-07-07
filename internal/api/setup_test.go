@@ -61,9 +61,10 @@ func resetDB(t *testing.T) {
 	t.Helper()
 	_, err := testPool.Exec(context.Background(), `
 		TRUNCATE TABLE
-			player_match_stats, fixtures, league_teams, leagues,
-			team_members, teams, match_rsvps, matches, venues,
-			refresh_tokens, users
+			form_answers, form_instances, form_fields, form_templates,
+			share_grants, session_blocks, sessions, drills, games,
+			roster_memberships, teams, guardianships, memberships,
+			refresh_tokens, user_accounts, persons, organizations
 		RESTART IDENTITY CASCADE`)
 	if err != nil {
 		t.Fatalf("reset db: %v", err)
@@ -113,7 +114,8 @@ func do(t *testing.T, method, path, token string, payload any) resp {
 	return out
 }
 
-// registerUser creates a user and returns (accessToken, userID).
+// registerUser creates a coach (Person + account + personal org) and returns
+// (accessToken, personID).
 func registerUser(t *testing.T, email string) (string, string) {
 	t.Helper()
 	r := do(t, http.MethodPost, "/api/v1/auth/register", "", map[string]any{
@@ -123,7 +125,8 @@ func registerUser(t *testing.T, email string) (string, string) {
 		t.Fatalf("register %s: status %d body %s", email, r.status, r.raw)
 	}
 	token, _ := r.body["accessToken"].(string)
-	user, _ := r.body["user"].(map[string]any)
-	id, _ := user["id"].(string)
+	me, _ := r.body["me"].(map[string]any)
+	person, _ := me["person"].(map[string]any)
+	id, _ := person["id"].(string)
 	return token, id
 }

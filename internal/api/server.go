@@ -52,7 +52,7 @@ func (s *Server) Router() http.Handler {
 	r.Get("/docs", s.handleDocs)
 
 	r.Route("/api/v1", func(r chi.Router) {
-		// auth
+		// Auth (public)
 		r.Route("/auth", func(r chi.Router) {
 			r.Post("/register", s.handleRegister)
 			r.Post("/login", s.handleLogin)
@@ -60,71 +60,41 @@ func (s *Server) Router() http.Handler {
 			r.Post("/logout", s.handleLogout)
 		})
 
-		// users / profiles
-		r.Get("/players", s.handleListPlayers)
-		r.Get("/players/{id}", s.handleGetPlayer)
-		r.Get("/players/{id}/stats", s.handlePlayerCareerStats)
+		// Everything below requires an authenticated Person.
 		r.Group(func(r chi.Router) {
 			r.Use(s.requireAuth)
+
 			r.Get("/me", s.handleGetMe)
-			r.Patch("/me", s.handleUpdateMe)
-		})
 
-		// venues
-		r.Route("/venues", func(r chi.Router) {
-			r.Get("/", s.handleListVenues)
-			r.Get("/{id}", s.handleGetVenue)
-			r.With(s.requireAuth).Post("/", s.handleCreateVenue)
-		})
-
-		// matches
-		r.Route("/matches", func(r chi.Router) {
-			r.Get("/", s.handleListMatches)
-			r.Get("/{id}", s.handleGetMatch)
-			r.Get("/{id}/stats", s.handleListMatchStats)
-			r.Group(func(r chi.Router) {
-				r.Use(s.requireAuth)
-				r.Post("/", s.handleCreateMatch)
-				r.Patch("/{id}", s.handleUpdateMatch)
-				r.Delete("/{id}", s.handleCancelMatch)
-				r.Put("/{id}/rsvp", s.handleRsvp)
-				r.Delete("/{id}/rsvp", s.handleLeaveMatch)
-				r.Put("/{id}/stats", s.handleRecordMatchStat)
+			// People (athletes / coaches / parents as Persons)
+			r.Route("/persons", func(r chi.Router) {
+				r.Post("/", s.handleCreatePerson)
+				r.Get("/{id}", s.handleGetPerson)
+				r.Get("/{id}/instances", s.handleListPersonInstances)
+				r.Get("/{id}/aggregate", s.handlePersonAggregate)
 			})
-		})
 
-		// teams
-		r.Route("/teams", func(r chi.Router) {
-			r.Get("/", s.handleListTeams)
-			r.Get("/{id}", s.handleGetTeam)
-			r.Group(func(r chi.Router) {
-				r.Use(s.requireAuth)
+			// Teams & time-bounded roster
+			r.Route("/teams", func(r chi.Router) {
+				r.Get("/", s.handleListTeams)
 				r.Post("/", s.handleCreateTeam)
-				r.Patch("/{id}", s.handleUpdateTeam)
+				r.Get("/{id}", s.handleGetTeam)
 				r.Delete("/{id}", s.handleDeleteTeam)
-				r.Post("/{id}/members", s.handleAddTeamMember)
-				r.Delete("/{id}/members/{userId}", s.handleRemoveTeamMember)
+				r.Post("/{id}/roster", s.handleAddRoster)
+				r.Delete("/{id}/roster/{personId}", s.handleEndRoster)
+			})
+
+			// Evaluation engine
+			r.Route("/templates", func(r chi.Router) {
+				r.Get("/", s.handleListTemplates)
+				r.Post("/", s.handleCreateTemplate)
+				r.Get("/{id}", s.handleGetTemplate)
+			})
+			r.Route("/form-instances", func(r chi.Router) {
+				r.Post("/", s.handleSubmitInstance)
+				r.Get("/{id}", s.handleGetInstance)
 			})
 		})
-
-		// leagues
-		r.Route("/leagues", func(r chi.Router) {
-			r.Get("/", s.handleListLeagues)
-			r.Get("/{id}", s.handleGetLeague)
-			r.Get("/{id}/fixtures", s.handleListFixtures)
-			r.Get("/{id}/standings", s.handleStandings)
-			r.Group(func(r chi.Router) {
-				r.Use(s.requireAuth)
-				r.Post("/", s.handleCreateLeague)
-				r.Post("/{id}/teams", s.handleAddLeagueTeam)
-				r.Post("/{id}/fixtures", s.handleCreateFixture)
-				r.Put("/fixtures/{fixtureId}/result", s.handleRecordResult)
-			})
-		})
-
-		// fixture stats
-		r.Get("/fixtures/{id}/stats", s.handleListFixtureStats)
-		r.With(s.requireAuth).Put("/fixtures/{id}/stats", s.handleRecordFixtureStat)
 	})
 
 	return r
