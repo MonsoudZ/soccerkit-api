@@ -38,13 +38,14 @@ exist in the schema now:
 
 | Area | Endpoints |
 |------|-----------|
-| **auth** | `POST /auth/register` (provisions Person + UserAccount + personal Org + admin/director/coach memberships + seeded templates), `/auth/login`, `/auth/refresh` (rotating), `/auth/logout` |
+| **auth** | `POST /auth/register` (provisions Person + UserAccount + personal Org + admin/director/coach memberships + seeded templates), `/auth/login`, `/auth/apple` (Sign in with Apple — same provisioning; returns `{ token, personID }` for the iOS app), `/auth/refresh` (rotating), `/auth/logout` |
 | **me** | `GET /me` — the authenticated person + their org memberships |
 | **persons** | `POST /persons` (add an athlete), `GET /persons/:id`, `GET /persons/:id/instances`, `GET /persons/:id/aggregate` |
 | **teams** | `GET/POST /teams`, `GET/DELETE /teams/:id`, `POST /teams/:id/roster`, `DELETE /teams/:id/roster/:personId` |
 | **evaluation** | `GET/POST /templates`, `GET /templates/:id`, `POST /form-instances`, `GET /form-instances/:id` |
 | **content** | `GET/POST /drills`, `GET/POST /sessions`, `GET/DELETE /sessions/:id` (sessions carry ordered blocks that can reference drills) |
 | **game day** | `GET/POST /teams/:id/games`, `GET/PATCH /games/:id` (record kickoff, status, and result); post-game reports attach via a form instance's `contextRef` |
+| **iOS sync** | `GET/POST /sync` — opaque `{type,id,payload}` delta-sync for the offline-first app. A **projection over the domain tables**: projected types (`Team`, `Drill`, `Session`) land in their real table (columns projected from the payload, full payload retained); other types round-trip losslessly via a generic `sync_documents` store until they graduate. A shared `seq` sequence is the cursor; rows are scoped per account (Person) |
 
 **Next up (schema already present):** `ShareGrant` scopes (coach-to-coach +
 club library), the director tier, and parent/player self-service.

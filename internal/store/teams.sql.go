@@ -55,7 +55,7 @@ func (q *Queries) AddRosterMembership(ctx context.Context, arg AddRosterMembersh
 const createTeam = `-- name: CreateTeam :one
 INSERT INTO teams (organization_id, name, age_group, season)
 VALUES ($1, $2, $3, $4)
-RETURNING id, organization_id, name, age_group, season, created_at, updated_at
+RETURNING id, organization_id, name, age_group, season, created_at, updated_at, sync_account_id, payload, deleted, seq
 `
 
 type CreateTeamParams struct {
@@ -81,6 +81,10 @@ func (q *Queries) CreateTeam(ctx context.Context, arg CreateTeamParams) (Team, e
 		&i.Season,
 		&i.CreatedAt,
 		&i.UpdatedAt,
+		&i.SyncAccountID,
+		&i.Payload,
+		&i.Deleted,
+		&i.Seq,
 	)
 	return i, err
 }
@@ -175,7 +179,7 @@ func (q *Queries) GetRosterMembership(ctx context.Context, id uuid.UUID) (Roster
 }
 
 const getTeam = `-- name: GetTeam :one
-SELECT id, organization_id, name, age_group, season, created_at, updated_at FROM teams WHERE id = $1
+SELECT id, organization_id, name, age_group, season, created_at, updated_at, sync_account_id, payload, deleted, seq FROM teams WHERE id = $1
 `
 
 func (q *Queries) GetTeam(ctx context.Context, id uuid.UUID) (Team, error) {
@@ -189,6 +193,10 @@ func (q *Queries) GetTeam(ctx context.Context, id uuid.UUID) (Team, error) {
 		&i.Season,
 		&i.CreatedAt,
 		&i.UpdatedAt,
+		&i.SyncAccountID,
+		&i.Payload,
+		&i.Deleted,
+		&i.Seq,
 	)
 	return i, err
 }
@@ -289,7 +297,7 @@ func (q *Queries) ListTeamsForPerson(ctx context.Context, personID uuid.UUID) ([
 }
 
 const listTeamsInOrg = `-- name: ListTeamsInOrg :many
-SELECT t.id, t.organization_id, t.name, t.age_group, t.season, t.created_at, t.updated_at,
+SELECT t.id, t.organization_id, t.name, t.age_group, t.season, t.created_at, t.updated_at, t.sync_account_id, t.payload, t.deleted, t.seq,
     (SELECT count(*) FROM roster_memberships r WHERE r.team_id = t.id AND r.left_on IS NULL)::bigint AS active_roster_count
 FROM teams t
 WHERE t.organization_id = $1
@@ -304,6 +312,10 @@ type ListTeamsInOrgRow struct {
 	Season            *string            `json:"season"`
 	CreatedAt         pgtype.Timestamptz `json:"created_at"`
 	UpdatedAt         pgtype.Timestamptz `json:"updated_at"`
+	SyncAccountID     *uuid.UUID         `json:"sync_account_id"`
+	Payload           []byte             `json:"payload"`
+	Deleted           bool               `json:"deleted"`
+	Seq               *int64             `json:"seq"`
 	ActiveRosterCount int64              `json:"active_roster_count"`
 }
 
@@ -324,6 +336,10 @@ func (q *Queries) ListTeamsInOrg(ctx context.Context, organizationID uuid.UUID) 
 			&i.Season,
 			&i.CreatedAt,
 			&i.UpdatedAt,
+			&i.SyncAccountID,
+			&i.Payload,
+			&i.Deleted,
+			&i.Seq,
 			&i.ActiveRosterCount,
 		); err != nil {
 			return nil, err
@@ -343,7 +359,7 @@ SET name       = COALESCE($1, name),
     season     = CASE WHEN $4::bool THEN $5 ELSE season END,
     updated_at = now()
 WHERE id = $6
-RETURNING id, organization_id, name, age_group, season, created_at, updated_at
+RETURNING id, organization_id, name, age_group, season, created_at, updated_at, sync_account_id, payload, deleted, seq
 `
 
 type UpdateTeamParams struct {
@@ -373,6 +389,10 @@ func (q *Queries) UpdateTeam(ctx context.Context, arg UpdateTeamParams) (Team, e
 		&i.Season,
 		&i.CreatedAt,
 		&i.UpdatedAt,
+		&i.SyncAccountID,
+		&i.Payload,
+		&i.Deleted,
+		&i.Seq,
 	)
 	return i, err
 }

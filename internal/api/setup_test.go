@@ -31,6 +31,7 @@ func TestMain(m *testing.M) {
 	os.Setenv("DATABASE_URL", dbURL)
 	os.Setenv("JWT_ACCESS_SECRET", "test-access-secret")
 	os.Setenv("JWT_REFRESH_SECRET", "test-refresh-secret")
+	os.Setenv("DEV_APPLE_BYPASS", "true") // accept crafted identity tokens in tests
 
 	cfg, err := config.Load()
 	if err != nil {
@@ -61,6 +62,7 @@ func resetDB(t *testing.T) {
 	t.Helper()
 	_, err := testPool.Exec(context.Background(), `
 		TRUNCATE TABLE
+			sync_documents,
 			form_answers, form_instances, form_fields, form_templates,
 			share_grants, session_blocks, sessions, drills, games,
 			roster_memberships, teams, guardianships, memberships,
@@ -68,6 +70,10 @@ func resetDB(t *testing.T) {
 		RESTART IDENTITY CASCADE`)
 	if err != nil {
 		t.Fatalf("reset db: %v", err)
+	}
+	// Rewind the sync cursor sequence so cursors are deterministic per test.
+	if _, err := testPool.Exec(context.Background(), `ALTER SEQUENCE sync_seq RESTART WITH 1`); err != nil {
+		t.Fatalf("reset sync_seq: %v", err)
 	}
 }
 

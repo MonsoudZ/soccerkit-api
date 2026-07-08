@@ -26,6 +26,10 @@ services:
       DATABASE_URL: postgresql://postgres:postgres@db:5432/soccerkit?sslmode=disable
       JWT_ACCESS_SECRET: change-me-in-production
       JWT_REFRESH_SECRET: change-me-too-in-production
+      # Set APPLE_CLIENT_ID to the iOS bundle id for real verification;
+      # DEV_APPLE_BYPASS lets the stack boot for local testing without it.
+      APPLE_CLIENT_ID: ""
+      DEV_APPLE_BYPASS: "true"
       CORS_ORIGINS: "*"
     ports:
       - "3000:3000"

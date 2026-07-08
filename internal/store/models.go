@@ -17,6 +17,10 @@ type Drill struct {
 	Description    *string            `json:"description"`
 	CreatedAt      pgtype.Timestamptz `json:"created_at"`
 	UpdatedAt      pgtype.Timestamptz `json:"updated_at"`
+	SyncAccountID  *uuid.UUID         `json:"sync_account_id"`
+	Payload        []byte             `json:"payload"`
+	Deleted        bool               `json:"deleted"`
+	Seq            *int64             `json:"seq"`
 }
 
 type FormAnswer struct {
@@ -148,6 +152,10 @@ type Session struct {
 	Notes          *string            `json:"notes"`
 	CreatedAt      pgtype.Timestamptz `json:"created_at"`
 	UpdatedAt      pgtype.Timestamptz `json:"updated_at"`
+	SyncAccountID  *uuid.UUID         `json:"sync_account_id"`
+	Payload        []byte             `json:"payload"`
+	Deleted        bool               `json:"deleted"`
+	Seq            *int64             `json:"seq"`
 }
 
 type SessionBlock struct {
@@ -172,6 +180,16 @@ type ShareGrant struct {
 	CreatedAt         pgtype.Timestamptz `json:"created_at"`
 }
 
+type SyncDocument struct {
+	SyncAccountID uuid.UUID          `json:"sync_account_id"`
+	Type          string             `json:"type"`
+	ID            string             `json:"id"`
+	Payload       []byte             `json:"payload"`
+	Deleted       bool               `json:"deleted"`
+	Seq           int64              `json:"seq"`
+	UpdatedAt     pgtype.Timestamptz `json:"updated_at"`
+}
+
 type Team struct {
 	ID             uuid.UUID          `json:"id"`
 	OrganizationID uuid.UUID          `json:"organization_id"`
@@ -180,6 +198,10 @@ type Team struct {
 	Season         *string            `json:"season"`
 	CreatedAt      pgtype.Timestamptz `json:"created_at"`
 	UpdatedAt      pgtype.Timestamptz `json:"updated_at"`
+	SyncAccountID  *uuid.UUID         `json:"sync_account_id"`
+	Payload        []byte             `json:"payload"`
+	Deleted        bool               `json:"deleted"`
+	Seq            *int64             `json:"seq"`
 }
 
 type UserAccount struct {

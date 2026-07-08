@@ -51,9 +51,11 @@ type Querier interface {
 	GetRosterMembership(ctx context.Context, id uuid.UUID) (RosterMembership, error)
 	GetSession(ctx context.Context, id uuid.UUID) (Session, error)
 	GetTeam(ctx context.Context, id uuid.UUID) (Team, error)
+	GetUserAccountByAppleSub(ctx context.Context, appleSub *string) (UserAccount, error)
 	GetUserAccountByEmail(ctx context.Context, email string) (UserAccount, error)
 	GetUserAccountByID(ctx context.Context, id uuid.UUID) (UserAccount, error)
 	HasMembership(ctx context.Context, arg HasMembershipParams) (bool, error)
+	LinkAppleSub(ctx context.Context, arg LinkAppleSubParams) error
 	ListActiveRoster(ctx context.Context, teamID uuid.UUID) ([]ListActiveRosterRow, error)
 	ListAnswersForInstance(ctx context.Context, instanceID uuid.UUID) ([]ListAnswersForInstanceRow, error)
 	ListChildren(ctx context.Context, guardianPersonID uuid.UUID) ([]Person, error)
@@ -66,10 +68,24 @@ type Querier interface {
 	ListRolesInOrg(ctx context.Context, arg ListRolesInOrgParams) ([]string, error)
 	ListSessionBlocks(ctx context.Context, sessionID uuid.UUID) ([]ListSessionBlocksRow, error)
 	ListSessionsInOrg(ctx context.Context, arg ListSessionsInOrgParams) ([]Session, error)
+	// The delta an account hasn't seen: synced rows across every source, ordered by
+	// the shared cursor. Projected tables contribute their type; sync_documents
+	// carries its own.
+	ListSyncChangesSince(ctx context.Context, arg ListSyncChangesSinceParams) ([]ListSyncChangesSinceRow, error)
 	ListTeamsForPerson(ctx context.Context, personID uuid.UUID) ([]ListTeamsForPersonRow, error)
 	ListTeamsInOrg(ctx context.Context, organizationID uuid.UUID) ([]ListTeamsInOrgRow, error)
 	RevokeRefreshToken(ctx context.Context, id uuid.UUID) error
 	RevokeRefreshTokenByToken(ctx context.Context, token string) error
+	SyncTombstoneDocument(ctx context.Context, arg SyncTombstoneDocumentParams) error
+	SyncTombstoneDrill(ctx context.Context, arg SyncTombstoneDrillParams) error
+	SyncTombstoneSession(ctx context.Context, arg SyncTombstoneSessionParams) error
+	// Tombstones are per-table: a delete can only affect a row this account owns,
+	// so REST-created rows (sync_account_id IS NULL) are never tombstoned.
+	SyncTombstoneTeam(ctx context.Context, arg SyncTombstoneTeamParams) error
+	SyncUpsertDocument(ctx context.Context, arg SyncUpsertDocumentParams) error
+	SyncUpsertDrill(ctx context.Context, arg SyncUpsertDrillParams) error
+	SyncUpsertSession(ctx context.Context, arg SyncUpsertSessionParams) error
+	SyncUpsertTeam(ctx context.Context, arg SyncUpsertTeamParams) error
 	UpdateGame(ctx context.Context, arg UpdateGameParams) (Game, error)
 	UpdatePerson(ctx context.Context, arg UpdatePersonParams) (Person, error)
 	UpdateTeam(ctx context.Context, arg UpdateTeamParams) (Team, error)
