@@ -251,6 +251,25 @@ func (q *Queries) GetRefreshToken(ctx context.Context, token string) (RefreshTok
 	return i, err
 }
 
+const getUserAccountByAppleSub = `-- name: GetUserAccountByAppleSub :one
+SELECT id, person_id, email, password_hash, apple_sub, created_at, updated_at FROM user_accounts WHERE apple_sub = $1
+`
+
+func (q *Queries) GetUserAccountByAppleSub(ctx context.Context, appleSub *string) (UserAccount, error) {
+	row := q.db.QueryRow(ctx, getUserAccountByAppleSub, appleSub)
+	var i UserAccount
+	err := row.Scan(
+		&i.ID,
+		&i.PersonID,
+		&i.Email,
+		&i.PasswordHash,
+		&i.AppleSub,
+		&i.CreatedAt,
+		&i.UpdatedAt,
+	)
+	return i, err
+}
+
 const getUserAccountByEmail = `-- name: GetUserAccountByEmail :one
 SELECT id, person_id, email, password_hash, apple_sub, created_at, updated_at FROM user_accounts WHERE email = $1
 `
@@ -305,6 +324,20 @@ func (q *Queries) HasMembership(ctx context.Context, arg HasMembershipParams) (b
 	var exists bool
 	err := row.Scan(&exists)
 	return exists, err
+}
+
+const linkAppleSub = `-- name: LinkAppleSub :exec
+UPDATE user_accounts SET apple_sub = $2, updated_at = now() WHERE id = $1
+`
+
+type LinkAppleSubParams struct {
+	ID       uuid.UUID `json:"id"`
+	AppleSub *string   `json:"apple_sub"`
+}
+
+func (q *Queries) LinkAppleSub(ctx context.Context, arg LinkAppleSubParams) error {
+	_, err := q.db.Exec(ctx, linkAppleSub, arg.ID, arg.AppleSub)
+	return err
 }
 
 const listChildren = `-- name: ListChildren :many

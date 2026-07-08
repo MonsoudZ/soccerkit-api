@@ -31,6 +31,7 @@ func TestMain(m *testing.M) {
 	os.Setenv("DATABASE_URL", dbURL)
 	os.Setenv("JWT_ACCESS_SECRET", "test-access-secret")
 	os.Setenv("JWT_REFRESH_SECRET", "test-refresh-secret")
+	os.Setenv("DEV_APPLE_BYPASS", "true") // accept crafted identity tokens in tests
 
 	cfg, err := config.Load()
 	if err != nil {

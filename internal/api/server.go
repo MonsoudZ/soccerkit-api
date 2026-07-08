@@ -19,10 +19,16 @@ type Server struct {
 	cfg   *config.Config
 	pool  *pgxpool.Pool
 	store *store.Queries
+	apple *appleVerifier
 }
 
 func NewServer(cfg *config.Config, pool *pgxpool.Pool) *Server {
-	return &Server{cfg: cfg, pool: pool, store: store.New(pool)}
+	return &Server{
+		cfg:   cfg,
+		pool:  pool,
+		store: store.New(pool),
+		apple: newAppleVerifier(cfg.AppleClientID, cfg.DevAppleBypass),
+	}
 }
 
 // Router builds the chi router with all routes and middleware mounted.
@@ -56,6 +62,7 @@ func (s *Server) Router() http.Handler {
 		r.Route("/auth", func(r chi.Router) {
 			r.Post("/register", s.handleRegister)
 			r.Post("/login", s.handleLogin)
+			r.Post("/apple", s.handleAppleAuth)
 			r.Post("/refresh", s.handleRefresh)
 			r.Post("/logout", s.handleLogout)
 		})

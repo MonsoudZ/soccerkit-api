@@ -38,7 +38,7 @@ exist in the schema now:
 
 | Area | Endpoints |
 |------|-----------|
-| **auth** | `POST /auth/register` (provisions Person + UserAccount + personal Org + admin/director/coach memberships + seeded templates), `/auth/login`, `/auth/refresh` (rotating), `/auth/logout` |
+| **auth** | `POST /auth/register` (provisions Person + UserAccount + personal Org + admin/director/coach memberships + seeded templates), `/auth/login`, `/auth/apple` (Sign in with Apple — same provisioning; returns `{ token, personID }` for the iOS app), `/auth/refresh` (rotating), `/auth/logout` |
 | **me** | `GET /me` — the authenticated person + their org memberships |
 | **persons** | `POST /persons` (add an athlete), `GET /persons/:id`, `GET /persons/:id/instances`, `GET /persons/:id/aggregate` |
 | **teams** | `GET/POST /teams`, `GET/DELETE /teams/:id`, `POST /teams/:id/roster`, `DELETE /teams/:id/roster/:personId` |

@@ -51,9 +51,11 @@ type Querier interface {
 	GetRosterMembership(ctx context.Context, id uuid.UUID) (RosterMembership, error)
 	GetSession(ctx context.Context, id uuid.UUID) (Session, error)
 	GetTeam(ctx context.Context, id uuid.UUID) (Team, error)
+	GetUserAccountByAppleSub(ctx context.Context, appleSub *string) (UserAccount, error)
 	GetUserAccountByEmail(ctx context.Context, email string) (UserAccount, error)
 	GetUserAccountByID(ctx context.Context, id uuid.UUID) (UserAccount, error)
 	HasMembership(ctx context.Context, arg HasMembershipParams) (bool, error)
+	LinkAppleSub(ctx context.Context, arg LinkAppleSubParams) error
 	ListActiveRoster(ctx context.Context, teamID uuid.UUID) ([]ListActiveRosterRow, error)
 	ListAnswersForInstance(ctx context.Context, instanceID uuid.UUID) ([]ListAnswersForInstanceRow, error)
 	ListChildren(ctx context.Context, guardianPersonID uuid.UUID) ([]Person, error)

@@ -85,3 +85,9 @@ SELECT p.* FROM guardianships g
 JOIN persons p ON p.id = g.child_person_id
 WHERE g.guardian_person_id = $1
 ORDER BY p.display_name ASC;
+
+-- name: GetUserAccountByAppleSub :one
+SELECT * FROM user_accounts WHERE apple_sub = $1;
+
+-- name: LinkAppleSub :exec
+UPDATE user_accounts SET apple_sub = $2, updated_at = now() WHERE id = $1;

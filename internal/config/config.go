@@ -16,6 +16,14 @@ type Config struct {
 	JWTAccessTTL    time.Duration
 	JWTRefreshTTL   time.Duration
 	CORSOrigins     string
+
+	// AppleClientID is the expected `aud` of the Apple identity token — the iOS
+	// app's bundle identifier. Required for Sign in with Apple unless
+	// DevAppleBypass is set.
+	AppleClientID string
+	// DevAppleBypass trusts the identity token's claims without verifying Apple's
+	// signature. Local development only — never enable in a deployed environment.
+	DevAppleBypass bool
 }
 
 // Load reads configuration from the environment, applying defaults for local
@@ -45,6 +53,12 @@ func Load() (*Config, error) {
 		return nil, fmt.Errorf("invalid JWT_REFRESH_TTL: %w", err)
 	}
 
+	bypass := getenv("DEV_APPLE_BYPASS", "") == "true"
+	appleClientID := getenv("APPLE_CLIENT_ID", "")
+	if appleClientID == "" && !bypass {
+		return nil, fmt.Errorf("APPLE_CLIENT_ID is required for Sign in with Apple (or set DEV_APPLE_BYPASS=true for local dev)")
+	}
+
 	return &Config{
 		Env:             getenv("ENV", "development"),
 		Port:            port,
@@ -53,6 +67,8 @@ func Load() (*Config, error) {
 		JWTAccessTTL:    accessTTL,
 		JWTRefreshTTL:   refreshTTL,
 		CORSOrigins:     getenv("CORS_ORIGINS", "*"),
+		AppleClientID:   appleClientID,
+		DevAppleBypass:  bypass,
 	}, nil
 }
 
