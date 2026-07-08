@@ -73,6 +73,10 @@ func (s *Server) Router() http.Handler {
 
 			r.Get("/me", s.handleGetMe)
 
+			// iOS opaque delta-sync (projection over the domain tables).
+			r.Get("/sync", s.handleSyncPull)
+			r.Post("/sync", s.handleSyncPush)
+
 			// People (athletes / coaches / parents as Persons)
 			r.Route("/persons", func(r chi.Router) {
 				r.Post("/", s.handleCreatePerson)

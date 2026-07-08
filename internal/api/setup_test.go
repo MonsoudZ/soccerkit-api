@@ -62,6 +62,7 @@ func resetDB(t *testing.T) {
 	t.Helper()
 	_, err := testPool.Exec(context.Background(), `
 		TRUNCATE TABLE
+			sync_documents,
 			form_answers, form_instances, form_fields, form_templates,
 			share_grants, session_blocks, sessions, drills, games,
 			roster_memberships, teams, guardianships, memberships,
@@ -69,6 +70,10 @@ func resetDB(t *testing.T) {
 		RESTART IDENTITY CASCADE`)
 	if err != nil {
 		t.Fatalf("reset db: %v", err)
+	}
+	// Rewind the sync cursor sequence so cursors are deterministic per test.
+	if _, err := testPool.Exec(context.Background(), `ALTER SEQUENCE sync_seq RESTART WITH 1`); err != nil {
+		t.Fatalf("reset sync_seq: %v", err)
 	}
 }
 

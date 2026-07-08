@@ -16,7 +16,7 @@ const createDrill = `-- name: CreateDrill :one
 
 INSERT INTO drills (organization_id, author_person_id, name, description)
 VALUES ($1, $2, $3, $4)
-RETURNING id, organization_id, author_person_id, name, description, created_at, updated_at
+RETURNING id, organization_id, author_person_id, name, description, created_at, updated_at, sync_account_id, payload, deleted, seq
 `
 
 type CreateDrillParams struct {
@@ -43,6 +43,10 @@ func (q *Queries) CreateDrill(ctx context.Context, arg CreateDrillParams) (Drill
 		&i.Description,
 		&i.CreatedAt,
 		&i.UpdatedAt,
+		&i.SyncAccountID,
+		&i.Payload,
+		&i.Deleted,
+		&i.Seq,
 	)
 	return i, err
 }
@@ -92,7 +96,7 @@ const createSession = `-- name: CreateSession :one
 
 INSERT INTO sessions (organization_id, author_person_id, team_id, title, scheduled_at, notes)
 VALUES ($1, $2, $3, $4, $5, $6)
-RETURNING id, organization_id, author_person_id, team_id, title, scheduled_at, notes, created_at, updated_at
+RETURNING id, organization_id, author_person_id, team_id, title, scheduled_at, notes, created_at, updated_at, sync_account_id, payload, deleted, seq
 `
 
 type CreateSessionParams struct {
@@ -125,6 +129,10 @@ func (q *Queries) CreateSession(ctx context.Context, arg CreateSessionParams) (S
 		&i.Notes,
 		&i.CreatedAt,
 		&i.UpdatedAt,
+		&i.SyncAccountID,
+		&i.Payload,
+		&i.Deleted,
+		&i.Seq,
 	)
 	return i, err
 }
@@ -176,7 +184,7 @@ func (q *Queries) DeleteSession(ctx context.Context, id uuid.UUID) error {
 }
 
 const getDrill = `-- name: GetDrill :one
-SELECT id, organization_id, author_person_id, name, description, created_at, updated_at FROM drills WHERE id = $1
+SELECT id, organization_id, author_person_id, name, description, created_at, updated_at, sync_account_id, payload, deleted, seq FROM drills WHERE id = $1
 `
 
 func (q *Queries) GetDrill(ctx context.Context, id uuid.UUID) (Drill, error) {
@@ -190,6 +198,10 @@ func (q *Queries) GetDrill(ctx context.Context, id uuid.UUID) (Drill, error) {
 		&i.Description,
 		&i.CreatedAt,
 		&i.UpdatedAt,
+		&i.SyncAccountID,
+		&i.Payload,
+		&i.Deleted,
+		&i.Seq,
 	)
 	return i, err
 }
@@ -218,7 +230,7 @@ func (q *Queries) GetGame(ctx context.Context, id uuid.UUID) (Game, error) {
 }
 
 const getSession = `-- name: GetSession :one
-SELECT id, organization_id, author_person_id, team_id, title, scheduled_at, notes, created_at, updated_at FROM sessions WHERE id = $1
+SELECT id, organization_id, author_person_id, team_id, title, scheduled_at, notes, created_at, updated_at, sync_account_id, payload, deleted, seq FROM sessions WHERE id = $1
 `
 
 func (q *Queries) GetSession(ctx context.Context, id uuid.UUID) (Session, error) {
@@ -234,12 +246,16 @@ func (q *Queries) GetSession(ctx context.Context, id uuid.UUID) (Session, error)
 		&i.Notes,
 		&i.CreatedAt,
 		&i.UpdatedAt,
+		&i.SyncAccountID,
+		&i.Payload,
+		&i.Deleted,
+		&i.Seq,
 	)
 	return i, err
 }
 
 const listDrillsInOrg = `-- name: ListDrillsInOrg :many
-SELECT id, organization_id, author_person_id, name, description, created_at, updated_at FROM drills WHERE organization_id = $1 ORDER BY name ASC
+SELECT id, organization_id, author_person_id, name, description, created_at, updated_at, sync_account_id, payload, deleted, seq FROM drills WHERE organization_id = $1 ORDER BY name ASC
 `
 
 func (q *Queries) ListDrillsInOrg(ctx context.Context, organizationID uuid.UUID) ([]Drill, error) {
@@ -259,6 +275,10 @@ func (q *Queries) ListDrillsInOrg(ctx context.Context, organizationID uuid.UUID)
 			&i.Description,
 			&i.CreatedAt,
 			&i.UpdatedAt,
+			&i.SyncAccountID,
+			&i.Payload,
+			&i.Deleted,
+			&i.Seq,
 		); err != nil {
 			return nil, err
 		}
@@ -355,7 +375,7 @@ func (q *Queries) ListSessionBlocks(ctx context.Context, sessionID uuid.UUID) ([
 }
 
 const listSessionsInOrg = `-- name: ListSessionsInOrg :many
-SELECT id, organization_id, author_person_id, team_id, title, scheduled_at, notes, created_at, updated_at FROM sessions
+SELECT id, organization_id, author_person_id, team_id, title, scheduled_at, notes, created_at, updated_at, sync_account_id, payload, deleted, seq FROM sessions
 WHERE organization_id = $1
   AND ($2::uuid IS NULL OR team_id = $2)
 ORDER BY scheduled_at DESC NULLS LAST, created_at DESC
@@ -385,6 +405,10 @@ func (q *Queries) ListSessionsInOrg(ctx context.Context, arg ListSessionsInOrgPa
 			&i.Notes,
 			&i.CreatedAt,
 			&i.UpdatedAt,
+			&i.SyncAccountID,
+			&i.Payload,
+			&i.Deleted,
+			&i.Seq,
 		); err != nil {
 			return nil, err
 		}
