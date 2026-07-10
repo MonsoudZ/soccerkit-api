@@ -9,6 +9,17 @@ import (
 	"github.com/jackc/pgx/v5/pgtype"
 )
 
+type Diagram struct {
+	ID            uuid.UUID          `json:"id"`
+	SyncAccountID *uuid.UUID         `json:"sync_account_id"`
+	TeamID        *uuid.UUID         `json:"team_id"`
+	Title         *string            `json:"title"`
+	Payload       []byte             `json:"payload"`
+	Deleted       bool               `json:"deleted"`
+	Seq           *int64             `json:"seq"`
+	UpdatedAt     pgtype.Timestamptz `json:"updated_at"`
+}
+
 type Drill struct {
 	ID             uuid.UUID          `json:"id"`
 	OrganizationID uuid.UUID          `json:"organization_id"`
@@ -21,6 +32,18 @@ type Drill struct {
 	Payload        []byte             `json:"payload"`
 	Deleted        bool               `json:"deleted"`
 	Seq            *int64             `json:"seq"`
+}
+
+type Event struct {
+	ID            uuid.UUID          `json:"id"`
+	SyncAccountID *uuid.UUID         `json:"sync_account_id"`
+	TeamID        *uuid.UUID         `json:"team_id"`
+	Title         *string            `json:"title"`
+	Kind          *string            `json:"kind"`
+	Payload       []byte             `json:"payload"`
+	Deleted       bool               `json:"deleted"`
+	Seq           *int64             `json:"seq"`
+	UpdatedAt     pgtype.Timestamptz `json:"updated_at"`
 }
 
 type FormAnswer struct {
@@ -122,6 +145,19 @@ type Person struct {
 	Payload               []byte             `json:"payload"`
 	Deleted               bool               `json:"deleted"`
 	Seq                   *int64             `json:"seq"`
+}
+
+type Player struct {
+	ID            uuid.UUID          `json:"id"`
+	SyncAccountID *uuid.UUID         `json:"sync_account_id"`
+	PersonID      *uuid.UUID         `json:"person_id"`
+	Name          *string            `json:"name"`
+	Number        *int32             `json:"number"`
+	Position      *string            `json:"position"`
+	Payload       []byte             `json:"payload"`
+	Deleted       bool               `json:"deleted"`
+	Seq           *int64             `json:"seq"`
+	UpdatedAt     pgtype.Timestamptz `json:"updated_at"`
 }
 
 type RefreshToken struct {

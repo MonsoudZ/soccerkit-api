@@ -79,16 +79,22 @@ type Querier interface {
 	ListTeamsInOrg(ctx context.Context, organizationID uuid.UUID) ([]ListTeamsInOrgRow, error)
 	RevokeRefreshToken(ctx context.Context, id uuid.UUID) error
 	RevokeRefreshTokenByToken(ctx context.Context, token string) error
+	SyncTombstoneDiagram(ctx context.Context, arg SyncTombstoneDiagramParams) error
 	SyncTombstoneDocument(ctx context.Context, arg SyncTombstoneDocumentParams) error
 	SyncTombstoneDrill(ctx context.Context, arg SyncTombstoneDrillParams) error
+	SyncTombstoneEvent(ctx context.Context, arg SyncTombstoneEventParams) error
 	SyncTombstonePerson(ctx context.Context, arg SyncTombstonePersonParams) error
+	SyncTombstonePlayer(ctx context.Context, arg SyncTombstonePlayerParams) error
 	SyncTombstoneSession(ctx context.Context, arg SyncTombstoneSessionParams) error
 	// Tombstones are per-table: a delete can only affect a row this account owns,
 	// so REST-created rows (sync_account_id IS NULL) are never tombstoned.
 	SyncTombstoneTeam(ctx context.Context, arg SyncTombstoneTeamParams) error
+	SyncUpsertDiagram(ctx context.Context, arg SyncUpsertDiagramParams) error
 	SyncUpsertDocument(ctx context.Context, arg SyncUpsertDocumentParams) error
 	SyncUpsertDrill(ctx context.Context, arg SyncUpsertDrillParams) error
+	SyncUpsertEvent(ctx context.Context, arg SyncUpsertEventParams) error
 	SyncUpsertPerson(ctx context.Context, arg SyncUpsertPersonParams) error
+	SyncUpsertPlayer(ctx context.Context, arg SyncUpsertPlayerParams) error
 	SyncUpsertSession(ctx context.Context, arg SyncUpsertSessionParams) error
 	SyncUpsertTeam(ctx context.Context, arg SyncUpsertTeamParams) error
 	UpdateGame(ctx context.Context, arg UpdateGameParams) (Game, error)

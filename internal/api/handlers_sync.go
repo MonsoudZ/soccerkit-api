@@ -195,6 +195,52 @@ func (s *Server) applyUpsert(ctx context.Context, q *store.Queries, account, org
 			EmergencyContactPhone: nilIfEmpty(p.EmergencyContactPhone),
 			MedicalNotes:          nilIfEmpty(p.MedicalNotes), Payload: rec.Payload,
 		})
+	case "Player":
+		id, err := uuid.Parse(rec.ID)
+		if err != nil {
+			return errValidation("Player id must be a UUID")
+		}
+		var p struct {
+			PersonID string `json:"personID"`
+			Name     string `json:"name"`
+			Number   int32  `json:"number"`
+			Position string `json:"position"`
+		}
+		_ = json.Unmarshal(rec.Payload, &p)
+		return q.SyncUpsertPlayer(ctx, store.SyncUpsertPlayerParams{
+			ID: id, SyncAccountID: &account, PersonID: parseUUIDPtr(p.PersonID),
+			Name: nilIfEmpty(p.Name), Number: &p.Number, Position: nilIfEmpty(p.Position),
+			Payload: rec.Payload,
+		})
+	case "Event":
+		id, err := uuid.Parse(rec.ID)
+		if err != nil {
+			return errValidation("Event id must be a UUID")
+		}
+		var p struct {
+			TeamID string `json:"teamID"`
+			Title  string `json:"title"`
+			Kind   string `json:"kind"`
+		}
+		_ = json.Unmarshal(rec.Payload, &p)
+		return q.SyncUpsertEvent(ctx, store.SyncUpsertEventParams{
+			ID: id, SyncAccountID: &account, TeamID: parseUUIDPtr(p.TeamID),
+			Title: nilIfEmpty(p.Title), Kind: nilIfEmpty(p.Kind), Payload: rec.Payload,
+		})
+	case "Diagram":
+		id, err := uuid.Parse(rec.ID)
+		if err != nil {
+			return errValidation("Diagram id must be a UUID")
+		}
+		var p struct {
+			TeamID string `json:"teamID"`
+			Title  string `json:"title"`
+		}
+		_ = json.Unmarshal(rec.Payload, &p)
+		return q.SyncUpsertDiagram(ctx, store.SyncUpsertDiagramParams{
+			ID: id, SyncAccountID: &account, TeamID: parseUUIDPtr(p.TeamID),
+			Title: nilIfEmpty(p.Title), Payload: rec.Payload,
+		})
 	default:
 		return q.SyncUpsertDocument(ctx, store.SyncUpsertDocumentParams{
 			SyncAccountID: account, Type: rec.Type, ID: rec.ID, Payload: rec.Payload,
@@ -229,6 +275,24 @@ func (s *Server) applyDelete(ctx context.Context, q *store.Queries, account uuid
 			return errValidation("Person id must be a UUID")
 		}
 		return q.SyncTombstonePerson(ctx, store.SyncTombstonePersonParams{ID: id, SyncAccountID: &account})
+	case "Player":
+		id, err := uuid.Parse(key.ID)
+		if err != nil {
+			return errValidation("Player id must be a UUID")
+		}
+		return q.SyncTombstonePlayer(ctx, store.SyncTombstonePlayerParams{ID: id, SyncAccountID: &account})
+	case "Event":
+		id, err := uuid.Parse(key.ID)
+		if err != nil {
+			return errValidation("Event id must be a UUID")
+		}
+		return q.SyncTombstoneEvent(ctx, store.SyncTombstoneEventParams{ID: id, SyncAccountID: &account})
+	case "Diagram":
+		id, err := uuid.Parse(key.ID)
+		if err != nil {
+			return errValidation("Diagram id must be a UUID")
+		}
+		return q.SyncTombstoneDiagram(ctx, store.SyncTombstoneDiagramParams{ID: id, SyncAccountID: &account})
 	default:
 		return q.SyncTombstoneDocument(ctx, store.SyncTombstoneDocumentParams{
 			SyncAccountID: account, Type: key.Type, ID: key.ID,
@@ -258,4 +322,17 @@ func nilIfEmpty(s string) *string {
 		return nil
 	}
 	return &s
+}
+
+// parseUUIDPtr returns a pointer to the parsed UUID, or nil for an empty or
+// invalid string (soft references may be absent or point at un-synced entities).
+func parseUUIDPtr(s string) *uuid.UUID {
+	if s == "" {
+		return nil
+	}
+	id, err := uuid.Parse(s)
+	if err != nil {
+		return nil
+	}
+	return &id
 }

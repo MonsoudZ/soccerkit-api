@@ -25,6 +25,15 @@ SELECT delta.type, delta.id, delta.payload, delta.deleted, delta.seq FROM (
     SELECT 'Person'::text, pe.id::text, pe.payload, pe.deleted, pe.seq
         FROM persons pe WHERE pe.sync_account_id = $1 AND pe.seq > $2
     UNION ALL
+    SELECT 'Player'::text, pl.id::text, pl.payload, pl.deleted, pl.seq
+        FROM players pl WHERE pl.sync_account_id = $1 AND pl.seq > $2
+    UNION ALL
+    SELECT 'Event'::text, ev.id::text, ev.payload, ev.deleted, ev.seq
+        FROM events ev WHERE ev.sync_account_id = $1 AND ev.seq > $2
+    UNION ALL
+    SELECT 'Diagram'::text, dg.id::text, dg.payload, dg.deleted, dg.seq
+        FROM diagrams dg WHERE dg.sync_account_id = $1 AND dg.seq > $2
+    UNION ALL
     SELECT sd.type, sd.id, sd.payload, sd.deleted, sd.seq
         FROM sync_documents sd WHERE sd.sync_account_id = $1 AND sd.seq > $2
 ) delta
@@ -73,6 +82,21 @@ func (q *Queries) ListSyncChangesSince(ctx context.Context, arg ListSyncChangesS
 	return items, nil
 }
 
+const syncTombstoneDiagram = `-- name: SyncTombstoneDiagram :exec
+UPDATE diagrams SET deleted = true, seq = nextval('sync_seq'), updated_at = now()
+WHERE id = $1 AND sync_account_id = $2
+`
+
+type SyncTombstoneDiagramParams struct {
+	ID            uuid.UUID  `json:"id"`
+	SyncAccountID *uuid.UUID `json:"sync_account_id"`
+}
+
+func (q *Queries) SyncTombstoneDiagram(ctx context.Context, arg SyncTombstoneDiagramParams) error {
+	_, err := q.db.Exec(ctx, syncTombstoneDiagram, arg.ID, arg.SyncAccountID)
+	return err
+}
+
 const syncTombstoneDocument = `-- name: SyncTombstoneDocument :exec
 INSERT INTO sync_documents (sync_account_id, type, id, payload, deleted, seq)
 VALUES ($1, $2, $3, NULL, true, nextval('sync_seq'))
@@ -106,6 +130,21 @@ func (q *Queries) SyncTombstoneDrill(ctx context.Context, arg SyncTombstoneDrill
 	return err
 }
 
+const syncTombstoneEvent = `-- name: SyncTombstoneEvent :exec
+UPDATE events SET deleted = true, seq = nextval('sync_seq'), updated_at = now()
+WHERE id = $1 AND sync_account_id = $2
+`
+
+type SyncTombstoneEventParams struct {
+	ID            uuid.UUID  `json:"id"`
+	SyncAccountID *uuid.UUID `json:"sync_account_id"`
+}
+
+func (q *Queries) SyncTombstoneEvent(ctx context.Context, arg SyncTombstoneEventParams) error {
+	_, err := q.db.Exec(ctx, syncTombstoneEvent, arg.ID, arg.SyncAccountID)
+	return err
+}
+
 const syncTombstonePerson = `-- name: SyncTombstonePerson :exec
 UPDATE persons SET deleted = true, seq = nextval('sync_seq'), updated_at = now()
 WHERE id = $1 AND sync_account_id = $2
@@ -118,6 +157,21 @@ type SyncTombstonePersonParams struct {
 
 func (q *Queries) SyncTombstonePerson(ctx context.Context, arg SyncTombstonePersonParams) error {
 	_, err := q.db.Exec(ctx, syncTombstonePerson, arg.ID, arg.SyncAccountID)
+	return err
+}
+
+const syncTombstonePlayer = `-- name: SyncTombstonePlayer :exec
+UPDATE players SET deleted = true, seq = nextval('sync_seq'), updated_at = now()
+WHERE id = $1 AND sync_account_id = $2
+`
+
+type SyncTombstonePlayerParams struct {
+	ID            uuid.UUID  `json:"id"`
+	SyncAccountID *uuid.UUID `json:"sync_account_id"`
+}
+
+func (q *Queries) SyncTombstonePlayer(ctx context.Context, arg SyncTombstonePlayerParams) error {
+	_, err := q.db.Exec(ctx, syncTombstonePlayer, arg.ID, arg.SyncAccountID)
 	return err
 }
 
@@ -151,6 +205,34 @@ type SyncTombstoneTeamParams struct {
 // so REST-created rows (sync_account_id IS NULL) are never tombstoned.
 func (q *Queries) SyncTombstoneTeam(ctx context.Context, arg SyncTombstoneTeamParams) error {
 	_, err := q.db.Exec(ctx, syncTombstoneTeam, arg.ID, arg.SyncAccountID)
+	return err
+}
+
+const syncUpsertDiagram = `-- name: SyncUpsertDiagram :exec
+INSERT INTO diagrams (id, sync_account_id, team_id, title, payload, deleted, seq)
+VALUES ($1, $2, $3, $4, $5, false, nextval('sync_seq'))
+ON CONFLICT (id) DO UPDATE
+SET team_id = EXCLUDED.team_id, title = EXCLUDED.title,
+    sync_account_id = EXCLUDED.sync_account_id, payload = EXCLUDED.payload,
+    deleted = false, seq = nextval('sync_seq'), updated_at = now()
+`
+
+type SyncUpsertDiagramParams struct {
+	ID            uuid.UUID  `json:"id"`
+	SyncAccountID *uuid.UUID `json:"sync_account_id"`
+	TeamID        *uuid.UUID `json:"team_id"`
+	Title         *string    `json:"title"`
+	Payload       []byte     `json:"payload"`
+}
+
+func (q *Queries) SyncUpsertDiagram(ctx context.Context, arg SyncUpsertDiagramParams) error {
+	_, err := q.db.Exec(ctx, syncUpsertDiagram,
+		arg.ID,
+		arg.SyncAccountID,
+		arg.TeamID,
+		arg.Title,
+		arg.Payload,
+	)
 	return err
 }
 
@@ -210,6 +292,36 @@ func (q *Queries) SyncUpsertDrill(ctx context.Context, arg SyncUpsertDrillParams
 	return err
 }
 
+const syncUpsertEvent = `-- name: SyncUpsertEvent :exec
+INSERT INTO events (id, sync_account_id, team_id, title, kind, payload, deleted, seq)
+VALUES ($1, $2, $3, $4, $5, $6, false, nextval('sync_seq'))
+ON CONFLICT (id) DO UPDATE
+SET team_id = EXCLUDED.team_id, title = EXCLUDED.title, kind = EXCLUDED.kind,
+    sync_account_id = EXCLUDED.sync_account_id, payload = EXCLUDED.payload,
+    deleted = false, seq = nextval('sync_seq'), updated_at = now()
+`
+
+type SyncUpsertEventParams struct {
+	ID            uuid.UUID  `json:"id"`
+	SyncAccountID *uuid.UUID `json:"sync_account_id"`
+	TeamID        *uuid.UUID `json:"team_id"`
+	Title         *string    `json:"title"`
+	Kind          *string    `json:"kind"`
+	Payload       []byte     `json:"payload"`
+}
+
+func (q *Queries) SyncUpsertEvent(ctx context.Context, arg SyncUpsertEventParams) error {
+	_, err := q.db.Exec(ctx, syncUpsertEvent,
+		arg.ID,
+		arg.SyncAccountID,
+		arg.TeamID,
+		arg.Title,
+		arg.Kind,
+		arg.Payload,
+	)
+	return err
+}
+
 const syncUpsertPerson = `-- name: SyncUpsertPerson :exec
 INSERT INTO persons (id, sync_account_id, display_name, emergency_contact_name, emergency_contact_phone, medical_notes, payload, deleted, seq)
 VALUES ($1, $2, $3, $4, $5, $6, $7, false, nextval('sync_seq'))
@@ -240,6 +352,38 @@ func (q *Queries) SyncUpsertPerson(ctx context.Context, arg SyncUpsertPersonPara
 		arg.EmergencyContactName,
 		arg.EmergencyContactPhone,
 		arg.MedicalNotes,
+		arg.Payload,
+	)
+	return err
+}
+
+const syncUpsertPlayer = `-- name: SyncUpsertPlayer :exec
+INSERT INTO players (id, sync_account_id, person_id, name, number, position, payload, deleted, seq)
+VALUES ($1, $2, $3, $4, $5, $6, $7, false, nextval('sync_seq'))
+ON CONFLICT (id) DO UPDATE
+SET person_id = EXCLUDED.person_id, name = EXCLUDED.name, number = EXCLUDED.number,
+    position = EXCLUDED.position, sync_account_id = EXCLUDED.sync_account_id,
+    payload = EXCLUDED.payload, deleted = false, seq = nextval('sync_seq'), updated_at = now()
+`
+
+type SyncUpsertPlayerParams struct {
+	ID            uuid.UUID  `json:"id"`
+	SyncAccountID *uuid.UUID `json:"sync_account_id"`
+	PersonID      *uuid.UUID `json:"person_id"`
+	Name          *string    `json:"name"`
+	Number        *int32     `json:"number"`
+	Position      *string    `json:"position"`
+	Payload       []byte     `json:"payload"`
+}
+
+func (q *Queries) SyncUpsertPlayer(ctx context.Context, arg SyncUpsertPlayerParams) error {
+	_, err := q.db.Exec(ctx, syncUpsertPlayer,
+		arg.ID,
+		arg.SyncAccountID,
+		arg.PersonID,
+		arg.Name,
+		arg.Number,
+		arg.Position,
 		arg.Payload,
 	)
 	return err

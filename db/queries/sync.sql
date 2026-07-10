@@ -15,6 +15,15 @@ SELECT delta.type, delta.id, delta.payload, delta.deleted, delta.seq FROM (
     SELECT 'Person'::text, pe.id::text, pe.payload, pe.deleted, pe.seq
         FROM persons pe WHERE pe.sync_account_id = $1 AND pe.seq > $2
     UNION ALL
+    SELECT 'Player'::text, pl.id::text, pl.payload, pl.deleted, pl.seq
+        FROM players pl WHERE pl.sync_account_id = $1 AND pl.seq > $2
+    UNION ALL
+    SELECT 'Event'::text, ev.id::text, ev.payload, ev.deleted, ev.seq
+        FROM events ev WHERE ev.sync_account_id = $1 AND ev.seq > $2
+    UNION ALL
+    SELECT 'Diagram'::text, dg.id::text, dg.payload, dg.deleted, dg.seq
+        FROM diagrams dg WHERE dg.sync_account_id = $1 AND dg.seq > $2
+    UNION ALL
     SELECT sd.type, sd.id, sd.payload, sd.deleted, sd.seq
         FROM sync_documents sd WHERE sd.sync_account_id = $1 AND sd.seq > $2
 ) delta
@@ -84,4 +93,40 @@ SET display_name = EXCLUDED.display_name,
 
 -- name: SyncTombstonePerson :exec
 UPDATE persons SET deleted = true, seq = nextval('sync_seq'), updated_at = now()
+WHERE id = $1 AND sync_account_id = $2;
+
+-- name: SyncUpsertPlayer :exec
+INSERT INTO players (id, sync_account_id, person_id, name, number, position, payload, deleted, seq)
+VALUES ($1, $2, $3, $4, $5, $6, $7, false, nextval('sync_seq'))
+ON CONFLICT (id) DO UPDATE
+SET person_id = EXCLUDED.person_id, name = EXCLUDED.name, number = EXCLUDED.number,
+    position = EXCLUDED.position, sync_account_id = EXCLUDED.sync_account_id,
+    payload = EXCLUDED.payload, deleted = false, seq = nextval('sync_seq'), updated_at = now();
+
+-- name: SyncTombstonePlayer :exec
+UPDATE players SET deleted = true, seq = nextval('sync_seq'), updated_at = now()
+WHERE id = $1 AND sync_account_id = $2;
+
+-- name: SyncUpsertEvent :exec
+INSERT INTO events (id, sync_account_id, team_id, title, kind, payload, deleted, seq)
+VALUES ($1, $2, $3, $4, $5, $6, false, nextval('sync_seq'))
+ON CONFLICT (id) DO UPDATE
+SET team_id = EXCLUDED.team_id, title = EXCLUDED.title, kind = EXCLUDED.kind,
+    sync_account_id = EXCLUDED.sync_account_id, payload = EXCLUDED.payload,
+    deleted = false, seq = nextval('sync_seq'), updated_at = now();
+
+-- name: SyncTombstoneEvent :exec
+UPDATE events SET deleted = true, seq = nextval('sync_seq'), updated_at = now()
+WHERE id = $1 AND sync_account_id = $2;
+
+-- name: SyncUpsertDiagram :exec
+INSERT INTO diagrams (id, sync_account_id, team_id, title, payload, deleted, seq)
+VALUES ($1, $2, $3, $4, $5, false, nextval('sync_seq'))
+ON CONFLICT (id) DO UPDATE
+SET team_id = EXCLUDED.team_id, title = EXCLUDED.title,
+    sync_account_id = EXCLUDED.sync_account_id, payload = EXCLUDED.payload,
+    deleted = false, seq = nextval('sync_seq'), updated_at = now();
+
+-- name: SyncTombstoneDiagram :exec
+UPDATE diagrams SET deleted = true, seq = nextval('sync_seq'), updated_at = now()
 WHERE id = $1 AND sync_account_id = $2;
