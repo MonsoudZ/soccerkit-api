@@ -118,7 +118,12 @@ func (s *Server) provisionAppleIdentity(
 ) (store.Person, store.UserAccount, error) {
 	displayName := appleDisplayName(fullName, email)
 
-	person, err := q.CreatePerson(ctx, store.CreatePersonParams{DisplayName: displayName, Email: &email})
+	// The coach's person id is derived from the Apple subject, so it matches the
+	// id the app derives locally — the account Person and the synced Person are
+	// one row (see derivePersonID).
+	person, err := q.CreatePersonWithID(ctx, store.CreatePersonWithIDParams{
+		ID: derivePersonID(identity.Sub), DisplayName: displayName, Email: &email,
+	})
 	if err != nil {
 		return store.Person{}, store.UserAccount{}, err
 	}
@@ -160,6 +165,17 @@ func (s *Server) respondAppleToken(w http.ResponseWriter, personID uuid.UUID, em
 // appleEmail returns the token's email, or a stable synthesized address when the
 // user chose to hide it (Apple omits email on later sign-ins and for hidden
 // relays), so the NOT NULL UNIQUE user_accounts.email constraint always holds.
+// coachPersonNamespace is a fixed UUID namespace shared verbatim with the iOS
+// client. Both derive the coach's Person id as UUIDv5(namespace, appleSub), so
+// the same Apple user maps to the same Person id on every device and the server
+// — no id round-tripping, no migration. Keep this value identical in the client.
+var coachPersonNamespace = uuid.MustParse("2b6f0cc9-04e9-4c8e-8f1a-7c3d5e2a9b40")
+
+// derivePersonID maps an Apple subject to its stable coach Person id.
+func derivePersonID(appleSub string) uuid.UUID {
+	return uuid.NewSHA1(coachPersonNamespace, []byte(appleSub))
+}
+
 func appleEmail(identity appleIdentity) string {
 	if e := strings.ToLower(strings.TrimSpace(identity.Email)); e != "" {
 		return e
