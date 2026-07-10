@@ -177,6 +177,24 @@ func (s *Server) applyUpsert(ctx context.Context, q *store.Queries, account, org
 			ID: id, OrganizationID: orgID, AuthorPersonID: &account, SyncAccountID: &account,
 			Title: p.Title, Notes: nilIfEmpty(p.Objective), Payload: rec.Payload,
 		})
+	case "Person":
+		id, err := uuid.Parse(rec.ID)
+		if err != nil {
+			return errValidation("Person id must be a UUID")
+		}
+		var p struct {
+			Name                  string `json:"name"`
+			EmergencyContactName  string `json:"emergencyContactName"`
+			EmergencyContactPhone string `json:"emergencyContactPhone"`
+			MedicalNotes          string `json:"medicalNotes"`
+		}
+		_ = json.Unmarshal(rec.Payload, &p)
+		return q.SyncUpsertPerson(ctx, store.SyncUpsertPersonParams{
+			ID: id, SyncAccountID: &account, DisplayName: p.Name,
+			EmergencyContactName:  nilIfEmpty(p.EmergencyContactName),
+			EmergencyContactPhone: nilIfEmpty(p.EmergencyContactPhone),
+			MedicalNotes:          nilIfEmpty(p.MedicalNotes), Payload: rec.Payload,
+		})
 	default:
 		return q.SyncUpsertDocument(ctx, store.SyncUpsertDocumentParams{
 			SyncAccountID: account, Type: rec.Type, ID: rec.ID, Payload: rec.Payload,
@@ -205,6 +223,12 @@ func (s *Server) applyDelete(ctx context.Context, q *store.Queries, account uuid
 			return errValidation("Session id must be a UUID")
 		}
 		return q.SyncTombstoneSession(ctx, store.SyncTombstoneSessionParams{ID: id, SyncAccountID: &account})
+	case "Person":
+		id, err := uuid.Parse(key.ID)
+		if err != nil {
+			return errValidation("Person id must be a UUID")
+		}
+		return q.SyncTombstonePerson(ctx, store.SyncTombstonePersonParams{ID: id, SyncAccountID: &account})
 	default:
 		return q.SyncTombstoneDocument(ctx, store.SyncTombstoneDocumentParams{
 			SyncAccountID: account, Type: key.Type, ID: key.ID,

@@ -88,7 +88,7 @@ const createPerson = `-- name: CreatePerson :one
 INSERT INTO persons (display_name, given_name, family_name, birthdate, email, phone,
     emergency_contact_name, emergency_contact_phone, medical_notes)
 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
-RETURNING id, display_name, given_name, family_name, birthdate, email, phone, emergency_contact_name, emergency_contact_phone, medical_notes, created_at, updated_at
+RETURNING id, display_name, given_name, family_name, birthdate, email, phone, emergency_contact_name, emergency_contact_phone, medical_notes, created_at, updated_at, sync_account_id, payload, deleted, seq
 `
 
 type CreatePersonParams struct {
@@ -129,6 +129,49 @@ func (q *Queries) CreatePerson(ctx context.Context, arg CreatePersonParams) (Per
 		&i.MedicalNotes,
 		&i.CreatedAt,
 		&i.UpdatedAt,
+		&i.SyncAccountID,
+		&i.Payload,
+		&i.Deleted,
+		&i.Seq,
+	)
+	return i, err
+}
+
+const createPersonWithID = `-- name: CreatePersonWithID :one
+INSERT INTO persons (id, display_name, email)
+VALUES ($1, $2, $3)
+ON CONFLICT (id) DO UPDATE SET display_name = EXCLUDED.display_name, updated_at = now()
+RETURNING id, display_name, given_name, family_name, birthdate, email, phone, emergency_contact_name, emergency_contact_phone, medical_notes, created_at, updated_at, sync_account_id, payload, deleted, seq
+`
+
+type CreatePersonWithIDParams struct {
+	ID          uuid.UUID `json:"id"`
+	DisplayName string    `json:"display_name"`
+	Email       *string   `json:"email"`
+}
+
+// Create (or adopt) a Person with an explicit id — used for the coach's
+// deterministic account Person so it matches the app's synced Person.
+func (q *Queries) CreatePersonWithID(ctx context.Context, arg CreatePersonWithIDParams) (Person, error) {
+	row := q.db.QueryRow(ctx, createPersonWithID, arg.ID, arg.DisplayName, arg.Email)
+	var i Person
+	err := row.Scan(
+		&i.ID,
+		&i.DisplayName,
+		&i.GivenName,
+		&i.FamilyName,
+		&i.Birthdate,
+		&i.Email,
+		&i.Phone,
+		&i.EmergencyContactName,
+		&i.EmergencyContactPhone,
+		&i.MedicalNotes,
+		&i.CreatedAt,
+		&i.UpdatedAt,
+		&i.SyncAccountID,
+		&i.Payload,
+		&i.Deleted,
+		&i.Seq,
 	)
 	return i, err
 }
@@ -210,7 +253,7 @@ func (q *Queries) GetOrganization(ctx context.Context, id uuid.UUID) (Organizati
 }
 
 const getPerson = `-- name: GetPerson :one
-SELECT id, display_name, given_name, family_name, birthdate, email, phone, emergency_contact_name, emergency_contact_phone, medical_notes, created_at, updated_at FROM persons WHERE id = $1
+SELECT id, display_name, given_name, family_name, birthdate, email, phone, emergency_contact_name, emergency_contact_phone, medical_notes, created_at, updated_at, sync_account_id, payload, deleted, seq FROM persons WHERE id = $1
 `
 
 func (q *Queries) GetPerson(ctx context.Context, id uuid.UUID) (Person, error) {
@@ -229,6 +272,10 @@ func (q *Queries) GetPerson(ctx context.Context, id uuid.UUID) (Person, error) {
 		&i.MedicalNotes,
 		&i.CreatedAt,
 		&i.UpdatedAt,
+		&i.SyncAccountID,
+		&i.Payload,
+		&i.Deleted,
+		&i.Seq,
 	)
 	return i, err
 }
@@ -341,7 +388,7 @@ func (q *Queries) LinkAppleSub(ctx context.Context, arg LinkAppleSubParams) erro
 }
 
 const listChildren = `-- name: ListChildren :many
-SELECT p.id, p.display_name, p.given_name, p.family_name, p.birthdate, p.email, p.phone, p.emergency_contact_name, p.emergency_contact_phone, p.medical_notes, p.created_at, p.updated_at FROM guardianships g
+SELECT p.id, p.display_name, p.given_name, p.family_name, p.birthdate, p.email, p.phone, p.emergency_contact_name, p.emergency_contact_phone, p.medical_notes, p.created_at, p.updated_at, p.sync_account_id, p.payload, p.deleted, p.seq FROM guardianships g
 JOIN persons p ON p.id = g.child_person_id
 WHERE g.guardian_person_id = $1
 ORDER BY p.display_name ASC
@@ -369,6 +416,10 @@ func (q *Queries) ListChildren(ctx context.Context, guardianPersonID uuid.UUID) 
 			&i.MedicalNotes,
 			&i.CreatedAt,
 			&i.UpdatedAt,
+			&i.SyncAccountID,
+			&i.Payload,
+			&i.Deleted,
+			&i.Seq,
 		); err != nil {
 			return nil, err
 		}
@@ -482,7 +533,7 @@ SET display_name            = COALESCE($1, display_name),
     medical_notes           = CASE WHEN $16::bool THEN $17 ELSE medical_notes END,
     updated_at              = now()
 WHERE id = $18
-RETURNING id, display_name, given_name, family_name, birthdate, email, phone, emergency_contact_name, emergency_contact_phone, medical_notes, created_at, updated_at
+RETURNING id, display_name, given_name, family_name, birthdate, email, phone, emergency_contact_name, emergency_contact_phone, medical_notes, created_at, updated_at, sync_account_id, payload, deleted, seq
 `
 
 type UpdatePersonParams struct {
@@ -541,6 +592,10 @@ func (q *Queries) UpdatePerson(ctx context.Context, arg UpdatePersonParams) (Per
 		&i.MedicalNotes,
 		&i.CreatedAt,
 		&i.UpdatedAt,
+		&i.SyncAccountID,
+		&i.Payload,
+		&i.Deleted,
+		&i.Seq,
 	)
 	return i, err
 }

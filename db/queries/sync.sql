@@ -12,6 +12,9 @@ SELECT delta.type, delta.id, delta.payload, delta.deleted, delta.seq FROM (
     SELECT 'Session'::text, s.id::text, s.payload, s.deleted, s.seq
         FROM sessions s WHERE s.sync_account_id = $1 AND s.seq > $2
     UNION ALL
+    SELECT 'Person'::text, pe.id::text, pe.payload, pe.deleted, pe.seq
+        FROM persons pe WHERE pe.sync_account_id = $1 AND pe.seq > $2
+    UNION ALL
     SELECT sd.type, sd.id, sd.payload, sd.deleted, sd.seq
         FROM sync_documents sd WHERE sd.sync_account_id = $1 AND sd.seq > $2
 ) delta
@@ -67,3 +70,18 @@ INSERT INTO sync_documents (sync_account_id, type, id, payload, deleted, seq)
 VALUES ($1, $2, $3, NULL, true, nextval('sync_seq'))
 ON CONFLICT (sync_account_id, type, id) DO UPDATE
 SET payload = NULL, deleted = true, seq = nextval('sync_seq'), updated_at = now();
+
+-- name: SyncUpsertPerson :exec
+INSERT INTO persons (id, sync_account_id, display_name, emergency_contact_name, emergency_contact_phone, medical_notes, payload, deleted, seq)
+VALUES ($1, $2, $3, $4, $5, $6, $7, false, nextval('sync_seq'))
+ON CONFLICT (id) DO UPDATE
+SET display_name = EXCLUDED.display_name,
+    emergency_contact_name = EXCLUDED.emergency_contact_name,
+    emergency_contact_phone = EXCLUDED.emergency_contact_phone,
+    medical_notes = EXCLUDED.medical_notes,
+    sync_account_id = EXCLUDED.sync_account_id, payload = EXCLUDED.payload,
+    deleted = false, seq = nextval('sync_seq'), updated_at = now();
+
+-- name: SyncTombstonePerson :exec
+UPDATE persons SET deleted = true, seq = nextval('sync_seq'), updated_at = now()
+WHERE id = $1 AND sync_account_id = $2;

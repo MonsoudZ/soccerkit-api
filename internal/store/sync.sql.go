@@ -22,6 +22,9 @@ SELECT delta.type, delta.id, delta.payload, delta.deleted, delta.seq FROM (
     SELECT 'Session'::text, s.id::text, s.payload, s.deleted, s.seq
         FROM sessions s WHERE s.sync_account_id = $1 AND s.seq > $2
     UNION ALL
+    SELECT 'Person'::text, pe.id::text, pe.payload, pe.deleted, pe.seq
+        FROM persons pe WHERE pe.sync_account_id = $1 AND pe.seq > $2
+    UNION ALL
     SELECT sd.type, sd.id, sd.payload, sd.deleted, sd.seq
         FROM sync_documents sd WHERE sd.sync_account_id = $1 AND sd.seq > $2
 ) delta
@@ -100,6 +103,21 @@ type SyncTombstoneDrillParams struct {
 
 func (q *Queries) SyncTombstoneDrill(ctx context.Context, arg SyncTombstoneDrillParams) error {
 	_, err := q.db.Exec(ctx, syncTombstoneDrill, arg.ID, arg.SyncAccountID)
+	return err
+}
+
+const syncTombstonePerson = `-- name: SyncTombstonePerson :exec
+UPDATE persons SET deleted = true, seq = nextval('sync_seq'), updated_at = now()
+WHERE id = $1 AND sync_account_id = $2
+`
+
+type SyncTombstonePersonParams struct {
+	ID            uuid.UUID  `json:"id"`
+	SyncAccountID *uuid.UUID `json:"sync_account_id"`
+}
+
+func (q *Queries) SyncTombstonePerson(ctx context.Context, arg SyncTombstonePersonParams) error {
+	_, err := q.db.Exec(ctx, syncTombstonePerson, arg.ID, arg.SyncAccountID)
 	return err
 }
 
@@ -187,6 +205,41 @@ func (q *Queries) SyncUpsertDrill(ctx context.Context, arg SyncUpsertDrillParams
 		arg.SyncAccountID,
 		arg.Name,
 		arg.Description,
+		arg.Payload,
+	)
+	return err
+}
+
+const syncUpsertPerson = `-- name: SyncUpsertPerson :exec
+INSERT INTO persons (id, sync_account_id, display_name, emergency_contact_name, emergency_contact_phone, medical_notes, payload, deleted, seq)
+VALUES ($1, $2, $3, $4, $5, $6, $7, false, nextval('sync_seq'))
+ON CONFLICT (id) DO UPDATE
+SET display_name = EXCLUDED.display_name,
+    emergency_contact_name = EXCLUDED.emergency_contact_name,
+    emergency_contact_phone = EXCLUDED.emergency_contact_phone,
+    medical_notes = EXCLUDED.medical_notes,
+    sync_account_id = EXCLUDED.sync_account_id, payload = EXCLUDED.payload,
+    deleted = false, seq = nextval('sync_seq'), updated_at = now()
+`
+
+type SyncUpsertPersonParams struct {
+	ID                    uuid.UUID  `json:"id"`
+	SyncAccountID         *uuid.UUID `json:"sync_account_id"`
+	DisplayName           string     `json:"display_name"`
+	EmergencyContactName  *string    `json:"emergency_contact_name"`
+	EmergencyContactPhone *string    `json:"emergency_contact_phone"`
+	MedicalNotes          *string    `json:"medical_notes"`
+	Payload               []byte     `json:"payload"`
+}
+
+func (q *Queries) SyncUpsertPerson(ctx context.Context, arg SyncUpsertPersonParams) error {
+	_, err := q.db.Exec(ctx, syncUpsertPerson,
+		arg.ID,
+		arg.SyncAccountID,
+		arg.DisplayName,
+		arg.EmergencyContactName,
+		arg.EmergencyContactPhone,
+		arg.MedicalNotes,
 		arg.Payload,
 	)
 	return err

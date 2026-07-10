@@ -118,6 +118,10 @@ type Person struct {
 	MedicalNotes          *string            `json:"medical_notes"`
 	CreatedAt             pgtype.Timestamptz `json:"created_at"`
 	UpdatedAt             pgtype.Timestamptz `json:"updated_at"`
+	SyncAccountID         *uuid.UUID         `json:"sync_account_id"`
+	Payload               []byte             `json:"payload"`
+	Deleted               bool               `json:"deleted"`
+	Seq                   *int64             `json:"seq"`
 }
 
 type RefreshToken struct {

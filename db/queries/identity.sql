@@ -91,3 +91,11 @@ SELECT * FROM user_accounts WHERE apple_sub = $1;
 
 -- name: LinkAppleSub :exec
 UPDATE user_accounts SET apple_sub = $2, updated_at = now() WHERE id = $1;
+
+-- name: CreatePersonWithID :one
+-- Create (or adopt) a Person with an explicit id — used for the coach's
+-- deterministic account Person so it matches the app's synced Person.
+INSERT INTO persons (id, display_name, email)
+VALUES ($1, $2, $3)
+ON CONFLICT (id) DO UPDATE SET display_name = EXCLUDED.display_name, updated_at = now()
+RETURNING *;
