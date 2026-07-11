@@ -502,6 +502,38 @@ func (q *Queries) ListRolesInOrg(ctx context.Context, arg ListRolesInOrgParams) 
 	return items, nil
 }
 
+const personVisibleInOrg = `-- name: PersonVisibleInOrg :one
+SELECT (
+    EXISTS (
+        SELECT 1 FROM memberships m
+        WHERE m.person_id = $1
+          AND m.organization_id = $2
+    )
+    OR EXISTS (
+        SELECT 1 FROM roster_memberships rm
+        JOIN teams t ON t.id = rm.team_id
+        WHERE rm.person_id = $1
+          AND t.organization_id = $2
+    )
+) AS visible
+`
+
+type PersonVisibleInOrgParams struct {
+	PersonID       uuid.UUID `json:"person_id"`
+	OrganizationID uuid.UUID `json:"organization_id"`
+}
+
+// PersonVisibleInOrg reports whether a Person is reachable from an org. persons
+// has no organization_id: a Person is tied to an org only by a membership (an
+// athlete enrolled via POST /persons, or the coach themselves) or by the roster
+// of one of that org's teams. Those two edges are the whole visibility rule.
+func (q *Queries) PersonVisibleInOrg(ctx context.Context, arg PersonVisibleInOrgParams) (*bool, error) {
+	row := q.db.QueryRow(ctx, personVisibleInOrg, arg.PersonID, arg.OrganizationID)
+	var visible *bool
+	err := row.Scan(&visible)
+	return visible, err
+}
+
 const revokeRefreshToken = `-- name: RevokeRefreshToken :exec
 UPDATE refresh_tokens SET revoked_at = now() WHERE id = $1
 `

@@ -87,6 +87,11 @@ func (s *Server) handleListTemplates(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleGetTemplate(w http.ResponseWriter, r *http.Request) {
+	oc, err := s.resolveOrg(r)
+	if err != nil {
+		writeError(w, err)
+		return
+	}
 	id, err := pathUUID(r, "id")
 	if err != nil {
 		writeError(w, err)
@@ -98,6 +103,10 @@ func (s *Server) handleGetTemplate(w http.ResponseWriter, r *http.Request) {
 		return
 	} else if err != nil {
 		writeError(w, err)
+		return
+	}
+	if !s.templateInOrg(r, oc, tpl) {
+		writeError(w, errNotFound("template not found"))
 		return
 	}
 	fields, err := s.store.ListFormFields(r.Context(), id)
@@ -280,6 +289,37 @@ func (s *Server) handleSubmitInstance(w http.ResponseWriter, r *http.Request) {
 		writeError(w, err)
 		return
 	}
+
+	// The org was resolved above for the role check; it must also bound what this
+	// write may reach. Without these, a coach could file an evaluation against an
+	// athlete in another org, using another org's template.
+	if !s.templateInOrg(r, oc, template) {
+		writeError(w, errBadRequest("templateId does not reference a template in your organization"))
+		return
+	}
+	if subjectPerson != nil {
+		visible, verr := s.personVisible(r, oc, *subjectPerson)
+		if verr != nil {
+			writeError(w, verr)
+			return
+		}
+		if !visible {
+			writeError(w, errBadRequest("subjectPersonId does not reference a person in your organization"))
+			return
+		}
+	}
+	if subjectTeam != nil {
+		inOrg, terr := s.teamIDInOrg(r, oc, *subjectTeam)
+		if terr != nil {
+			writeError(w, terr)
+			return
+		}
+		if !inOrg {
+			writeError(w, errBadRequest("subjectTeamId does not reference a team in your organization"))
+			return
+		}
+	}
+
 	fields, err := s.store.ListFormFields(r.Context(), templateID)
 	if err != nil {
 		writeError(w, err)
@@ -340,6 +380,11 @@ func (s *Server) handleSubmitInstance(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleGetInstance(w http.ResponseWriter, r *http.Request) {
+	oc, err := s.resolveOrg(r)
+	if err != nil {
+		writeError(w, err)
+		return
+	}
 	id, err := pathUUID(r, "id")
 	if err != nil {
 		writeError(w, err)
@@ -351,6 +396,15 @@ func (s *Server) handleGetInstance(w http.ResponseWriter, r *http.Request) {
 		return
 	} else if err != nil {
 		writeError(w, err)
+		return
+	}
+	inOrg, err := s.instanceInOrg(r, oc, instance)
+	if err != nil {
+		writeError(w, err)
+		return
+	}
+	if !inOrg {
+		writeError(w, errNotFound("instance not found"))
 		return
 	}
 	template, err := s.store.GetFormTemplate(r.Context(), instance.TemplateID)

@@ -115,11 +115,15 @@ func (s *Server) handleAddRoster(w http.ResponseWriter, r *http.Request) {
 		writeError(w, err)
 		return
 	}
-	if _, err := s.store.GetPerson(r.Context(), personID); errors.Is(err, pgx.ErrNoRows) {
-		writeError(w, errBadRequest("personId does not reference an existing person"))
-		return
-	} else if err != nil {
+	// Existence is not enough: rostering a foreign person would pull them into
+	// GET /teams/{id}, which returns their name, email and birthdate.
+	visible, err := s.personVisible(r, oc, personID)
+	if err != nil {
 		writeError(w, err)
+		return
+	}
+	if !visible {
+		writeError(w, errBadRequest("personId does not reference a person in your organization"))
 		return
 	}
 	joinedOn, err := parseDate(req.JoinedOn)
