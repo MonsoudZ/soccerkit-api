@@ -21,11 +21,16 @@ services:
       db:
         condition: service_healthy
     environment:
-      ENV: production
+      # This stack is for local development only. It is NOT a deploy template: it
+      # runs with a public signing secret and Apple signature verification off.
+      # Both are development-only escape hatches, and config.Load() now refuses to
+      # boot with either of them once ENV is anything but development/test — so
+      # pointing this file at a real environment fails fast instead of quietly
+      # standing up an open backend.
+      ENV: development
       PORT: "3000"
       DATABASE_URL: postgresql://postgres:postgres@db:5432/soccerkit?sslmode=disable
-      JWT_ACCESS_SECRET: change-me-in-production
-      JWT_REFRESH_SECRET: change-me-too-in-production
+      JWT_ACCESS_SECRET: dev-access-secret
       # Set APPLE_CLIENT_ID to the iOS bundle id for real verification;
       # DEV_APPLE_BYPASS lets the stack boot for local testing without it.
       APPLE_CLIENT_ID: ""
