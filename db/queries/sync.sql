@@ -29,29 +29,40 @@ SELECT delta.type, delta.id, delta.payload, delta.deleted, delta.seq FROM (
 ) delta
 ORDER BY delta.seq ASC;
 
--- name: SyncUpsertTeam :exec
+-- Every upsert is guarded by `WHERE <table>.sync_account_id = EXCLUDED.sync_account_id`
+-- on the DO UPDATE. The conflict target is the bare id, so without it a push could
+-- overwrite any row by id and reassign it to the pusher. The guard makes a push at
+-- someone else's row affect zero rows; the queries are :execrows so the handler can
+-- tell that apart from a write and reject it (see applyUpsert). Rows created over
+-- REST have sync_account_id IS NULL and so are never claimable this way — the one
+-- exception is a coach's own Person row, below.
+
+-- name: SyncUpsertTeam :execrows
 INSERT INTO teams (id, organization_id, sync_account_id, name, age_group, season, payload, deleted, seq)
 VALUES ($1, $2, $3, $4, $5, $6, $7, false, nextval('sync_seq'))
 ON CONFLICT (id) DO UPDATE
 SET name = EXCLUDED.name, age_group = EXCLUDED.age_group, season = EXCLUDED.season,
-    sync_account_id = EXCLUDED.sync_account_id, payload = EXCLUDED.payload,
-    deleted = false, seq = nextval('sync_seq'), updated_at = now();
+    payload = EXCLUDED.payload,
+    deleted = false, seq = nextval('sync_seq'), updated_at = now()
+WHERE teams.sync_account_id = EXCLUDED.sync_account_id;
 
--- name: SyncUpsertDrill :exec
+-- name: SyncUpsertDrill :execrows
 INSERT INTO drills (id, organization_id, author_person_id, sync_account_id, name, description, payload, deleted, seq)
 VALUES ($1, $2, $3, $4, $5, $6, $7, false, nextval('sync_seq'))
 ON CONFLICT (id) DO UPDATE
 SET name = EXCLUDED.name, description = EXCLUDED.description,
-    sync_account_id = EXCLUDED.sync_account_id, payload = EXCLUDED.payload,
-    deleted = false, seq = nextval('sync_seq'), updated_at = now();
+    payload = EXCLUDED.payload,
+    deleted = false, seq = nextval('sync_seq'), updated_at = now()
+WHERE drills.sync_account_id = EXCLUDED.sync_account_id;
 
--- name: SyncUpsertSession :exec
+-- name: SyncUpsertSession :execrows
 INSERT INTO sessions (id, organization_id, author_person_id, sync_account_id, title, notes, payload, deleted, seq)
 VALUES ($1, $2, $3, $4, $5, $6, $7, false, nextval('sync_seq'))
 ON CONFLICT (id) DO UPDATE
 SET title = EXCLUDED.title, notes = EXCLUDED.notes,
-    sync_account_id = EXCLUDED.sync_account_id, payload = EXCLUDED.payload,
-    deleted = false, seq = nextval('sync_seq'), updated_at = now();
+    payload = EXCLUDED.payload,
+    deleted = false, seq = nextval('sync_seq'), updated_at = now()
+WHERE sessions.sync_account_id = EXCLUDED.sync_account_id;
 
 -- Tombstones are per-table: a delete can only affect a row this account owns,
 -- so REST-created rows (sync_account_id IS NULL) are never tombstoned.
@@ -80,7 +91,13 @@ VALUES ($1, $2, $3, NULL, true, nextval('sync_seq'))
 ON CONFLICT (sync_account_id, type, id) DO UPDATE
 SET payload = NULL, deleted = true, seq = nextval('sync_seq'), updated_at = now();
 
--- name: SyncUpsertPerson :exec
+-- The coach's own Person row is created by /auth/register and /auth/apple with no
+-- sync_account_id (see CreatePersonWithID), and its id is derived from the Apple
+-- sub, so the app pushes that same id. The second disjunct lets an account adopt
+-- exactly one unowned row — its own identity row — which is what makes migration
+-- 0003's "one identity, no id round-tripping" hold. It cannot claim anyone else's:
+-- persons.id = EXCLUDED.sync_account_id is only ever true of the caller's own row.
+-- name: SyncUpsertPerson :execrows
 INSERT INTO persons (id, sync_account_id, display_name, emergency_contact_name, emergency_contact_phone, medical_notes, payload, deleted, seq)
 VALUES ($1, $2, $3, $4, $5, $6, $7, false, nextval('sync_seq'))
 ON CONFLICT (id) DO UPDATE
@@ -89,43 +106,48 @@ SET display_name = EXCLUDED.display_name,
     emergency_contact_phone = EXCLUDED.emergency_contact_phone,
     medical_notes = EXCLUDED.medical_notes,
     sync_account_id = EXCLUDED.sync_account_id, payload = EXCLUDED.payload,
-    deleted = false, seq = nextval('sync_seq'), updated_at = now();
+    deleted = false, seq = nextval('sync_seq'), updated_at = now()
+WHERE persons.sync_account_id = EXCLUDED.sync_account_id
+   OR (persons.sync_account_id IS NULL AND persons.id = EXCLUDED.sync_account_id);
 
 -- name: SyncTombstonePerson :exec
 UPDATE persons SET deleted = true, seq = nextval('sync_seq'), updated_at = now()
 WHERE id = $1 AND sync_account_id = $2;
 
--- name: SyncUpsertPlayer :exec
+-- name: SyncUpsertPlayer :execrows
 INSERT INTO players (id, sync_account_id, person_id, name, number, position, payload, deleted, seq)
 VALUES ($1, $2, $3, $4, $5, $6, $7, false, nextval('sync_seq'))
 ON CONFLICT (id) DO UPDATE
 SET person_id = EXCLUDED.person_id, name = EXCLUDED.name, number = EXCLUDED.number,
-    position = EXCLUDED.position, sync_account_id = EXCLUDED.sync_account_id,
-    payload = EXCLUDED.payload, deleted = false, seq = nextval('sync_seq'), updated_at = now();
+    position = EXCLUDED.position,
+    payload = EXCLUDED.payload, deleted = false, seq = nextval('sync_seq'), updated_at = now()
+WHERE players.sync_account_id = EXCLUDED.sync_account_id;
 
 -- name: SyncTombstonePlayer :exec
 UPDATE players SET deleted = true, seq = nextval('sync_seq'), updated_at = now()
 WHERE id = $1 AND sync_account_id = $2;
 
--- name: SyncUpsertEvent :exec
+-- name: SyncUpsertEvent :execrows
 INSERT INTO events (id, sync_account_id, team_id, title, kind, payload, deleted, seq)
 VALUES ($1, $2, $3, $4, $5, $6, false, nextval('sync_seq'))
 ON CONFLICT (id) DO UPDATE
 SET team_id = EXCLUDED.team_id, title = EXCLUDED.title, kind = EXCLUDED.kind,
-    sync_account_id = EXCLUDED.sync_account_id, payload = EXCLUDED.payload,
-    deleted = false, seq = nextval('sync_seq'), updated_at = now();
+    payload = EXCLUDED.payload,
+    deleted = false, seq = nextval('sync_seq'), updated_at = now()
+WHERE events.sync_account_id = EXCLUDED.sync_account_id;
 
 -- name: SyncTombstoneEvent :exec
 UPDATE events SET deleted = true, seq = nextval('sync_seq'), updated_at = now()
 WHERE id = $1 AND sync_account_id = $2;
 
--- name: SyncUpsertDiagram :exec
+-- name: SyncUpsertDiagram :execrows
 INSERT INTO diagrams (id, sync_account_id, team_id, title, payload, deleted, seq)
 VALUES ($1, $2, $3, $4, $5, false, nextval('sync_seq'))
 ON CONFLICT (id) DO UPDATE
 SET team_id = EXCLUDED.team_id, title = EXCLUDED.title,
-    sync_account_id = EXCLUDED.sync_account_id, payload = EXCLUDED.payload,
-    deleted = false, seq = nextval('sync_seq'), updated_at = now();
+    payload = EXCLUDED.payload,
+    deleted = false, seq = nextval('sync_seq'), updated_at = now()
+WHERE diagrams.sync_account_id = EXCLUDED.sync_account_id;
 
 -- name: SyncTombstoneDiagram :exec
 UPDATE diagrams SET deleted = true, seq = nextval('sync_seq'), updated_at = now()
