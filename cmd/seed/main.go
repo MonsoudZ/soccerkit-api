@@ -20,6 +20,11 @@ func main() {
 	if err != nil {
 		log.Fatal(err)
 	}
+	// This plants a known account (coach@soccerkit.dev / password123). Pointed at a
+	// deployed DATABASE_URL by accident, it would be a public login.
+	if cfg.IsDeployed() {
+		log.Fatalf("refusing to seed: ENV=%q is not a development environment", cfg.Env)
+	}
 	ctx := context.Background()
 	pool, err := database.Connect(ctx, cfg.DatabaseURL)
 	if err != nil {

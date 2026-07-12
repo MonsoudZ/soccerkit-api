@@ -59,7 +59,7 @@ func Load() (*Config, error) {
 		return nil, fmt.Errorf("APPLE_CLIENT_ID is required for Sign in with Apple (or set DEV_APPLE_BYPASS=true for local dev)")
 	}
 
-	return &Config{
+	cfg := &Config{
 		Env:             getenv("ENV", "development"),
 		Port:            port,
 		DatabaseURL:     dbURL,
@@ -69,7 +69,61 @@ func Load() (*Config, error) {
 		CORSOrigins:     getenv("CORS_ORIGINS", "*"),
 		AppleClientID:   appleClientID,
 		DevAppleBypass:  bypass,
-	}, nil
+	}
+	if err := cfg.validateDeployed(); err != nil {
+		return nil, err
+	}
+	return cfg, nil
+}
+
+// IsDeployed reports whether this process is running outside a developer's
+// machine. It fails closed: anything that is not explicitly development or test
+// counts as deployed, so a typo'd or unset-in-CI ENV cannot silently unlock the
+// development-only escape hatches below.
+func (c *Config) IsDeployed() bool {
+	return c.Env != "development" && c.Env != "test"
+}
+
+// minSecretLen is the shortest JWT signing secret accepted in a deployed
+// environment. 32 bytes matches the HMAC-SHA256 output the tokens are signed with.
+const minSecretLen = 32
+
+// placeholderSecrets are the values shipped in this repo's own compose file,
+// .env.example, README and test setup. They are public, so a deployment using one
+// has a forgeable token for every account.
+var placeholderSecrets = map[string]bool{
+	"change-me-in-production":     true,
+	"change-me-too-in-production": true,
+	"change-me":                   true,
+	"dev-access-secret":           true,
+	"dev-refresh-secret":          true,
+	"test-access-secret":          true,
+	"test-refresh-secret":         true,
+	"secret":                      true,
+}
+
+// validateDeployed refuses to boot a deployed process that is configured
+// insecurely. Every check here guards a setting that is safe (and convenient) on
+// a laptop and catastrophic on the internet, and each was previously reachable in
+// production with no guard at all — Env was set and then never read anywhere.
+func (c *Config) validateDeployed() error {
+	if !c.IsDeployed() {
+		return nil
+	}
+	if c.DevAppleBypass {
+		return fmt.Errorf("DEV_APPLE_BYPASS must not be set when ENV=%q: it skips Apple's "+
+			"signature, issuer, audience and expiry checks entirely, so anyone can mint an "+
+			"unsigned token for any account", c.Env)
+	}
+	if placeholderSecrets[string(c.JWTAccessSecret)] {
+		return fmt.Errorf("JWT_ACCESS_SECRET is a placeholder value from this repo when ENV=%q: "+
+			"it is public, so every access token is forgeable", c.Env)
+	}
+	if len(c.JWTAccessSecret) < minSecretLen {
+		return fmt.Errorf("JWT_ACCESS_SECRET must be at least %d bytes when ENV=%q (got %d)",
+			minSecretLen, c.Env, len(c.JWTAccessSecret))
+	}
+	return nil
 }
 
 func getenv(key, fallback string) string {
