@@ -39,7 +39,6 @@ command -v sqlc >/dev/null 2>&1 || go install github.com/sqlc-dev/sqlc/cmd/sqlc@
   echo 'export DATABASE_URL="postgresql://postgres:postgres@localhost:5432/soccerkit?sslmode=disable"'
   echo 'export TEST_DATABASE_URL="postgresql://postgres:postgres@localhost:5432/soccerkit_test?sslmode=disable"'
   echo 'export JWT_ACCESS_SECRET="dev-access-secret"'
-  echo 'export JWT_REFRESH_SECRET="dev-refresh-secret"'
   echo 'export PATH="$PATH:$(go env GOPATH)/bin"'
 } >> "$CLAUDE_ENV_FILE"
 

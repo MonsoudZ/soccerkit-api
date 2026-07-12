@@ -94,6 +94,45 @@ func TestAppleAuthLinksExistingEmailAccount(t *testing.T) {
 	}
 }
 
+// TestAppleAuthReturnsUsableRefreshToken pins the fix for a session that could
+// not be renewed: /auth/apple used to sign a bare access token and never create a
+// refresh row, so with JWT_ACCESS_TTL at 15m an Apple-signed-in coach was logged
+// out mid-training-session with no recovery but a full re-authorization. The
+// token must not just be present — it must actually redeem at /auth/refresh.
+func TestAppleAuthReturnsUsableRefreshToken(t *testing.T) {
+	resetDB(t)
+
+	r := appleSignIn(t, "apple-sub-refresh", "refresh@example.com", nil)
+	if r.status != http.StatusOK {
+		t.Fatalf("apple auth: status %d body %s", r.status, r.raw)
+	}
+	refresh, _ := r.body["refreshToken"].(string)
+	if refresh == "" {
+		t.Fatalf("apple sign-in returned no refreshToken: %s", r.raw)
+	}
+
+	rotated := do(t, http.MethodPost, "/api/v1/auth/refresh", "", map[string]any{
+		"refreshToken": refresh,
+	})
+	if rotated.status != http.StatusOK {
+		t.Fatalf("redeeming the apple refresh token: status %d body %s", rotated.status, rotated.raw)
+	}
+	access, _ := rotated.body["accessToken"].(string)
+	if access == "" {
+		t.Fatalf("refresh returned no accessToken: %s", rotated.raw)
+	}
+
+	// The renewed access token must authenticate as the same coach.
+	me := do(t, http.MethodGet, "/api/v1/me", access, nil)
+	if me.status != http.StatusOK {
+		t.Fatalf("renewed token on /me: status %d body %s", me.status, me.raw)
+	}
+	person, _ := me.body["person"].(map[string]any)
+	if id, _ := person["id"].(string); id != r.body["personID"] {
+		t.Fatalf("renewed session is a different person: %v vs %v", id, r.body["personID"])
+	}
+}
+
 func TestAppleAuthRejectsMissingToken(t *testing.T) {
 	resetDB(t)
 	r := do(t, http.MethodPost, "/api/v1/auth/apple", "", map[string]any{})
