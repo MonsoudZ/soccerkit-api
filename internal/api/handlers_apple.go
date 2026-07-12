@@ -24,9 +24,16 @@ type appleAuthRequest struct {
 
 // appleAuthResponse mirrors the app's AuthResponse: the session token and the
 // Person the account maps to.
+//
+// RefreshToken is additive (the app's Codable ignores keys it doesn't know). It
+// exists because this endpoint used to hand back a bare access token and no way
+// to renew it: with JWT_ACCESS_TTL at 15m, an Apple-signed-in coach was logged
+// out mid-training-session and the app's only recovery was to re-run the whole
+// Sign in with Apple flow. Register and login have always returned one.
 type appleAuthResponse struct {
-	Token    string `json:"token"`
-	PersonID string `json:"personID"`
+	Token        string `json:"token"`
+	RefreshToken string `json:"refreshToken"`
+	PersonID     string `json:"personID"`
 }
 
 // handleAppleAuth verifies a Sign in with Apple identity token and resolves it to
@@ -60,7 +67,12 @@ func (s *Server) handleAppleAuth(w http.ResponseWriter, r *http.Request) {
 			writeError(w, err)
 			return
 		}
-		s.respondAppleToken(w, person.ID, account.Email)
+		auth, err := s.issueTokens(ctx, s.store, account, person)
+		if err != nil {
+			writeError(w, err)
+			return
+		}
+		respondAppleAuth(w, auth, person.ID)
 		return
 	} else if !errors.Is(err, pgx.ErrNoRows) {
 		writeError(w, err)
@@ -79,8 +91,8 @@ func (s *Server) handleAppleAuth(w http.ResponseWriter, r *http.Request) {
 	defer tx.Rollback(ctx) //nolint:errcheck // no-op after a successful Commit
 	q := s.store.WithTx(tx)
 
-	var personID uuid.UUID
-	var accountEmail string
+	var account store.UserAccount
+	var person store.Person
 
 	existing, err := q.GetUserAccountByEmail(ctx, email)
 	switch {
@@ -90,24 +102,36 @@ func (s *Server) handleAppleAuth(w http.ResponseWriter, r *http.Request) {
 			writeError(w, err)
 			return
 		}
-		personID, accountEmail = existing.PersonID, existing.Email
-	case errors.Is(err, pgx.ErrNoRows):
-		person, account, perr := s.provisionAppleIdentity(ctx, q, identity, req.FullName, email)
+		linked, perr := q.GetPerson(ctx, existing.PersonID)
 		if perr != nil {
 			writeError(w, perr)
 			return
 		}
-		personID, accountEmail = person.ID, account.Email
+		account, person = existing, linked
+	case errors.Is(err, pgx.ErrNoRows):
+		provisioned, created, perr := s.provisionAppleIdentity(ctx, q, identity, req.FullName, email)
+		if perr != nil {
+			writeError(w, perr)
+			return
+		}
+		account, person = created, provisioned
 	default:
 		writeError(w, err)
 		return
 	}
 
+	// Issued inside the transaction: the refresh token is a row, so it must land
+	// or roll back with the identity it belongs to.
+	auth, err := s.issueTokens(ctx, q, account, person)
+	if err != nil {
+		writeError(w, err)
+		return
+	}
 	if err := tx.Commit(ctx); err != nil {
 		writeError(w, err)
 		return
 	}
-	s.respondAppleToken(w, personID, accountEmail)
+	respondAppleAuth(w, auth, person.ID)
 }
 
 // provisionAppleIdentity creates the full identity for a first-time Apple user,
@@ -153,13 +177,14 @@ func (s *Server) provisionAppleIdentity(
 	return person, account, nil
 }
 
-func (s *Server) respondAppleToken(w http.ResponseWriter, personID uuid.UUID, email string) {
-	token, err := s.signAccessToken(personID, email)
-	if err != nil {
-		writeError(w, err)
-		return
-	}
-	writeJSON(w, http.StatusOK, appleAuthResponse{Token: token, PersonID: personID.String()})
+// respondAppleAuth renders the app's `{ token, refreshToken, personID }` shape
+// from the same AuthResponse register and login return.
+func respondAppleAuth(w http.ResponseWriter, auth AuthResponse, personID uuid.UUID) {
+	writeJSON(w, http.StatusOK, appleAuthResponse{
+		Token:        auth.AccessToken,
+		RefreshToken: auth.RefreshToken,
+		PersonID:     personID.String(),
+	})
 }
 
 // appleEmail returns the token's email, or a stable synthesized address when the
