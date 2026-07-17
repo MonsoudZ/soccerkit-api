@@ -235,6 +235,33 @@ func (q *Queries) CreateUserAccount(ctx context.Context, arg CreateUserAccountPa
 	return i, err
 }
 
+const deleteOrganizationsByIDs = `-- name: DeleteOrganizationsByIDs :exec
+DELETE FROM organizations WHERE id = ANY($1::uuid[])
+`
+
+func (q *Queries) DeleteOrganizationsByIDs(ctx context.Context, ids []uuid.UUID) error {
+	_, err := q.db.Exec(ctx, deleteOrganizationsByIDs, ids)
+	return err
+}
+
+const deletePersonByID = `-- name: DeletePersonByID :exec
+DELETE FROM persons WHERE id = $1
+`
+
+func (q *Queries) DeletePersonByID(ctx context.Context, id uuid.UUID) error {
+	_, err := q.db.Exec(ctx, deletePersonByID, id)
+	return err
+}
+
+const deletePersonsByIDs = `-- name: DeletePersonsByIDs :exec
+DELETE FROM persons WHERE id = ANY($1::uuid[])
+`
+
+func (q *Queries) DeletePersonsByIDs(ctx context.Context, ids []uuid.UUID) error {
+	_, err := q.db.Exec(ctx, deletePersonsByIDs, ids)
+	return err
+}
+
 const getOrganization = `-- name: GetOrganization :one
 SELECT id, name, kind, created_at, updated_at FROM organizations WHERE id = $1
 `
@@ -473,6 +500,37 @@ func (q *Queries) ListMembershipsForPerson(ctx context.Context, personID uuid.UU
 	return items, nil
 }
 
+const listPersonalOrgIDsForPerson = `-- name: ListPersonalOrgIDsForPerson :many
+SELECT DISTINCT o.id
+FROM memberships m
+JOIN organizations o ON o.id = m.organization_id
+WHERE m.person_id = $1 AND o.kind = 'personal'
+`
+
+// The personal org(s) this person owns. A personal org is created with its owner
+// as sole member (see handleRegister), so "member of a personal org" == "owns
+// it". Club orgs the caller merely belongs to are intentionally excluded: account
+// deletion removes the caller from the club (via their membership), not the club.
+func (q *Queries) ListPersonalOrgIDsForPerson(ctx context.Context, personID uuid.UUID) ([]uuid.UUID, error) {
+	rows, err := q.db.Query(ctx, listPersonalOrgIDsForPerson, personID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []uuid.UUID
+	for rows.Next() {
+		var id uuid.UUID
+		if err := rows.Scan(&id); err != nil {
+			return nil, err
+		}
+		items = append(items, id)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
 const listRolesInOrg = `-- name: ListRolesInOrg :many
 SELECT role FROM memberships WHERE person_id = $1 AND organization_id = $2
 `
@@ -518,6 +576,63 @@ UPDATE refresh_tokens SET revoked_at = now() WHERE token = $1 AND revoked_at IS 
 func (q *Queries) RevokeRefreshTokenByToken(ctx context.Context, token string) error {
 	_, err := q.db.Exec(ctx, revokeRefreshTokenByToken, token)
 	return err
+}
+
+const selectOrphanedAthletePersonIDs = `-- name: SelectOrphanedAthletePersonIDs :many
+WITH linked_in AS (
+    SELECT m.person_id FROM memberships m
+    WHERE m.organization_id = ANY($2::uuid[])
+    UNION
+    SELECT rm.person_id FROM roster_memberships rm
+    JOIN teams t ON t.id = rm.team_id
+    WHERE t.organization_id = ANY($2::uuid[])
+),
+linked_out AS (
+    SELECT m.person_id FROM memberships m
+    WHERE m.organization_id <> ALL($2::uuid[])
+    UNION
+    SELECT rm.person_id FROM roster_memberships rm
+    JOIN teams t ON t.id = rm.team_id
+    WHERE t.organization_id <> ALL($2::uuid[])
+)
+SELECT p.id
+FROM persons p
+WHERE p.id IN (SELECT person_id FROM linked_in)
+  AND p.id NOT IN (SELECT person_id FROM linked_out)
+  AND p.id <> $1
+  AND (p.sync_account_id IS NULL OR p.sync_account_id = $1)
+`
+
+type SelectOrphanedAthletePersonIDsParams struct {
+	CallerPersonID uuid.UUID   `json:"caller_person_id"`
+	OrgIds         []uuid.UUID `json:"org_ids"`
+}
+
+// Athletes (Persons) whose ONLY organizational linkage is via the org(s) being
+// deleted. Deleting those orgs strips their membership/roster rows but leaves the
+// Person itself — name, birthdate, medical notes: minors' PII we are legally
+// required to erase (COPPA/GDPR). ON DELETE CASCADE never reaches these, so we
+// delete them explicitly. A person still linked to any org OUTSIDE the delete-set
+// survives (the shared-athlete / multi-org case). Excludes the caller's own
+// Person (deleted separately) and anyone synced by a different account.
+func (q *Queries) SelectOrphanedAthletePersonIDs(ctx context.Context, arg SelectOrphanedAthletePersonIDsParams) ([]uuid.UUID, error) {
+	rows, err := q.db.Query(ctx, selectOrphanedAthletePersonIDs, arg.CallerPersonID, arg.OrgIds)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []uuid.UUID
+	for rows.Next() {
+		var id uuid.UUID
+		if err := rows.Scan(&id); err != nil {
+			return nil, err
+		}
+		items = append(items, id)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
 }
 
 const updatePerson = `-- name: UpdatePerson :one

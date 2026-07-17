@@ -97,6 +97,20 @@ paths:
             application/json:
               schema: { $ref: "#/components/schemas/Me" }
         "401": { $ref: "#/components/responses/Error" }
+    delete:
+      tags: [me]
+      summary: Delete the authenticated account and all its data
+      description: >
+        Permanently erases the caller's account and everything it owns — their
+        personal organization (and its teams, drills, sessions, templates, games
+        and share-grants), their synced content, and their athletes' Person rows
+        including PII (name, birthdate, medical notes). Runs in one transaction
+        and is idempotent: a retry, or a delete of an already-gone account,
+        returns 204. An athlete still rostered under another coach is preserved.
+      security: [{ bearerAuth: [] }]
+      responses:
+        "204": { description: Account deleted (or already absent) }
+        "401": { $ref: "#/components/responses/Error" }
 
   /api/v1/persons:
     post:

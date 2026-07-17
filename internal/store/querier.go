@@ -39,6 +39,9 @@ type Querier interface {
 	CreateSessionBlock(ctx context.Context, arg CreateSessionBlockParams) (SessionBlock, error)
 	CreateTeam(ctx context.Context, arg CreateTeamParams) (Team, error)
 	CreateUserAccount(ctx context.Context, arg CreateUserAccountParams) (UserAccount, error)
+	DeleteOrganizationsByIDs(ctx context.Context, ids []uuid.UUID) error
+	DeletePersonByID(ctx context.Context, id uuid.UUID) error
+	DeletePersonsByIDs(ctx context.Context, ids []uuid.UUID) error
 	DeleteSession(ctx context.Context, id uuid.UUID) error
 	DeleteTeam(ctx context.Context, id uuid.UUID) error
 	EndRosterMembership(ctx context.Context, arg EndRosterMembershipParams) (RosterMembership, error)
@@ -68,6 +71,11 @@ type Querier interface {
 	ListGamesForTeam(ctx context.Context, teamID uuid.UUID) ([]Game, error)
 	ListInstancesForPerson(ctx context.Context, arg ListInstancesForPersonParams) ([]ListInstancesForPersonRow, error)
 	ListMembershipsForPerson(ctx context.Context, personID uuid.UUID) ([]ListMembershipsForPersonRow, error)
+	// The personal org(s) this person owns. A personal org is created with its owner
+	// as sole member (see handleRegister), so "member of a personal org" == "owns
+	// it". Club orgs the caller merely belongs to are intentionally excluded: account
+	// deletion removes the caller from the club (via their membership), not the club.
+	ListPersonalOrgIDsForPerson(ctx context.Context, personID uuid.UUID) ([]uuid.UUID, error)
 	ListRolesInOrg(ctx context.Context, arg ListRolesInOrgParams) ([]string, error)
 	ListSessionBlocks(ctx context.Context, sessionID uuid.UUID) ([]ListSessionBlocksRow, error)
 	ListSessionsInOrg(ctx context.Context, arg ListSessionsInOrgParams) ([]Session, error)
@@ -79,6 +87,14 @@ type Querier interface {
 	ListTeamsInOrg(ctx context.Context, organizationID uuid.UUID) ([]ListTeamsInOrgRow, error)
 	RevokeRefreshToken(ctx context.Context, id uuid.UUID) error
 	RevokeRefreshTokenByToken(ctx context.Context, token string) error
+	// Athletes (Persons) whose ONLY organizational linkage is via the org(s) being
+	// deleted. Deleting those orgs strips their membership/roster rows but leaves the
+	// Person itself — name, birthdate, medical notes: minors' PII we are legally
+	// required to erase (COPPA/GDPR). ON DELETE CASCADE never reaches these, so we
+	// delete them explicitly. A person still linked to any org OUTSIDE the delete-set
+	// survives (the shared-athlete / multi-org case). Excludes the caller's own
+	// Person (deleted separately) and anyone synced by a different account.
+	SelectOrphanedAthletePersonIDs(ctx context.Context, arg SelectOrphanedAthletePersonIDsParams) ([]uuid.UUID, error)
 	SyncTombstoneDiagram(ctx context.Context, arg SyncTombstoneDiagramParams) error
 	SyncTombstoneDocument(ctx context.Context, arg SyncTombstoneDocumentParams) error
 	SyncTombstoneDrill(ctx context.Context, arg SyncTombstoneDrillParams) error
