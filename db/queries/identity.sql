@@ -86,6 +86,56 @@ JOIN persons p ON p.id = g.child_person_id
 WHERE g.guardian_person_id = $1
 ORDER BY p.display_name ASC;
 
+-- name: ListPersonalOrgIDsForPerson :many
+-- The personal org(s) this person owns. A personal org is created with its owner
+-- as sole member (see handleRegister), so "member of a personal org" == "owns
+-- it". Club orgs the caller merely belongs to are intentionally excluded: account
+-- deletion removes the caller from the club (via their membership), not the club.
+SELECT DISTINCT o.id
+FROM memberships m
+JOIN organizations o ON o.id = m.organization_id
+WHERE m.person_id = $1 AND o.kind = 'personal';
+
+-- name: SelectOrphanedAthletePersonIDs :many
+-- Athletes (Persons) whose ONLY organizational linkage is via the org(s) being
+-- deleted. Deleting those orgs strips their membership/roster rows but leaves the
+-- Person itself — name, birthdate, medical notes: minors' PII we are legally
+-- required to erase (COPPA/GDPR). ON DELETE CASCADE never reaches these, so we
+-- delete them explicitly. A person still linked to any org OUTSIDE the delete-set
+-- survives (the shared-athlete / multi-org case). Excludes the caller's own
+-- Person (deleted separately) and anyone synced by a different account.
+WITH linked_in AS (
+    SELECT m.person_id FROM memberships m
+    WHERE m.organization_id = ANY(@org_ids::uuid[])
+    UNION
+    SELECT rm.person_id FROM roster_memberships rm
+    JOIN teams t ON t.id = rm.team_id
+    WHERE t.organization_id = ANY(@org_ids::uuid[])
+),
+linked_out AS (
+    SELECT m.person_id FROM memberships m
+    WHERE m.organization_id <> ALL(@org_ids::uuid[])
+    UNION
+    SELECT rm.person_id FROM roster_memberships rm
+    JOIN teams t ON t.id = rm.team_id
+    WHERE t.organization_id <> ALL(@org_ids::uuid[])
+)
+SELECT p.id
+FROM persons p
+WHERE p.id IN (SELECT person_id FROM linked_in)
+  AND p.id NOT IN (SELECT person_id FROM linked_out)
+  AND p.id <> @caller_person_id
+  AND (p.sync_account_id IS NULL OR p.sync_account_id = @caller_person_id);
+
+-- name: DeletePersonsByIDs :exec
+DELETE FROM persons WHERE id = ANY(@ids::uuid[]);
+
+-- name: DeleteOrganizationsByIDs :exec
+DELETE FROM organizations WHERE id = ANY(@ids::uuid[]);
+
+-- name: DeletePersonByID :exec
+DELETE FROM persons WHERE id = $1;
+
 -- name: GetUserAccountByAppleSub :one
 SELECT * FROM user_accounts WHERE apple_sub = $1;
 

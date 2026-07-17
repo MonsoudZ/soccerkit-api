@@ -72,6 +72,7 @@ func (s *Server) Router() http.Handler {
 			r.Use(s.requireAuth)
 
 			r.Get("/me", s.handleGetMe)
+			r.Delete("/me", s.handleDeleteMe)
 
 			// iOS opaque delta-sync (projection over the domain tables).
 			r.Get("/sync", s.handleSyncPull)
