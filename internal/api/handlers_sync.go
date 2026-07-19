@@ -107,8 +107,19 @@ func (s *Server) handleSyncPush(w http.ResponseWriter, r *http.Request) {
 			writeError(w, errValidation("each upsert needs a type and id"))
 			return
 		}
-		if err := s.applyUpsert(ctx, q, account, org.orgID, rec); err != nil {
+		rows, err := s.applyUpsert(ctx, q, account, org.orgID, rec)
+		if err != nil {
 			writeError(w, err)
+			return
+		}
+		// Zero rows means the id exists and this account does not own it — the
+		// owner guard refused the write. Reject the whole push (the tx rolls
+		// back) rather than dropping the record silently. We deliberately do not
+		// return the server's row: it is another account's data. A legitimate
+		// client can't reach this, since it only ever pushes ids it created or
+		// pulled, and a pull only ever returns rows this account owns.
+		if rows == 0 {
+			writeError(w, errForbidden("record is owned by another account: "+rec.Type+" "+rec.ID))
 			return
 		}
 	}
@@ -131,12 +142,14 @@ func (s *Server) handleSyncPush(w http.ResponseWriter, r *http.Request) {
 }
 
 // applyUpsert routes one record to its projected table, or to sync_documents.
-func (s *Server) applyUpsert(ctx context.Context, q *store.Queries, account, orgID uuid.UUID, rec syncRecord) error {
+// It returns the number of rows written: zero means the owner guard refused the
+// write because the id belongs to another account (see sync.sql).
+func (s *Server) applyUpsert(ctx context.Context, q *store.Queries, account, orgID uuid.UUID, rec syncRecord) (int64, error) {
 	switch rec.Type {
 	case "Team":
 		id, err := uuid.Parse(rec.ID)
 		if err != nil {
-			return errValidation("Team id must be a UUID")
+			return 0, errValidation("Team id must be a UUID")
 		}
 		var p struct {
 			Name     string `json:"name"`
@@ -152,7 +165,7 @@ func (s *Server) applyUpsert(ctx context.Context, q *store.Queries, account, org
 	case "Drill":
 		id, err := uuid.Parse(rec.ID)
 		if err != nil {
-			return errValidation("Drill id must be a UUID")
+			return 0, errValidation("Drill id must be a UUID")
 		}
 		var p struct {
 			Title      string `json:"title"`
@@ -166,7 +179,7 @@ func (s *Server) applyUpsert(ctx context.Context, q *store.Queries, account, org
 	case "Session":
 		id, err := uuid.Parse(rec.ID)
 		if err != nil {
-			return errValidation("Session id must be a UUID")
+			return 0, errValidation("Session id must be a UUID")
 		}
 		var p struct {
 			Title     string `json:"title"`
@@ -180,7 +193,7 @@ func (s *Server) applyUpsert(ctx context.Context, q *store.Queries, account, org
 	case "Person":
 		id, err := uuid.Parse(rec.ID)
 		if err != nil {
-			return errValidation("Person id must be a UUID")
+			return 0, errValidation("Person id must be a UUID")
 		}
 		var p struct {
 			Name                  string `json:"name"`
@@ -198,7 +211,7 @@ func (s *Server) applyUpsert(ctx context.Context, q *store.Queries, account, org
 	case "Player":
 		id, err := uuid.Parse(rec.ID)
 		if err != nil {
-			return errValidation("Player id must be a UUID")
+			return 0, errValidation("Player id must be a UUID")
 		}
 		var p struct {
 			PersonID string `json:"personID"`
@@ -215,7 +228,7 @@ func (s *Server) applyUpsert(ctx context.Context, q *store.Queries, account, org
 	case "Event":
 		id, err := uuid.Parse(rec.ID)
 		if err != nil {
-			return errValidation("Event id must be a UUID")
+			return 0, errValidation("Event id must be a UUID")
 		}
 		var p struct {
 			TeamID string `json:"teamID"`
@@ -230,7 +243,7 @@ func (s *Server) applyUpsert(ctx context.Context, q *store.Queries, account, org
 	case "Diagram":
 		id, err := uuid.Parse(rec.ID)
 		if err != nil {
-			return errValidation("Diagram id must be a UUID")
+			return 0, errValidation("Diagram id must be a UUID")
 		}
 		var p struct {
 			TeamID string `json:"teamID"`
@@ -242,9 +255,12 @@ func (s *Server) applyUpsert(ctx context.Context, q *store.Queries, account, org
 			Title: nilIfEmpty(p.Title), Payload: rec.Payload,
 		})
 	default:
-		return q.SyncUpsertDocument(ctx, store.SyncUpsertDocumentParams{
+		// sync_documents is keyed (sync_account_id, type, id), so it is scoped by
+		// construction — a push can only ever touch this account's own document.
+		err := q.SyncUpsertDocument(ctx, store.SyncUpsertDocumentParams{
 			SyncAccountID: account, Type: rec.Type, ID: rec.ID, Payload: rec.Payload,
 		})
+		return 1, err
 	}
 }
 

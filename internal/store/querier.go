@@ -105,14 +105,27 @@ type Querier interface {
 	// Tombstones are per-table: a delete can only affect a row this account owns,
 	// so REST-created rows (sync_account_id IS NULL) are never tombstoned.
 	SyncTombstoneTeam(ctx context.Context, arg SyncTombstoneTeamParams) error
-	SyncUpsertDiagram(ctx context.Context, arg SyncUpsertDiagramParams) error
+	SyncUpsertDiagram(ctx context.Context, arg SyncUpsertDiagramParams) (int64, error)
 	SyncUpsertDocument(ctx context.Context, arg SyncUpsertDocumentParams) error
-	SyncUpsertDrill(ctx context.Context, arg SyncUpsertDrillParams) error
-	SyncUpsertEvent(ctx context.Context, arg SyncUpsertEventParams) error
-	SyncUpsertPerson(ctx context.Context, arg SyncUpsertPersonParams) error
-	SyncUpsertPlayer(ctx context.Context, arg SyncUpsertPlayerParams) error
-	SyncUpsertSession(ctx context.Context, arg SyncUpsertSessionParams) error
-	SyncUpsertTeam(ctx context.Context, arg SyncUpsertTeamParams) error
+	SyncUpsertDrill(ctx context.Context, arg SyncUpsertDrillParams) (int64, error)
+	SyncUpsertEvent(ctx context.Context, arg SyncUpsertEventParams) (int64, error)
+	// The coach's own Person row is created by /auth/register and /auth/apple with no
+	// sync_account_id (see CreatePersonWithID), and its id is derived from the Apple
+	// sub, so the app pushes that same id. The second disjunct lets an account adopt
+	// exactly one unowned row — its own identity row — which is what makes migration
+	// 0003's "one identity, no id round-tripping" hold. It cannot claim anyone else's:
+	// persons.id = EXCLUDED.sync_account_id is only ever true of the caller's own row.
+	SyncUpsertPerson(ctx context.Context, arg SyncUpsertPersonParams) (int64, error)
+	SyncUpsertPlayer(ctx context.Context, arg SyncUpsertPlayerParams) (int64, error)
+	SyncUpsertSession(ctx context.Context, arg SyncUpsertSessionParams) (int64, error)
+	// Every upsert is guarded by `WHERE <table>.sync_account_id = EXCLUDED.sync_account_id`
+	// on the DO UPDATE. The conflict target is the bare id, so without it a push could
+	// overwrite any row by id and reassign it to the pusher. The guard makes a push at
+	// someone else's row affect zero rows; the queries are :execrows so the handler can
+	// tell that apart from a write and reject it (see applyUpsert). Rows created over
+	// REST have sync_account_id IS NULL and so are never claimable this way — the one
+	// exception is a coach's own Person row, below.
+	SyncUpsertTeam(ctx context.Context, arg SyncUpsertTeamParams) (int64, error)
 	UpdateGame(ctx context.Context, arg UpdateGameParams) (Game, error)
 	UpdatePerson(ctx context.Context, arg UpdatePersonParams) (Person, error)
 	UpdateTeam(ctx context.Context, arg UpdateTeamParams) (Team, error)
