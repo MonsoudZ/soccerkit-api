@@ -98,7 +98,7 @@ func (s *Server) handleCreatePerson(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleGetPerson(w http.ResponseWriter, r *http.Request) {
-	id, err := pathUUID(r, "id")
+	id, err := s.scopedPerson(r)
 	if err != nil {
 		writeError(w, err)
 		return
@@ -115,7 +115,7 @@ func (s *Server) handleGetPerson(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleListPersonInstances(w http.ResponseWriter, r *http.Request) {
-	id, err := pathUUID(r, "id")
+	id, err := s.scopedPerson(r)
 	if err != nil {
 		writeError(w, err)
 		return
@@ -140,7 +140,7 @@ func (s *Server) handleListPersonInstances(w http.ResponseWriter, r *http.Reques
 // handlePersonAggregate returns cross-instance score averages for an athlete —
 // the readiness-mean / effort-trend query that is the product's analytical core.
 func (s *Server) handlePersonAggregate(w http.ResponseWriter, r *http.Request) {
-	id, err := pathUUID(r, "id")
+	id, err := s.scopedPerson(r)
 	if err != nil {
 		writeError(w, err)
 		return

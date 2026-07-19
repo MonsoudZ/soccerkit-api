@@ -85,6 +85,11 @@ type Querier interface {
 	ListSyncChangesSince(ctx context.Context, arg ListSyncChangesSinceParams) ([]ListSyncChangesSinceRow, error)
 	ListTeamsForPerson(ctx context.Context, personID uuid.UUID) ([]ListTeamsForPersonRow, error)
 	ListTeamsInOrg(ctx context.Context, organizationID uuid.UUID) ([]ListTeamsInOrgRow, error)
+	// PersonVisibleInOrg reports whether a Person is reachable from an org. persons
+	// has no organization_id: a Person is tied to an org only by a membership (an
+	// athlete enrolled via POST /persons, or the coach themselves) or by the roster
+	// of one of that org's teams. Those two edges are the whole visibility rule.
+	PersonVisibleInOrg(ctx context.Context, arg PersonVisibleInOrgParams) (*bool, error)
 	RevokeRefreshToken(ctx context.Context, id uuid.UUID) error
 	RevokeRefreshTokenByToken(ctx context.Context, token string) error
 	// Athletes (Persons) whose ONLY organizational linkage is via the org(s) being

@@ -149,3 +149,22 @@ INSERT INTO persons (id, display_name, email)
 VALUES ($1, $2, $3)
 ON CONFLICT (id) DO UPDATE SET display_name = EXCLUDED.display_name, updated_at = now()
 RETURNING *;
+
+-- PersonVisibleInOrg reports whether a Person is reachable from an org. persons
+-- has no organization_id: a Person is tied to an org only by a membership (an
+-- athlete enrolled via POST /persons, or the coach themselves) or by the roster
+-- of one of that org's teams. Those two edges are the whole visibility rule.
+-- name: PersonVisibleInOrg :one
+SELECT (
+    EXISTS (
+        SELECT 1 FROM memberships m
+        WHERE m.person_id = sqlc.arg(person_id)
+          AND m.organization_id = sqlc.arg(organization_id)
+    )
+    OR EXISTS (
+        SELECT 1 FROM roster_memberships rm
+        JOIN teams t ON t.id = rm.team_id
+        WHERE rm.person_id = sqlc.arg(person_id)
+          AND t.organization_id = sqlc.arg(organization_id)
+    )
+) AS visible;
