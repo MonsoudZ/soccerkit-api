@@ -212,3 +212,22 @@ func TestAnswersAreValidatedAgainstTheirField(t *testing.T) {
 		t.Errorf("expected sleep and energy in the aggregate, got %v", agg)
 	}
 }
+
+// TestTemplateRejectsDuplicateFieldKeys — form_fields is UNIQUE (template_id, key), so
+// a repeated key used to reach the index and come back as a 500. The answer side
+// already rejects the same mistake by name.
+func TestTemplateRejectsDuplicateFieldKeys(t *testing.T) {
+	resetDB(t)
+	token, _ := registerUser(t, "dupe@example.com")
+
+	r := do(t, http.MethodPost, "/api/v1/templates", token, map[string]any{
+		"context": "tryout", "name": "Dupe",
+		"fields": []map[string]any{
+			{"key": "speed", "label": "Speed", "kind": "scale"},
+			{"key": "speed", "label": "Speed again", "kind": "scale"},
+		},
+	})
+	if r.status != http.StatusBadRequest {
+		t.Fatalf("duplicate field key: got %d %s, want 400", r.status, r.raw)
+	}
+}

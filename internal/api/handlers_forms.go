@@ -163,11 +163,20 @@ func (s *Server) handleCreateTemplate(w http.ResponseWriter, r *http.Request) {
 	if subjectType == "" {
 		subjectType = "athlete"
 	}
+	// form_fields is UNIQUE (template_id, key), so a repeated key used to reach the
+	// index and come back as a 500. It is the same mistake handleSubmitInstance already
+	// rejects by name on the answer side, and it deserves the same answer here.
+	seenKeys := make(map[string]bool, len(req.Fields))
 	for _, f := range req.Fields {
 		if f.Key == "" || !validFieldKinds[f.Kind] {
 			writeError(w, errValidation("each field needs a key and a valid kind"))
 			return
 		}
+		if seenKeys[f.Key] {
+			writeError(w, errValidation("duplicate field key: "+f.Key))
+			return
+		}
+		seenKeys[f.Key] = true
 	}
 
 	personID := personIDFrom(r.Context())
