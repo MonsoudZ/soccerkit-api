@@ -5,6 +5,8 @@ import (
 	"net/http/httptest"
 	"testing"
 	"time"
+
+	"github.com/go-chi/chi/v5/middleware"
 )
 
 func TestRateLimiterSpendsAndRefills(t *testing.T) {
@@ -44,10 +46,11 @@ func TestRateLimiterSpendsAndRefills(t *testing.T) {
 func TestRateLimiterMiddlewareReturns429(t *testing.T) {
 	l := newIPRateLimiter(60, 1)
 	var served int
-	h := l.middleware(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-		served++
-		w.WriteHeader(http.StatusOK)
-	}))
+	h := middleware.ClientIPFromRemoteAddr(l.middleware(http.HandlerFunc(
+		func(w http.ResponseWriter, _ *http.Request) {
+			served++
+			w.WriteHeader(http.StatusOK)
+		})))
 
 	call := func() int {
 		req := httptest.NewRequest(http.MethodPost, "/api/v1/auth/login", nil)
@@ -67,16 +70,51 @@ func TestRateLimiterMiddlewareReturns429(t *testing.T) {
 	}
 }
 
-func TestClientIPIgnoresEphemeralPort(t *testing.T) {
-	for addr, want := range map[string]string{
-		"203.0.113.7:41234":  "203.0.113.7",
-		"[2001:db8::1]:8080": "[2001:db8::1]",
-		"no-port":            "no-port",
-	} {
-		req := httptest.NewRequest(http.MethodGet, "/", nil)
-		req.RemoteAddr = addr
-		if got := clientIP(req); got != want {
-			t.Errorf("clientIP(%q) = %q, want %q", addr, got, want)
-		}
+// The limiter used to key on r.RemoteAddr after middleware.RealIP had overwritten
+// it from a request header, so a caller who varied X-Forwarded-For got a fresh
+// bucket every time and the credential endpoints were unthrottled in practice.
+// With no trusted proxy configured, the forwarding headers must not move the key
+// off the TCP peer at all.
+func TestForwardingHeadersCannotChooseTheBucket(t *testing.T) {
+	h := middleware.ClientIPFromRemoteAddr(http.HandlerFunc(
+		func(w http.ResponseWriter, r *http.Request) {
+			if got := clientIP(r); got != "198.51.100.4" {
+				t.Errorf("clientIP = %q, want the TCP peer 198.51.100.4", got)
+			}
+		}))
+
+	for _, header := range []string{"X-Forwarded-For", "X-Real-IP", "True-Client-IP"} {
+		req := httptest.NewRequest(http.MethodPost, "/api/v1/auth/login", nil)
+		req.RemoteAddr = "198.51.100.4:41234"
+		req.Header.Set(header, "203.0.113.99")
+		h.ServeHTTP(httptest.NewRecorder(), req)
+	}
+}
+
+// Behind a declared proxy the client is the first X-Forwarded-For entry outside
+// the trusted ranges, walking from the right. Entries to the left of that are
+// whatever the caller chose to send and must not become the key.
+func TestTrustedProxyTakesTheFirstUntrustedHop(t *testing.T) {
+	var got string
+	h := middleware.ClientIPFromXFF("10.0.0.0/8")(http.HandlerFunc(
+		func(w http.ResponseWriter, r *http.Request) { got = clientIP(r) }))
+
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/auth/login", nil)
+	req.RemoteAddr = "10.0.0.7:41234"
+	// The caller forged the first entry; our load balancer appended the real one.
+	req.Header.Set("X-Forwarded-For", "203.0.113.99, 198.51.100.4, 10.0.0.7")
+	h.ServeHTTP(httptest.NewRecorder(), req)
+
+	if got != "198.51.100.4" {
+		t.Errorf("clientIP = %q, want 198.51.100.4 (the hop our proxy vouches for)", got)
+	}
+}
+
+// A request whose address cannot be established still has to be counted, so it
+// gets a bucket rather than a pass.
+func TestUnidentifiedClientStillGetsABucket(t *testing.T) {
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/auth/login", nil)
+	if got := clientIP(req); got != unidentifiedClient {
+		t.Errorf("clientIP with no middleware = %q, want %q", got, unidentifiedClient)
 	}
 }

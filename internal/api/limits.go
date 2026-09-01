@@ -4,6 +4,8 @@ import (
 	"net/http"
 	"sync"
 	"time"
+
+	"github.com/go-chi/chi/v5/middleware"
 )
 
 // Request limits. None of these existed: an unauthenticated caller could POST an
@@ -99,8 +101,8 @@ func (l *ipRateLimiter) allow(key string, now time.Time) bool {
 	return true
 }
 
-// middleware throttles by client IP. RealIP has already run, so RemoteAddr reflects the
-// forwarded address when the service sits behind a proxy.
+// middleware throttles by client IP, as resolved by the ClientIPFrom* middleware
+// the router mounts (see Server.clientIP).
 func (l *ipRateLimiter) middleware(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if !l.allow(clientIP(r), time.Now()) {
@@ -113,16 +115,20 @@ func (l *ipRateLimiter) middleware(next http.Handler) http.Handler {
 	})
 }
 
-// clientIP strips the port from RemoteAddr, so one client is one bucket regardless of
-// the ephemeral port each connection uses.
+// unidentifiedClient is the bucket every request whose address could not be
+// established shares. That is deliberately one bucket rather than none: an
+// unattributable request must still be counted, and sharing a bucket is the
+// restrictive reading, not the permissive one.
+const unidentifiedClient = "unidentified"
+
+// clientIP is the rate-limit key: the address chi's ClientIPFrom* middleware
+// established, already normalized (port stripped, v4-mapped IPv6 folded to v4,
+// zone removed) so one client is one bucket however they connect.
 func clientIP(r *http.Request) string {
-	addr := r.RemoteAddr
-	for i := len(addr) - 1; i >= 0; i-- {
-		if addr[i] == ':' {
-			return addr[:i]
-		}
+	if ip := middleware.GetClientIP(r.Context()); ip != "" {
+		return ip
 	}
-	return addr
+	return unidentifiedClient
 }
 
 // hasAuthLimiter reports whether credential endpoints are throttled, so the router's

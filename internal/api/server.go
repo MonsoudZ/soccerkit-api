@@ -39,7 +39,7 @@ func (s *Server) Router() http.Handler {
 	r := chi.NewRouter()
 
 	r.Use(middleware.RequestID)
-	r.Use(middleware.RealIP)
+	r.Use(s.clientIP())
 	r.Use(middleware.Logger)
 	r.Use(middleware.Recoverer)
 	r.Use(middleware.Timeout(30 * time.Second))
@@ -148,6 +148,33 @@ func (s *Server) Router() http.Handler {
 	})
 
 	return r
+}
+
+// clientIP records who is calling, for the rate limiter to bucket on. It replaces
+// middleware.RealIP, which chi deprecates as spoofable and which was doing real
+// damage here: RealIP overwrites r.RemoteAddr from True-Client-IP, X-Real-IP or
+// X-Forwarded-For with no notion of which hop wrote them, so a caller who varied
+// that header got a fresh bucket on every request and the credential endpoints
+// were effectively unthrottled — the exact attack the limiter exists to stop.
+//
+// The replacement never trusts a header the caller could have written. With no
+// TRUSTED_PROXIES configured the client is the TCP peer; with proxies configured,
+// chi walks X-Forwarded-For from the right and takes the first entry outside
+// those ranges, which is the leftmost address our own infrastructure vouches for.
+func (s *Server) clientIP() func(http.Handler) http.Handler {
+	if len(s.cfg.TrustedProxies) == 0 {
+		if s.cfg.IsDeployed() {
+			// Not fatal, and it fails closed rather than open: behind an unlisted proxy
+			// every caller shares that proxy's address, so the limit becomes global
+			// instead of per-client. Worth saying out loud, because it turns a brake on
+			// one attacker into a brake on everybody.
+			log.Printf("warning: TRUSTED_PROXIES is unset in a deployed environment (ENV=%s); "+
+				"if this process sits behind a load balancer, set it to the balancer's CIDRs "+
+				"or every caller shares one rate-limit bucket", s.cfg.Env)
+		}
+		return middleware.ClientIPFromRemoteAddr
+	}
+	return middleware.ClientIPFromXFF(s.cfg.TrustedProxies...)
 }
 
 func (s *Server) handleHealth(w http.ResponseWriter, _ *http.Request) {

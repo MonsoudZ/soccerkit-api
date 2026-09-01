@@ -3,8 +3,10 @@ package config
 
 import (
 	"fmt"
+	"net/netip"
 	"os"
 	"strconv"
+	"strings"
 	"time"
 )
 
@@ -16,6 +18,14 @@ type Config struct {
 	JWTAccessTTL    time.Duration
 	JWTRefreshTTL   time.Duration
 	CORSOrigins     string
+
+	// TrustedProxies are the CIDR blocks of the reverse proxies this process sits
+	// behind, so the rate limiter can tell which X-Forwarded-For entry was written
+	// by our own infrastructure and which was written by the caller. Empty means
+	// no proxy is trusted and the client address is the TCP peer — the only safe
+	// default, because trusting a forwarding header nobody overwrites lets any
+	// caller pick their own rate-limit bucket.
+	TrustedProxies []string
 
 	// AppleClientID is the expected `aud` of the Apple identity token — the iOS
 	// app's bundle identifier. Required for Sign in with Apple unless
@@ -53,6 +63,11 @@ func Load() (*Config, error) {
 		return nil, fmt.Errorf("invalid JWT_REFRESH_TTL: %w", err)
 	}
 
+	trustedProxies, err := parseCIDRs(getenv("TRUSTED_PROXIES", ""))
+	if err != nil {
+		return nil, err
+	}
+
 	bypass := getenv("DEV_APPLE_BYPASS", "") == "true"
 	appleClientID := getenv("APPLE_CLIENT_ID", "")
 	if appleClientID == "" && !bypass {
@@ -67,6 +82,7 @@ func Load() (*Config, error) {
 		JWTAccessTTL:    accessTTL,
 		JWTRefreshTTL:   refreshTTL,
 		CORSOrigins:     getenv("CORS_ORIGINS", "*"),
+		TrustedProxies:  trustedProxies,
 		AppleClientID:   appleClientID,
 		DevAppleBypass:  bypass,
 	}
@@ -125,6 +141,26 @@ func (c *Config) validateDeployed() error {
 			minSecretLen, c.Env, len(c.JWTAccessSecret))
 	}
 	return nil
+}
+
+// parseCIDRs splits a comma-separated CIDR list and validates every entry here,
+// at boot. The middleware that consumes them panics on a malformed prefix, and a
+// panic during router construction is a much worse way to learn about a typo than
+// a named startup error.
+func parseCIDRs(raw string) ([]string, error) {
+	var out []string
+	for _, part := range strings.Split(raw, ",") {
+		part = strings.TrimSpace(part)
+		if part == "" {
+			continue
+		}
+		if _, err := netip.ParsePrefix(part); err != nil {
+			return nil, fmt.Errorf("invalid TRUSTED_PROXIES entry %q: expected a CIDR block "+
+				"such as 10.0.0.0/8 or 2600:9000::/28", part)
+		}
+		out = append(out, part)
+	}
+	return out, nil
 }
 
 func getenv(key, fallback string) string {
