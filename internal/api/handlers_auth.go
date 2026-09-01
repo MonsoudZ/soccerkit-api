@@ -3,6 +3,7 @@ package api
 import (
 	"context"
 	"errors"
+	"fmt"
 	"net/http"
 	"strings"
 	"time"
@@ -35,6 +36,16 @@ func (s *Server) handleRegister(w http.ResponseWriter, r *http.Request) {
 	}
 	if len(req.Password) < 8 {
 		writeError(w, errValidation("password must be at least 8 characters"))
+		return
+	}
+	// bcrypt refuses an input over 72 bytes rather than truncating it, which is the safe
+	// behaviour and was reaching the caller as a 500 — a generated passphrase or a
+	// password manager's output is an ordinary thing to paste in, and being told the
+	// server is broken is the wrong answer to it. Bytes, not runes: the limit is on what
+	// bcrypt hashes.
+	if len(req.Password) > maxPasswordBytes {
+		writeError(w, errValidation(fmt.Sprintf(
+			"password must be at most %d bytes (the limit bcrypt hashes)", maxPasswordBytes)))
 		return
 	}
 	if strings.TrimSpace(req.DisplayName) == "" {

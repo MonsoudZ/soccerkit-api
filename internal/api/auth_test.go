@@ -3,6 +3,7 @@ package api_test
 import (
 	"context"
 	"net/http"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -360,5 +361,26 @@ func TestOneRefreshTokenRedeemsOnce(t *testing.T) {
 	})
 	if next.status != http.StatusOK {
 		t.Errorf("the surviving chain should still rotate: %d %s", next.status, next.raw)
+	}
+}
+
+// TestRegisterRejectsAPasswordBcryptCannotHash — bcrypt refuses an input over 72 bytes
+// rather than truncating it, and that refusal used to reach the caller as a 500. A
+// generated passphrase is an ordinary thing to paste into a signup form.
+func TestRegisterRejectsAPasswordBcryptCannotHash(t *testing.T) {
+	resetDB(t)
+
+	long := strings.Repeat("correct horse battery staple ", 4) // 116 bytes
+	r := do(t, http.MethodPost, "/api/v1/auth/register", "", map[string]any{
+		"email": "long@example.com", "password": long, "displayName": "Long",
+	})
+	if r.status != http.StatusBadRequest {
+		t.Fatalf("a %d-byte password: got %d %s, want 400", len(long), r.status, r.raw)
+	}
+	// 72 bytes exactly is still accepted: the limit is bcrypt's, not one of our own.
+	if r := do(t, http.MethodPost, "/api/v1/auth/register", "", map[string]any{
+		"email": "just-fits@example.com", "password": strings.Repeat("a", 72), "displayName": "Fits",
+	}); r.status != http.StatusCreated {
+		t.Errorf("a 72-byte password: got %d %s, want 201", r.status, r.raw)
 	}
 }

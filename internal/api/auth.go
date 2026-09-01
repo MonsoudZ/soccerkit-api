@@ -21,6 +21,11 @@ const personIDKey ctxKey = "personID"
 
 // --- password hashing -----------------------------------------------------
 
+// maxPasswordBytes is bcrypt's input limit. Anything longer is rejected by
+// GenerateFromPassword (it does not truncate), so registration checks it as validation
+// rather than letting the crypto library's error surface as a 500.
+const maxPasswordBytes = 72
+
 func hashPassword(plain string) (string, error) {
 	b, err := bcrypt.GenerateFromPassword([]byte(plain), bcrypt.DefaultCost)
 	return string(b), err
