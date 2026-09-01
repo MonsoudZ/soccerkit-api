@@ -74,8 +74,11 @@ until those tiers ship).
 ## Quick start
 
 ```bash
+export ENV="development"    # required, and it has no default: it selects whether the
+                            # development-only escape hatches below are available
 export DATABASE_URL="postgresql://postgres:postgres@localhost:5432/soccerkit?sslmode=disable"
 export JWT_ACCESS_SECRET="dev-access-secret"
+export DEV_APPLE_BYPASS=true   # or set APPLE_CLIENT_ID to the app's bundle id
 
 make run                    # migrations apply on boot; docs at /docs
 make seed                   # coach@soccerkit.dev / password123

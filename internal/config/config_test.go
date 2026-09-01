@@ -21,7 +21,7 @@ func env(t *testing.T, kv map[string]string) {
 		"JWT_ACCESS_SECRET": goodSecret,
 		"APPLE_CLIENT_ID":   "com.example.app",
 		"DEV_APPLE_BYPASS":  "",
-		"ENV":               "",
+		"ENV":               "development",
 		"CORS_ORIGINS":      "",
 		"PORT":              "",
 		"JWT_ACCESS_TTL":    "",
@@ -101,15 +101,39 @@ func TestDevelopmentKeepsTheEscapeHatches(t *testing.T) {
 	}
 }
 
-// An unset ENV means a laptop, not a server: it is the default in getenv.
-func TestUnsetEnvIsDevelopment(t *testing.T) {
-	env(t, map[string]string{"ENV": "", "DEV_APPLE_BYPASS": "true", "APPLE_CLIENT_ID": ""})
+// An unset ENV must not boot. It used to default to "development" — the most
+// permissive value in the set — which meant a deployment that simply never set the
+// variable ran with a placeholder signing secret, DEV_APPLE_BYPASS honoured and no
+// throttle on the credential endpoints. Every guard below existed and none of them ran.
+func TestUnsetEnvRefusesToBoot(t *testing.T) {
+	env(t, map[string]string{
+		"ENV":               "",
+		"DEV_APPLE_BYPASS":  "true",
+		"APPLE_CLIENT_ID":   "",
+		"JWT_ACCESS_SECRET": "secret", // a listed placeholder, six bytes
+	})
+	cfg, err := Load()
+	if err == nil {
+		t.Fatalf("unset ENV booted: Env=%q IsDeployed=%v DevAppleBypass=%v secretLen=%d",
+			cfg.Env, cfg.IsDeployed(), cfg.DevAppleBypass, len(cfg.JWTAccessSecret))
+	}
+	if !strings.Contains(err.Error(), "ENV") {
+		t.Errorf("the error should name ENV, got %v", err)
+	}
+}
+
+// ENV=test is a laptop and a CI runner, not a server: it keeps the escape hatches.
+func TestTestEnvIsNotDeployed(t *testing.T) {
+	env(t, map[string]string{
+		"ENV": "test", "DEV_APPLE_BYPASS": "true", "APPLE_CLIENT_ID": "",
+		"JWT_ACCESS_SECRET": "test-access-secret",
+	})
 	cfg, err := Load()
 	if err != nil {
-		t.Fatalf("unset ENV should behave as development: %v", err)
+		t.Fatalf("ENV=test must boot with the test harness's own settings: %v", err)
 	}
-	if cfg.Env != "development" || cfg.IsDeployed() {
-		t.Errorf("unset ENV = %q, IsDeployed=%v; want development/false", cfg.Env, cfg.IsDeployed())
+	if cfg.IsDeployed() {
+		t.Error("ENV=test is not deployed")
 	}
 }
 

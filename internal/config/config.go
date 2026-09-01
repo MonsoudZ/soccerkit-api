@@ -39,6 +39,21 @@ type Config struct {
 // Load reads configuration from the environment, applying defaults for local
 // development and returning an error if a required value is missing.
 func Load() (*Config, error) {
+	// ENV has no default on purpose. IsDeployed is fail-closed — an unrecognised value
+	// counts as deployed — but that only helps if the value was set at all, and ENV used
+	// to default to "development", the most permissive member of the set. A deployment
+	// that simply never set the variable therefore got every escape hatch at once: a
+	// placeholder signing secret, DEV_APPLE_BYPASS honoured, and no rate limit on the
+	// credential endpoints. Naming it is one line in a deploy config and makes the choice
+	// visible where it is made.
+	envName := os.Getenv("ENV")
+	if envName == "" {
+		return nil, fmt.Errorf("ENV is required: set it to development, test, or the name of " +
+			"the deployed environment (production, staging, …). It selects whether the " +
+			"development-only escape hatches — placeholder signing secrets, DEV_APPLE_BYPASS, " +
+			"unthrottled credential endpoints — are available, so there is no safe default")
+	}
+
 	dbURL := os.Getenv("DATABASE_URL")
 	if dbURL == "" {
 		return nil, fmt.Errorf("DATABASE_URL is required")
@@ -75,7 +90,7 @@ func Load() (*Config, error) {
 	}
 
 	cfg := &Config{
-		Env:             getenv("ENV", "development"),
+		Env:             envName,
 		Port:            port,
 		DatabaseURL:     dbURL,
 		JWTAccessSecret: []byte(accessSecret),
@@ -94,8 +109,10 @@ func Load() (*Config, error) {
 
 // IsDeployed reports whether this process is running outside a developer's
 // machine. It fails closed: anything that is not explicitly development or test
-// counts as deployed, so a typo'd or unset-in-CI ENV cannot silently unlock the
-// development-only escape hatches below.
+// counts as deployed, so a typo'd ENV cannot silently unlock the
+// development-only escape hatches below. Load refuses to boot at all when ENV is
+// unset, because "unset" would otherwise have to pick one side of this and the
+// permissive side is the one that gets picked by accident.
 func (c *Config) IsDeployed() bool {
 	return c.Env != "development" && c.Env != "test"
 }

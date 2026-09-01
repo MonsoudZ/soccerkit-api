@@ -28,6 +28,7 @@ func TestMain(m *testing.M) {
 	if dbURL == "" {
 		dbURL = "postgresql://postgres:postgres@localhost:5432/soccerkit_test?sslmode=disable"
 	}
+	os.Setenv("ENV", "test") // ENV is required now; it has no default
 	os.Setenv("DATABASE_URL", dbURL)
 	os.Setenv("JWT_ACCESS_SECRET", "test-access-secret")
 	os.Setenv("DEV_APPLE_BYPASS", "true") // accept crafted identity tokens in tests
