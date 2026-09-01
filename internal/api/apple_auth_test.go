@@ -190,3 +190,85 @@ func TestAppleAuthRefusesToLinkUnverifiedEmail(t *testing.T) {
 		t.Errorf("verified link should still work: %d %s", r.status, r.raw)
 	}
 }
+
+// TestAppleAuthRefusesAPreClaimedPersonID covers the takeover that CreatePersonWithID's
+// old ON CONFLICT DO UPDATE allowed.
+//
+// The coach's Person id is UUIDv5(a namespace published in this repo, apple_sub), so it
+// is computable by anyone who knows the subject, and POST /sync will insert a persons
+// row at any id an account names. Provisioning used to adopt that row — keeping its
+// sync_account_id — so the victim signed in successfully onto a Person the attacker
+// owned, and could then have their display name, emergency contact and medical notes
+// rewritten, their Person tombstoned, and the row streamed into the attacker's pull.
+func TestAppleAuthRefusesAPreClaimedPersonID(t *testing.T) {
+	resetDB(t)
+	ctx := context.Background()
+	const sub = "000123.victim-apple-sub.4242"
+
+	// Learn the id this subject derives to the way an attacker would compute it,
+	// without hard-coding the namespace constant here.
+	probe := appleSignIn(t, sub, "victim@example.com", nil)
+	if probe.status != http.StatusOK {
+		t.Fatalf("probe sign-in: %d %s", probe.status, probe.raw)
+	}
+	derived, _ := probe.body["personID"].(string)
+	if derived == "" {
+		t.Fatalf("no personID in probe response: %s", probe.raw)
+	}
+	resetDB(t)
+
+	// An unrelated account claims that id before the victim ever signs in.
+	attacker, attackerPerson := registerUser(t, "attacker@e.com")
+	push := do(t, http.MethodPost, "/api/v1/sync", attacker, map[string]any{
+		"upserts": []map[string]any{
+			{"type": "Person", "id": derived, "payload": map[string]any{
+				"name": "pre-claimed", "medicalNotes": "attacker text",
+			}},
+		},
+	})
+	if push.status != http.StatusOK {
+		t.Fatalf("attacker push: %d %s", push.status, push.raw)
+	}
+
+	// The victim's first sign-in must refuse rather than build an account on that row.
+	victim := appleSignIn(t, sub, "victim@example.com", nil)
+	if victim.status != http.StatusConflict {
+		t.Fatalf("pre-claimed sign-in: expected 409, got %d %s", victim.status, victim.raw)
+	}
+
+	// Nothing was provisioned onto the attacker's row, and the whole transaction rolled
+	// back: no account, no organization, no memberships.
+	if n := countRows(t, `SELECT count(*) FROM user_accounts WHERE person_id = $1`, derived); n != 0 {
+		t.Errorf("an account was linked to the pre-claimed Person, found %d", n)
+	}
+	if n := countRows(t, `SELECT count(*) FROM memberships WHERE person_id = $1`, derived); n != 0 {
+		t.Errorf("the pre-claimed Person gained memberships, found %d", n)
+	}
+	if n := countRows(t, `SELECT count(*) FROM organizations`); n != 1 {
+		t.Errorf("expected only the attacker's own org, found %d", n)
+	}
+
+	// The attacker's row is untouched — in particular the sign-in did not rewrite
+	// display_name, which is what the old DO UPDATE did on its way to adopting it.
+	var name string
+	var syncAcct *string
+	if err := testPool.QueryRow(ctx,
+		`SELECT display_name, sync_account_id::text FROM persons WHERE id = $1`, derived).
+		Scan(&name, &syncAcct); err != nil {
+		t.Fatalf("read pre-claimed person: %v", err)
+	}
+	if name != "pre-claimed" {
+		t.Errorf("display_name = %q; the refused sign-in should not have written to the row", name)
+	}
+	if syncAcct == nil || *syncAcct != attackerPerson {
+		t.Errorf("sync_account_id = %v, want the attacker %s — ownership must not move", syncAcct, attackerPerson)
+	}
+
+	// And once the row is gone, the victim can sign in normally.
+	if _, err := testPool.Exec(ctx, `DELETE FROM persons WHERE id = $1`, derived); err != nil {
+		t.Fatalf("remove the squatted row: %v", err)
+	}
+	if again := appleSignIn(t, sub, "victim@example.com", nil); again.status != http.StatusOK {
+		t.Fatalf("sign-in after cleanup: expected 200, got %d %s", again.status, again.raw)
+	}
+}

@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"log"
 	"net/http"
 	"strings"
 
@@ -154,9 +155,27 @@ func (s *Server) provisionAppleIdentity(
 	// The coach's person id is derived from the Apple subject, so it matches the
 	// id the app derives locally — the account Person and the synced Person are
 	// one row (see derivePersonID).
+	//
+	// Deriving it from a public namespace makes the id predictable, which is the point
+	// for reconciliation and a liability here: the insert must create the row, never
+	// adopt one that is already there. See CreatePersonWithID for what adopting cost.
+	personID := derivePersonID(identity.Sub)
 	person, err := q.CreatePersonWithID(ctx, store.CreatePersonWithIDParams{
-		ID: derivePersonID(identity.Sub), DisplayName: displayName, Email: &email,
+		ID: personID, DisplayName: displayName, Email: &email,
 	})
+	if errors.Is(err, pgx.ErrNoRows) {
+		// Someone else's row is sitting on this identity's id. Refusing is the only safe
+		// answer — the alternative is handing them an account built on a row they do not
+		// control — but it does mean a pre-claim denies this Apple ID sign-in until the
+		// row is removed, so it is logged as the security event it is rather than
+		// disappearing into a 409.
+		log.Printf("apple provisioning refused: persons row %s already exists and was not "+
+			"created by this sign-in; the Apple identity that derives it cannot be provisioned "+
+			"until that row is investigated and removed", personID)
+		return store.Person{}, store.UserAccount{}, errConflict(
+			"this Apple ID cannot be set up right now because its account record is already " +
+				"in use; please contact support")
+	}
 	if err != nil {
 		return store.Person{}, store.UserAccount{}, err
 	}

@@ -140,7 +140,7 @@ func (q *Queries) CreatePerson(ctx context.Context, arg CreatePersonParams) (Per
 const createPersonWithID = `-- name: CreatePersonWithID :one
 INSERT INTO persons (id, display_name, email)
 VALUES ($1, $2, $3)
-ON CONFLICT (id) DO UPDATE SET display_name = EXCLUDED.display_name, updated_at = now()
+ON CONFLICT (id) DO NOTHING
 RETURNING id, display_name, given_name, family_name, birthdate, email, phone, emergency_contact_name, emergency_contact_phone, medical_notes, created_at, updated_at, sync_account_id, payload, deleted, seq
 `
 
@@ -150,8 +150,22 @@ type CreatePersonWithIDParams struct {
 	Email       *string   `json:"email"`
 }
 
-// Create (or adopt) a Person with an explicit id — used for the coach's
-// deterministic account Person so it matches the app's synced Person.
+// Create a Person at an explicit id — the coach's deterministic account Person, so it
+// matches the id the app derives locally.
+//
+// DO NOTHING, not DO UPDATE. This used to adopt whatever row was already at that id,
+// and the id is UUIDv5(a namespace constant published in this repo, apple_sub), so it is
+// computable by anyone who knows the subject. POST /sync lets any authenticated account
+// insert a persons row at an id of its choosing — SyncUpsertPerson's ownership guard
+// governs conflicts, and there is no conflict when the row does not exist yet — so an
+// attacker could pre-create the row and have the victim's first Apple sign-in adopt it,
+// sync_account_id and all. From then on the victim's own account Person was the
+// attacker's to rewrite, tombstone and pull.
+//
+// Returning zero rows means the id is taken by a row we did not create. There is no
+// legitimate way for that to happen: authenticating as this coach requires /auth/apple,
+// so their own sync push cannot precede their own provisioning, and provisioning is one
+// transaction that commits whole or not at all. The caller treats it as a refusal.
 func (q *Queries) CreatePersonWithID(ctx context.Context, arg CreatePersonWithIDParams) (Person, error) {
 	row := q.db.QueryRow(ctx, createPersonWithID, arg.ID, arg.DisplayName, arg.Email)
 	var i Person
