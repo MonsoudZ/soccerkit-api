@@ -41,10 +41,22 @@ func run() error {
 	log.Println("migrations up to date")
 
 	srv := api.NewServer(cfg, pool)
+	// Every timeout, not just the header one. middleware.Timeout bounds how long a
+	// handler may run; it says nothing about how slowly a client may dribble out a
+	// request body or read a response back, and limitBody caps the size rather than the
+	// duration. Without these, one slow client holds a connection and a goroutine
+	// indefinitely at no cost to itself.
+	//
+	// WriteTimeout is deliberately longer than the router's 30s handler timeout: it has
+	// to outlast the handler, or the timeout response itself cannot be written and the
+	// caller sees a dropped connection instead of a 503.
 	httpServer := &http.Server{
 		Addr:              fmt.Sprintf(":%d", cfg.Port),
 		Handler:           srv.Router(),
 		ReadHeaderTimeout: 10 * time.Second,
+		ReadTimeout:       30 * time.Second,
+		WriteTimeout:      60 * time.Second,
+		IdleTimeout:       120 * time.Second,
 	}
 
 	// Graceful shutdown on SIGINT/SIGTERM.
