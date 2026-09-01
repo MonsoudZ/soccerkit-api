@@ -143,6 +143,19 @@ func TestDeleteMeSparesSharedAthlete(t *testing.T) {
 		t.Fatalf("link shared athlete to coach B's team: %v", err)
 	}
 
+	// Coach A evaluates the athlete before leaving. This is the case the test used to
+	// miss: the spared athlete keeps their form_instances, those point at coach A's
+	// template, and deleting coach A's org cascades that template away. With
+	// form_instances.template_id at its original NO ACTION, Postgres refused the whole
+	// transaction and the delete came back 500 with nothing erased.
+	inst := do(t, http.MethodPost, "/api/v1/form-instances", coachA, map[string]any{
+		"templateId": templateID(t, coachA, "pre_game"), "subjectPersonId": shared,
+		"answers": []map[string]any{{"key": "sleep", "numericValue": 4}},
+	})
+	if inst.status != http.StatusCreated {
+		t.Fatalf("submit instance: %d %s", inst.status, inst.raw)
+	}
+
 	if del := do(t, http.MethodDelete, "/api/v1/me", coachA, nil); del.status != http.StatusNoContent {
 		t.Fatalf("coach A delete: expected 204, got %d %s", del.status, del.raw)
 	}
@@ -153,5 +166,43 @@ func TestDeleteMeSparesSharedAthlete(t *testing.T) {
 	}
 	if n := countRows(t, `SELECT count(*) FROM roster_memberships WHERE person_id = $1`, shared); n != 1 {
 		t.Errorf("shared athlete's roster spot under coach B must survive, found %d", n)
+	}
+}
+
+// TestDeleteMeAfterSelfEvaluation covers the same failure from the direction a single
+// account reaches on its own, with no second party and nothing written directly to the
+// database: submit an evaluation about yourself, then delete your account.
+//
+// handleDeleteMe removes the caller's organizations before the caller's own Person, so
+// an instance whose subject is the caller is still present when the org's templates
+// cascade away — and form_instances.template_id used to refuse that. A player filing
+// their own pre-game check-in is the product's core loop, so this was the ordinary path,
+// and because the handler is one transaction the account could never be deleted at all.
+func TestDeleteMeAfterSelfEvaluation(t *testing.T) {
+	resetDB(t)
+	coach, coachPerson := registerUser(t, "self-eval@e.com")
+
+	inst := do(t, http.MethodPost, "/api/v1/form-instances", coach, map[string]any{
+		"templateId": templateID(t, coach, "pre_game"), "subjectPersonId": coachPerson,
+		"answers": []map[string]any{{"key": "sleep", "numericValue": 4}},
+	})
+	if inst.status != http.StatusCreated {
+		t.Fatalf("submit self evaluation: %d %s", inst.status, inst.raw)
+	}
+
+	if del := do(t, http.MethodDelete, "/api/v1/me", coach, nil); del.status != http.StatusNoContent {
+		t.Fatalf("delete me: expected 204, got %d %s", del.status, del.raw)
+	}
+
+	// The erasure actually happened — a 204 with a rolled-back transaction would be
+	// worse than the 500 it replaced.
+	if n := countRows(t, `SELECT count(*) FROM persons WHERE id = $1`, coachPerson); n != 0 {
+		t.Errorf("caller Person should be deleted, found %d", n)
+	}
+	if n := countRows(t, `SELECT count(*) FROM form_instances`); n != 0 {
+		t.Errorf("the evaluation should be gone with its template, found %d", n)
+	}
+	if n := countRows(t, `SELECT count(*) FROM form_templates`); n != 0 {
+		t.Errorf("the org's templates should be gone, found %d", n)
 	}
 }
