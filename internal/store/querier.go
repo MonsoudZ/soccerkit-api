@@ -95,24 +95,36 @@ type Querier interface {
 	// survives (the shared-athlete / multi-org case). Excludes the caller's own
 	// Person (deleted separately) and anyone synced by a different account.
 	SelectOrphanedAthletePersonIDs(ctx context.Context, arg SelectOrphanedAthletePersonIDsParams) ([]uuid.UUID, error)
-	SyncTombstoneDiagram(ctx context.Context, arg SyncTombstoneDiagramParams) error
-	SyncTombstoneDocument(ctx context.Context, arg SyncTombstoneDocumentParams) error
-	SyncTombstoneDrill(ctx context.Context, arg SyncTombstoneDrillParams) error
-	SyncTombstoneEvent(ctx context.Context, arg SyncTombstoneEventParams) error
-	SyncTombstonePerson(ctx context.Context, arg SyncTombstonePersonParams) error
-	SyncTombstonePlayer(ctx context.Context, arg SyncTombstonePlayerParams) error
-	SyncTombstoneSession(ctx context.Context, arg SyncTombstoneSessionParams) error
+	SyncTombstoneDiagram(ctx context.Context, arg SyncTombstoneDiagramParams) (int64, error)
+	SyncTombstoneDocument(ctx context.Context, arg SyncTombstoneDocumentParams) (int64, error)
+	SyncTombstoneDrill(ctx context.Context, arg SyncTombstoneDrillParams) (int64, error)
+	SyncTombstoneEvent(ctx context.Context, arg SyncTombstoneEventParams) (int64, error)
+	SyncTombstonePerson(ctx context.Context, arg SyncTombstonePersonParams) (int64, error)
+	SyncTombstonePlayer(ctx context.Context, arg SyncTombstonePlayerParams) (int64, error)
+	SyncTombstoneSession(ctx context.Context, arg SyncTombstoneSessionParams) (int64, error)
 	// Tombstones are per-table: a delete can only affect a row this account owns,
 	// so REST-created rows (sync_account_id IS NULL) are never tombstoned.
-	SyncTombstoneTeam(ctx context.Context, arg SyncTombstoneTeamParams) error
-	SyncUpsertDiagram(ctx context.Context, arg SyncUpsertDiagramParams) error
-	SyncUpsertDocument(ctx context.Context, arg SyncUpsertDocumentParams) error
-	SyncUpsertDrill(ctx context.Context, arg SyncUpsertDrillParams) error
-	SyncUpsertEvent(ctx context.Context, arg SyncUpsertEventParams) error
-	SyncUpsertPerson(ctx context.Context, arg SyncUpsertPersonParams) error
-	SyncUpsertPlayer(ctx context.Context, arg SyncUpsertPlayerParams) error
-	SyncUpsertSession(ctx context.Context, arg SyncUpsertSessionParams) error
-	SyncUpsertTeam(ctx context.Context, arg SyncUpsertTeamParams) error
+	SyncTombstoneTeam(ctx context.Context, arg SyncTombstoneTeamParams) (int64, error)
+	SyncUpsertDiagram(ctx context.Context, arg SyncUpsertDiagramParams) (int64, error)
+	SyncUpsertDocument(ctx context.Context, arg SyncUpsertDocumentParams) (int64, error)
+	SyncUpsertDrill(ctx context.Context, arg SyncUpsertDrillParams) (int64, error)
+	SyncUpsertEvent(ctx context.Context, arg SyncUpsertEventParams) (int64, error)
+	// The one statement that may adopt an unowned row, and only the caller's own Person.
+	// /auth/apple provisions the coach's Person through CreatePersonWithID with a NULL
+	// sync_account_id, and the app then pushes that same id expecting the two to reconcile
+	// into one identity (see 0003_person_sync.sql). The second disjunct permits exactly that:
+	// persons.id equals the pushing account's id only for the caller's own row, so it cannot
+	// be used to claim anyone else's.
+	SyncUpsertPerson(ctx context.Context, arg SyncUpsertPersonParams) (int64, error)
+	SyncUpsertPlayer(ctx context.Context, arg SyncUpsertPlayerParams) (int64, error)
+	SyncUpsertSession(ctx context.Context, arg SyncUpsertSessionParams) (int64, error)
+	// Upserts are keyed on the client-supplied primary key, so each conflict clause is
+	// guarded on the row's owner: a push naming a row this account does not own affects
+	// zero rows, and the handler returns it to the client as a conflict. A NULL owner
+	// (a REST-created row) fails the guard too — the separation 0002_sync.sql describes.
+	// Ownership never transfers on update, so the SET clauses do not reassign
+	// sync_account_id; SyncUpsertPerson is the one exception, see its comment.
+	SyncUpsertTeam(ctx context.Context, arg SyncUpsertTeamParams) (int64, error)
 	UpdateGame(ctx context.Context, arg UpdateGameParams) (Game, error)
 	UpdatePerson(ctx context.Context, arg UpdatePersonParams) (Person, error)
 	UpdateTeam(ctx context.Context, arg UpdateTeamParams) (Team, error)

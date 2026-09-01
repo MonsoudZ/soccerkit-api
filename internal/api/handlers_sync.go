@@ -75,8 +75,11 @@ func (s *Server) handleSyncPull(w http.ResponseWriter, r *http.Request) {
 // handleSyncPush applies the client's local changes. Each record is routed by
 // type: projected types land in their domain table (columns projected out of the
 // payload, full payload retained); everything else lands in sync_documents.
-// Writes are last-write-wins; the cursor is echoed, not advanced (only a pull
-// advances it), so a second device's interleaved changes are never skipped.
+// Writes are last-write-wins within an account; the cursor is echoed, not advanced
+// (only a pull advances it), so a second device's interleaved changes are never
+// skipped. A write naming a row this account does not own affects nothing and comes
+// back in Conflicts, so the client learns its change was rejected rather than
+// silently losing it.
 func (s *Server) handleSyncPush(w http.ResponseWriter, r *http.Request) {
 	account := personIDFrom(r.Context())
 
@@ -102,14 +105,19 @@ func (s *Server) handleSyncPush(w http.ResponseWriter, r *http.Request) {
 	defer tx.Rollback(ctx) //nolint:errcheck // no-op after a successful Commit
 	q := s.store.WithTx(tx)
 
+	conflicts := []syncRecord{}
 	for _, rec := range req.Upserts {
 		if rec.Type == "" || rec.ID == "" {
 			writeError(w, errValidation("each upsert needs a type and id"))
 			return
 		}
-		if err := s.applyUpsert(ctx, q, account, org.orgID, rec); err != nil {
+		ok, err := s.applyUpsert(ctx, q, account, org.orgID, rec)
+		if err != nil {
 			writeError(w, err)
 			return
+		}
+		if !ok {
+			conflicts = append(conflicts, rec)
 		}
 	}
 	for _, key := range req.Deletes {
@@ -117,9 +125,13 @@ func (s *Server) handleSyncPush(w http.ResponseWriter, r *http.Request) {
 			writeError(w, errValidation("each delete needs a type and id"))
 			return
 		}
-		if err := s.applyDelete(ctx, q, account, key); err != nil {
+		ok, err := s.applyDelete(ctx, q, account, key)
+		if err != nil {
 			writeError(w, err)
 			return
+		}
+		if !ok {
+			conflicts = append(conflicts, syncRecord{Type: key.Type, ID: key.ID})
 		}
 	}
 	if err := tx.Commit(ctx); err != nil {
@@ -127,16 +139,18 @@ func (s *Server) handleSyncPush(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	writeJSON(w, http.StatusOK, syncPushResponse{Cursor: req.Cursor, Conflicts: []syncRecord{}})
+	writeJSON(w, http.StatusOK, syncPushResponse{Cursor: req.Cursor, Conflicts: conflicts})
 }
 
-// applyUpsert routes one record to its projected table, or to sync_documents.
-func (s *Server) applyUpsert(ctx context.Context, q *store.Queries, account, orgID uuid.UUID, rec syncRecord) error {
+// applyUpsert routes one record to its projected table, or to sync_documents. It
+// reports whether the write landed: an upsert against a row owned by another account
+// matches nothing and returns false.
+func (s *Server) applyUpsert(ctx context.Context, q *store.Queries, account, orgID uuid.UUID, rec syncRecord) (bool, error) {
 	switch rec.Type {
 	case "Team":
 		id, err := uuid.Parse(rec.ID)
 		if err != nil {
-			return errValidation("Team id must be a UUID")
+			return false, errValidation("Team id must be a UUID")
 		}
 		var p struct {
 			Name     string `json:"name"`
@@ -144,43 +158,43 @@ func (s *Server) applyUpsert(ctx context.Context, q *store.Queries, account, org
 			Season   string `json:"season"`
 		}
 		_ = json.Unmarshal(rec.Payload, &p)
-		return q.SyncUpsertTeam(ctx, store.SyncUpsertTeamParams{
+		return applied(q.SyncUpsertTeam(ctx, store.SyncUpsertTeamParams{
 			ID: id, OrganizationID: orgID, SyncAccountID: &account,
 			Name: p.Name, AgeGroup: nilIfEmpty(p.AgeGroup), Season: nilIfEmpty(p.Season),
 			Payload: rec.Payload,
-		})
+		}))
 	case "Drill":
 		id, err := uuid.Parse(rec.ID)
 		if err != nil {
-			return errValidation("Drill id must be a UUID")
+			return false, errValidation("Drill id must be a UUID")
 		}
 		var p struct {
 			Title      string `json:"title"`
 			FieldSetup string `json:"fieldSetup"`
 		}
 		_ = json.Unmarshal(rec.Payload, &p)
-		return q.SyncUpsertDrill(ctx, store.SyncUpsertDrillParams{
+		return applied(q.SyncUpsertDrill(ctx, store.SyncUpsertDrillParams{
 			ID: id, OrganizationID: orgID, AuthorPersonID: &account, SyncAccountID: &account,
 			Name: p.Title, Description: nilIfEmpty(p.FieldSetup), Payload: rec.Payload,
-		})
+		}))
 	case "Session":
 		id, err := uuid.Parse(rec.ID)
 		if err != nil {
-			return errValidation("Session id must be a UUID")
+			return false, errValidation("Session id must be a UUID")
 		}
 		var p struct {
 			Title     string `json:"title"`
 			Objective string `json:"objective"`
 		}
 		_ = json.Unmarshal(rec.Payload, &p)
-		return q.SyncUpsertSession(ctx, store.SyncUpsertSessionParams{
+		return applied(q.SyncUpsertSession(ctx, store.SyncUpsertSessionParams{
 			ID: id, OrganizationID: orgID, AuthorPersonID: &account, SyncAccountID: &account,
 			Title: p.Title, Notes: nilIfEmpty(p.Objective), Payload: rec.Payload,
-		})
+		}))
 	case "Person":
 		id, err := uuid.Parse(rec.ID)
 		if err != nil {
-			return errValidation("Person id must be a UUID")
+			return false, errValidation("Person id must be a UUID")
 		}
 		var p struct {
 			Name                  string `json:"name"`
@@ -189,16 +203,16 @@ func (s *Server) applyUpsert(ctx context.Context, q *store.Queries, account, org
 			MedicalNotes          string `json:"medicalNotes"`
 		}
 		_ = json.Unmarshal(rec.Payload, &p)
-		return q.SyncUpsertPerson(ctx, store.SyncUpsertPersonParams{
+		return applied(q.SyncUpsertPerson(ctx, store.SyncUpsertPersonParams{
 			ID: id, SyncAccountID: &account, DisplayName: p.Name,
 			EmergencyContactName:  nilIfEmpty(p.EmergencyContactName),
 			EmergencyContactPhone: nilIfEmpty(p.EmergencyContactPhone),
 			MedicalNotes:          nilIfEmpty(p.MedicalNotes), Payload: rec.Payload,
-		})
+		}))
 	case "Player":
 		id, err := uuid.Parse(rec.ID)
 		if err != nil {
-			return errValidation("Player id must be a UUID")
+			return false, errValidation("Player id must be a UUID")
 		}
 		var p struct {
 			PersonID string `json:"personID"`
@@ -207,15 +221,15 @@ func (s *Server) applyUpsert(ctx context.Context, q *store.Queries, account, org
 			Position string `json:"position"`
 		}
 		_ = json.Unmarshal(rec.Payload, &p)
-		return q.SyncUpsertPlayer(ctx, store.SyncUpsertPlayerParams{
+		return applied(q.SyncUpsertPlayer(ctx, store.SyncUpsertPlayerParams{
 			ID: id, SyncAccountID: &account, PersonID: parseUUIDPtr(p.PersonID),
 			Name: nilIfEmpty(p.Name), Number: &p.Number, Position: nilIfEmpty(p.Position),
 			Payload: rec.Payload,
-		})
+		}))
 	case "Event":
 		id, err := uuid.Parse(rec.ID)
 		if err != nil {
-			return errValidation("Event id must be a UUID")
+			return false, errValidation("Event id must be a UUID")
 		}
 		var p struct {
 			TeamID string `json:"teamID"`
@@ -223,81 +237,91 @@ func (s *Server) applyUpsert(ctx context.Context, q *store.Queries, account, org
 			Kind   string `json:"kind"`
 		}
 		_ = json.Unmarshal(rec.Payload, &p)
-		return q.SyncUpsertEvent(ctx, store.SyncUpsertEventParams{
+		return applied(q.SyncUpsertEvent(ctx, store.SyncUpsertEventParams{
 			ID: id, SyncAccountID: &account, TeamID: parseUUIDPtr(p.TeamID),
 			Title: nilIfEmpty(p.Title), Kind: nilIfEmpty(p.Kind), Payload: rec.Payload,
-		})
+		}))
 	case "Diagram":
 		id, err := uuid.Parse(rec.ID)
 		if err != nil {
-			return errValidation("Diagram id must be a UUID")
+			return false, errValidation("Diagram id must be a UUID")
 		}
 		var p struct {
 			TeamID string `json:"teamID"`
 			Title  string `json:"title"`
 		}
 		_ = json.Unmarshal(rec.Payload, &p)
-		return q.SyncUpsertDiagram(ctx, store.SyncUpsertDiagramParams{
+		return applied(q.SyncUpsertDiagram(ctx, store.SyncUpsertDiagramParams{
 			ID: id, SyncAccountID: &account, TeamID: parseUUIDPtr(p.TeamID),
 			Title: nilIfEmpty(p.Title), Payload: rec.Payload,
-		})
+		}))
 	default:
-		return q.SyncUpsertDocument(ctx, store.SyncUpsertDocumentParams{
+		return applied(q.SyncUpsertDocument(ctx, store.SyncUpsertDocumentParams{
 			SyncAccountID: account, Type: rec.Type, ID: rec.ID, Payload: rec.Payload,
-		})
+		}))
 	}
 }
 
-// applyDelete tombstones one key in its projected table, or in sync_documents.
-func (s *Server) applyDelete(ctx context.Context, q *store.Queries, account uuid.UUID, key syncKey) error {
+// applyDelete tombstones one key in its projected table, or in sync_documents. Like
+// applyUpsert it reports whether the row was actually tombstoned.
+func (s *Server) applyDelete(ctx context.Context, q *store.Queries, account uuid.UUID, key syncKey) (bool, error) {
 	switch key.Type {
 	case "Team":
 		id, err := uuid.Parse(key.ID)
 		if err != nil {
-			return errValidation("Team id must be a UUID")
+			return false, errValidation("Team id must be a UUID")
 		}
-		return q.SyncTombstoneTeam(ctx, store.SyncTombstoneTeamParams{ID: id, SyncAccountID: &account})
+		return applied(q.SyncTombstoneTeam(ctx, store.SyncTombstoneTeamParams{ID: id, SyncAccountID: &account}))
 	case "Drill":
 		id, err := uuid.Parse(key.ID)
 		if err != nil {
-			return errValidation("Drill id must be a UUID")
+			return false, errValidation("Drill id must be a UUID")
 		}
-		return q.SyncTombstoneDrill(ctx, store.SyncTombstoneDrillParams{ID: id, SyncAccountID: &account})
+		return applied(q.SyncTombstoneDrill(ctx, store.SyncTombstoneDrillParams{ID: id, SyncAccountID: &account}))
 	case "Session":
 		id, err := uuid.Parse(key.ID)
 		if err != nil {
-			return errValidation("Session id must be a UUID")
+			return false, errValidation("Session id must be a UUID")
 		}
-		return q.SyncTombstoneSession(ctx, store.SyncTombstoneSessionParams{ID: id, SyncAccountID: &account})
+		return applied(q.SyncTombstoneSession(ctx, store.SyncTombstoneSessionParams{ID: id, SyncAccountID: &account}))
 	case "Person":
 		id, err := uuid.Parse(key.ID)
 		if err != nil {
-			return errValidation("Person id must be a UUID")
+			return false, errValidation("Person id must be a UUID")
 		}
-		return q.SyncTombstonePerson(ctx, store.SyncTombstonePersonParams{ID: id, SyncAccountID: &account})
+		return applied(q.SyncTombstonePerson(ctx, store.SyncTombstonePersonParams{ID: id, SyncAccountID: &account}))
 	case "Player":
 		id, err := uuid.Parse(key.ID)
 		if err != nil {
-			return errValidation("Player id must be a UUID")
+			return false, errValidation("Player id must be a UUID")
 		}
-		return q.SyncTombstonePlayer(ctx, store.SyncTombstonePlayerParams{ID: id, SyncAccountID: &account})
+		return applied(q.SyncTombstonePlayer(ctx, store.SyncTombstonePlayerParams{ID: id, SyncAccountID: &account}))
 	case "Event":
 		id, err := uuid.Parse(key.ID)
 		if err != nil {
-			return errValidation("Event id must be a UUID")
+			return false, errValidation("Event id must be a UUID")
 		}
-		return q.SyncTombstoneEvent(ctx, store.SyncTombstoneEventParams{ID: id, SyncAccountID: &account})
+		return applied(q.SyncTombstoneEvent(ctx, store.SyncTombstoneEventParams{ID: id, SyncAccountID: &account}))
 	case "Diagram":
 		id, err := uuid.Parse(key.ID)
 		if err != nil {
-			return errValidation("Diagram id must be a UUID")
+			return false, errValidation("Diagram id must be a UUID")
 		}
-		return q.SyncTombstoneDiagram(ctx, store.SyncTombstoneDiagramParams{ID: id, SyncAccountID: &account})
+		return applied(q.SyncTombstoneDiagram(ctx, store.SyncTombstoneDiagramParams{ID: id, SyncAccountID: &account}))
 	default:
-		return q.SyncTombstoneDocument(ctx, store.SyncTombstoneDocumentParams{
+		return applied(q.SyncTombstoneDocument(ctx, store.SyncTombstoneDocumentParams{
 			SyncAccountID: account, Type: key.Type, ID: key.ID,
-		})
+		}))
 	}
+}
+
+// applied turns a sqlc :execrows result into "did this write land". Zero rows means
+// the statement's ownership guard rejected it — the row belongs to another account.
+func applied(rows int64, err error) (bool, error) {
+	if err != nil {
+		return false, err
+	}
+	return rows > 0, nil
 }
 
 // parseCursor turns the opaque cursor string into a seq, defaulting to 0.

@@ -168,3 +168,125 @@ func mustJSON(v any) string {
 	b, _ := json.Marshal(v)
 	return string(b)
 }
+
+// TestSyncPushCannotWriteAnotherAccountsRow is the write-direction counterpart to
+// TestSyncIsolatedPerAccount, which only ever proved Bob cannot *read* Alice's rows.
+// Without an ownership guard on the upsert's conflict clause, a push naming an
+// existing row's id rewrote that row and reassigned it to the pusher.
+func TestSyncPushCannotWriteAnotherAccountsRow(t *testing.T) {
+	resetDB(t)
+	ctx := context.Background()
+	victim, victimPerson := registerUser(t, "sync-victim@e.com")
+	attacker := appleToken(t, "sub-sync-attacker", "sync-attacker@example.com")
+
+	teamID := "5e1f0a11-0000-4000-8000-00000000ab01"
+	if push := do(t, http.MethodPost, "/api/v1/sync", victim, map[string]any{
+		"upserts": []map[string]any{
+			{"type": "Team", "id": teamID, "payload": map[string]any{"name": "Victim U12"}},
+		},
+	}); push.status != http.StatusOK {
+		t.Fatalf("victim push: %d %s", push.status, push.raw)
+	}
+
+	// The attacker names the victim's team id.
+	push := do(t, http.MethodPost, "/api/v1/sync", attacker, map[string]any{
+		"upserts": []map[string]any{
+			{"type": "Team", "id": teamID, "payload": map[string]any{"name": "PWNED"}},
+		},
+	})
+	if push.status != http.StatusOK {
+		t.Fatalf("attacker push: %d %s", push.status, push.raw)
+	}
+
+	// Rejected, and reported back rather than silently dropped.
+	conflicts, _ := push.body["conflicts"].([]any)
+	if len(conflicts) != 1 {
+		t.Fatalf("expected 1 conflict, got %v", push.body["conflicts"])
+	}
+	if c, _ := conflicts[0].(map[string]any); c["id"] != teamID || c["type"] != "Team" {
+		t.Errorf("conflict should name the rejected record, got %v", conflicts[0])
+	}
+
+	// The row is untouched and still the victim's.
+	var name string
+	var owner string
+	if err := testPool.QueryRow(ctx,
+		`SELECT name, sync_account_id::text FROM teams WHERE id = $1`, teamID).Scan(&name, &owner); err != nil {
+		t.Fatal(err)
+	}
+	if name != "Victim U12" {
+		t.Errorf("team name = %q, want it unchanged", name)
+	}
+	if owner != victimPerson {
+		t.Errorf("team owner = %s, want the victim %s", owner, victimPerson)
+	}
+
+	// And it never reaches the attacker's delta.
+	if got := pullSync(t, attacker, ""); len(got.Records) != 0 {
+		t.Errorf("attacker pulled %d records, want 0", len(got.Records))
+	}
+}
+
+// TestSyncTombstoneCannotDeleteAnotherAccountsRow covers the delete direction.
+func TestSyncTombstoneCannotDeleteAnotherAccountsRow(t *testing.T) {
+	resetDB(t)
+	ctx := context.Background()
+	victim, _ := registerUser(t, "tomb-victim@e.com")
+	attacker := appleToken(t, "sub-tomb-attacker", "tomb-attacker@example.com")
+
+	drillID := "5e1f0a11-0000-4000-8000-00000000ab02"
+	do(t, http.MethodPost, "/api/v1/sync", victim, map[string]any{
+		"upserts": []map[string]any{
+			{"type": "Drill", "id": drillID, "payload": map[string]any{"title": "Rondo"}},
+		},
+	})
+
+	push := do(t, http.MethodPost, "/api/v1/sync", attacker, map[string]any{
+		"deletes": []map[string]any{{"type": "Drill", "id": drillID}},
+	})
+	if push.status != http.StatusOK {
+		t.Fatalf("attacker delete: %d %s", push.status, push.raw)
+	}
+	if conflicts, _ := push.body["conflicts"].([]any); len(conflicts) != 1 {
+		t.Fatalf("expected the rejected delete in conflicts, got %v", push.body["conflicts"])
+	}
+
+	var deleted bool
+	if err := testPool.QueryRow(ctx, `SELECT deleted FROM drills WHERE id = $1`, drillID).Scan(&deleted); err != nil {
+		t.Fatal(err)
+	}
+	if deleted {
+		t.Error("attacker tombstoned a drill they do not own")
+	}
+}
+
+// TestSyncCannotAdoptRESTCreatedRow guards the separation 0002_sync.sql describes:
+// rows written through the REST API have a NULL sync_account_id and sync may not
+// claim them.
+func TestSyncCannotAdoptRESTCreatedRow(t *testing.T) {
+	resetDB(t)
+	ctx := context.Background()
+	coach, _ := registerUser(t, "rest-owner@e.com")
+
+	team := do(t, http.MethodPost, "/api/v1/teams", coach, map[string]any{"name": "REST Team"})
+	teamID, _ := team.body["id"].(string)
+
+	push := do(t, http.MethodPost, "/api/v1/sync", coach, map[string]any{
+		"upserts": []map[string]any{
+			{"type": "Team", "id": teamID, "payload": map[string]any{"name": "Claimed"}},
+		},
+	})
+	if conflicts, _ := push.body["conflicts"].([]any); len(conflicts) != 1 {
+		t.Fatalf("REST-created row should not be adoptable, conflicts=%v", push.body["conflicts"])
+	}
+
+	var name string
+	var owner *string
+	if err := testPool.QueryRow(ctx,
+		`SELECT name, sync_account_id::text FROM teams WHERE id = $1`, teamID).Scan(&name, &owner); err != nil {
+		t.Fatal(err)
+	}
+	if name != "REST Team" || owner != nil {
+		t.Errorf("REST row changed: name=%q owner=%v", name, owner)
+	}
+}

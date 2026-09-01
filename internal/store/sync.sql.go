@@ -82,7 +82,7 @@ func (q *Queries) ListSyncChangesSince(ctx context.Context, arg ListSyncChangesS
 	return items, nil
 }
 
-const syncTombstoneDiagram = `-- name: SyncTombstoneDiagram :exec
+const syncTombstoneDiagram = `-- name: SyncTombstoneDiagram :execrows
 UPDATE diagrams SET deleted = true, seq = nextval('sync_seq'), updated_at = now()
 WHERE id = $1 AND sync_account_id = $2
 `
@@ -92,12 +92,15 @@ type SyncTombstoneDiagramParams struct {
 	SyncAccountID *uuid.UUID `json:"sync_account_id"`
 }
 
-func (q *Queries) SyncTombstoneDiagram(ctx context.Context, arg SyncTombstoneDiagramParams) error {
-	_, err := q.db.Exec(ctx, syncTombstoneDiagram, arg.ID, arg.SyncAccountID)
-	return err
+func (q *Queries) SyncTombstoneDiagram(ctx context.Context, arg SyncTombstoneDiagramParams) (int64, error) {
+	result, err := q.db.Exec(ctx, syncTombstoneDiagram, arg.ID, arg.SyncAccountID)
+	if err != nil {
+		return 0, err
+	}
+	return result.RowsAffected(), nil
 }
 
-const syncTombstoneDocument = `-- name: SyncTombstoneDocument :exec
+const syncTombstoneDocument = `-- name: SyncTombstoneDocument :execrows
 INSERT INTO sync_documents (sync_account_id, type, id, payload, deleted, seq)
 VALUES ($1, $2, $3, NULL, true, nextval('sync_seq'))
 ON CONFLICT (sync_account_id, type, id) DO UPDATE
@@ -110,12 +113,15 @@ type SyncTombstoneDocumentParams struct {
 	ID            string    `json:"id"`
 }
 
-func (q *Queries) SyncTombstoneDocument(ctx context.Context, arg SyncTombstoneDocumentParams) error {
-	_, err := q.db.Exec(ctx, syncTombstoneDocument, arg.SyncAccountID, arg.Type, arg.ID)
-	return err
+func (q *Queries) SyncTombstoneDocument(ctx context.Context, arg SyncTombstoneDocumentParams) (int64, error) {
+	result, err := q.db.Exec(ctx, syncTombstoneDocument, arg.SyncAccountID, arg.Type, arg.ID)
+	if err != nil {
+		return 0, err
+	}
+	return result.RowsAffected(), nil
 }
 
-const syncTombstoneDrill = `-- name: SyncTombstoneDrill :exec
+const syncTombstoneDrill = `-- name: SyncTombstoneDrill :execrows
 UPDATE drills SET deleted = true, seq = nextval('sync_seq'), updated_at = now()
 WHERE id = $1 AND sync_account_id = $2
 `
@@ -125,12 +131,15 @@ type SyncTombstoneDrillParams struct {
 	SyncAccountID *uuid.UUID `json:"sync_account_id"`
 }
 
-func (q *Queries) SyncTombstoneDrill(ctx context.Context, arg SyncTombstoneDrillParams) error {
-	_, err := q.db.Exec(ctx, syncTombstoneDrill, arg.ID, arg.SyncAccountID)
-	return err
+func (q *Queries) SyncTombstoneDrill(ctx context.Context, arg SyncTombstoneDrillParams) (int64, error) {
+	result, err := q.db.Exec(ctx, syncTombstoneDrill, arg.ID, arg.SyncAccountID)
+	if err != nil {
+		return 0, err
+	}
+	return result.RowsAffected(), nil
 }
 
-const syncTombstoneEvent = `-- name: SyncTombstoneEvent :exec
+const syncTombstoneEvent = `-- name: SyncTombstoneEvent :execrows
 UPDATE events SET deleted = true, seq = nextval('sync_seq'), updated_at = now()
 WHERE id = $1 AND sync_account_id = $2
 `
@@ -140,12 +149,15 @@ type SyncTombstoneEventParams struct {
 	SyncAccountID *uuid.UUID `json:"sync_account_id"`
 }
 
-func (q *Queries) SyncTombstoneEvent(ctx context.Context, arg SyncTombstoneEventParams) error {
-	_, err := q.db.Exec(ctx, syncTombstoneEvent, arg.ID, arg.SyncAccountID)
-	return err
+func (q *Queries) SyncTombstoneEvent(ctx context.Context, arg SyncTombstoneEventParams) (int64, error) {
+	result, err := q.db.Exec(ctx, syncTombstoneEvent, arg.ID, arg.SyncAccountID)
+	if err != nil {
+		return 0, err
+	}
+	return result.RowsAffected(), nil
 }
 
-const syncTombstonePerson = `-- name: SyncTombstonePerson :exec
+const syncTombstonePerson = `-- name: SyncTombstonePerson :execrows
 UPDATE persons SET deleted = true, seq = nextval('sync_seq'), updated_at = now()
 WHERE id = $1 AND sync_account_id = $2
 `
@@ -155,12 +167,15 @@ type SyncTombstonePersonParams struct {
 	SyncAccountID *uuid.UUID `json:"sync_account_id"`
 }
 
-func (q *Queries) SyncTombstonePerson(ctx context.Context, arg SyncTombstonePersonParams) error {
-	_, err := q.db.Exec(ctx, syncTombstonePerson, arg.ID, arg.SyncAccountID)
-	return err
+func (q *Queries) SyncTombstonePerson(ctx context.Context, arg SyncTombstonePersonParams) (int64, error) {
+	result, err := q.db.Exec(ctx, syncTombstonePerson, arg.ID, arg.SyncAccountID)
+	if err != nil {
+		return 0, err
+	}
+	return result.RowsAffected(), nil
 }
 
-const syncTombstonePlayer = `-- name: SyncTombstonePlayer :exec
+const syncTombstonePlayer = `-- name: SyncTombstonePlayer :execrows
 UPDATE players SET deleted = true, seq = nextval('sync_seq'), updated_at = now()
 WHERE id = $1 AND sync_account_id = $2
 `
@@ -170,12 +185,15 @@ type SyncTombstonePlayerParams struct {
 	SyncAccountID *uuid.UUID `json:"sync_account_id"`
 }
 
-func (q *Queries) SyncTombstonePlayer(ctx context.Context, arg SyncTombstonePlayerParams) error {
-	_, err := q.db.Exec(ctx, syncTombstonePlayer, arg.ID, arg.SyncAccountID)
-	return err
+func (q *Queries) SyncTombstonePlayer(ctx context.Context, arg SyncTombstonePlayerParams) (int64, error) {
+	result, err := q.db.Exec(ctx, syncTombstonePlayer, arg.ID, arg.SyncAccountID)
+	if err != nil {
+		return 0, err
+	}
+	return result.RowsAffected(), nil
 }
 
-const syncTombstoneSession = `-- name: SyncTombstoneSession :exec
+const syncTombstoneSession = `-- name: SyncTombstoneSession :execrows
 UPDATE sessions SET deleted = true, seq = nextval('sync_seq'), updated_at = now()
 WHERE id = $1 AND sync_account_id = $2
 `
@@ -185,12 +203,15 @@ type SyncTombstoneSessionParams struct {
 	SyncAccountID *uuid.UUID `json:"sync_account_id"`
 }
 
-func (q *Queries) SyncTombstoneSession(ctx context.Context, arg SyncTombstoneSessionParams) error {
-	_, err := q.db.Exec(ctx, syncTombstoneSession, arg.ID, arg.SyncAccountID)
-	return err
+func (q *Queries) SyncTombstoneSession(ctx context.Context, arg SyncTombstoneSessionParams) (int64, error) {
+	result, err := q.db.Exec(ctx, syncTombstoneSession, arg.ID, arg.SyncAccountID)
+	if err != nil {
+		return 0, err
+	}
+	return result.RowsAffected(), nil
 }
 
-const syncTombstoneTeam = `-- name: SyncTombstoneTeam :exec
+const syncTombstoneTeam = `-- name: SyncTombstoneTeam :execrows
 
 UPDATE teams SET deleted = true, seq = nextval('sync_seq'), updated_at = now()
 WHERE id = $1 AND sync_account_id = $2
@@ -203,18 +224,22 @@ type SyncTombstoneTeamParams struct {
 
 // Tombstones are per-table: a delete can only affect a row this account owns,
 // so REST-created rows (sync_account_id IS NULL) are never tombstoned.
-func (q *Queries) SyncTombstoneTeam(ctx context.Context, arg SyncTombstoneTeamParams) error {
-	_, err := q.db.Exec(ctx, syncTombstoneTeam, arg.ID, arg.SyncAccountID)
-	return err
+func (q *Queries) SyncTombstoneTeam(ctx context.Context, arg SyncTombstoneTeamParams) (int64, error) {
+	result, err := q.db.Exec(ctx, syncTombstoneTeam, arg.ID, arg.SyncAccountID)
+	if err != nil {
+		return 0, err
+	}
+	return result.RowsAffected(), nil
 }
 
-const syncUpsertDiagram = `-- name: SyncUpsertDiagram :exec
+const syncUpsertDiagram = `-- name: SyncUpsertDiagram :execrows
 INSERT INTO diagrams (id, sync_account_id, team_id, title, payload, deleted, seq)
 VALUES ($1, $2, $3, $4, $5, false, nextval('sync_seq'))
 ON CONFLICT (id) DO UPDATE
 SET team_id = EXCLUDED.team_id, title = EXCLUDED.title,
-    sync_account_id = EXCLUDED.sync_account_id, payload = EXCLUDED.payload,
+    payload = EXCLUDED.payload,
     deleted = false, seq = nextval('sync_seq'), updated_at = now()
+WHERE diagrams.sync_account_id = EXCLUDED.sync_account_id
 `
 
 type SyncUpsertDiagramParams struct {
@@ -225,18 +250,21 @@ type SyncUpsertDiagramParams struct {
 	Payload       []byte     `json:"payload"`
 }
 
-func (q *Queries) SyncUpsertDiagram(ctx context.Context, arg SyncUpsertDiagramParams) error {
-	_, err := q.db.Exec(ctx, syncUpsertDiagram,
+func (q *Queries) SyncUpsertDiagram(ctx context.Context, arg SyncUpsertDiagramParams) (int64, error) {
+	result, err := q.db.Exec(ctx, syncUpsertDiagram,
 		arg.ID,
 		arg.SyncAccountID,
 		arg.TeamID,
 		arg.Title,
 		arg.Payload,
 	)
-	return err
+	if err != nil {
+		return 0, err
+	}
+	return result.RowsAffected(), nil
 }
 
-const syncUpsertDocument = `-- name: SyncUpsertDocument :exec
+const syncUpsertDocument = `-- name: SyncUpsertDocument :execrows
 INSERT INTO sync_documents (sync_account_id, type, id, payload, deleted, seq)
 VALUES ($1, $2, $3, $4, false, nextval('sync_seq'))
 ON CONFLICT (sync_account_id, type, id) DO UPDATE
@@ -250,23 +278,27 @@ type SyncUpsertDocumentParams struct {
 	Payload       []byte    `json:"payload"`
 }
 
-func (q *Queries) SyncUpsertDocument(ctx context.Context, arg SyncUpsertDocumentParams) error {
-	_, err := q.db.Exec(ctx, syncUpsertDocument,
+func (q *Queries) SyncUpsertDocument(ctx context.Context, arg SyncUpsertDocumentParams) (int64, error) {
+	result, err := q.db.Exec(ctx, syncUpsertDocument,
 		arg.SyncAccountID,
 		arg.Type,
 		arg.ID,
 		arg.Payload,
 	)
-	return err
+	if err != nil {
+		return 0, err
+	}
+	return result.RowsAffected(), nil
 }
 
-const syncUpsertDrill = `-- name: SyncUpsertDrill :exec
+const syncUpsertDrill = `-- name: SyncUpsertDrill :execrows
 INSERT INTO drills (id, organization_id, author_person_id, sync_account_id, name, description, payload, deleted, seq)
 VALUES ($1, $2, $3, $4, $5, $6, $7, false, nextval('sync_seq'))
 ON CONFLICT (id) DO UPDATE
 SET name = EXCLUDED.name, description = EXCLUDED.description,
-    sync_account_id = EXCLUDED.sync_account_id, payload = EXCLUDED.payload,
+    payload = EXCLUDED.payload,
     deleted = false, seq = nextval('sync_seq'), updated_at = now()
+WHERE drills.sync_account_id = EXCLUDED.sync_account_id
 `
 
 type SyncUpsertDrillParams struct {
@@ -279,8 +311,8 @@ type SyncUpsertDrillParams struct {
 	Payload        []byte     `json:"payload"`
 }
 
-func (q *Queries) SyncUpsertDrill(ctx context.Context, arg SyncUpsertDrillParams) error {
-	_, err := q.db.Exec(ctx, syncUpsertDrill,
+func (q *Queries) SyncUpsertDrill(ctx context.Context, arg SyncUpsertDrillParams) (int64, error) {
+	result, err := q.db.Exec(ctx, syncUpsertDrill,
 		arg.ID,
 		arg.OrganizationID,
 		arg.AuthorPersonID,
@@ -289,16 +321,20 @@ func (q *Queries) SyncUpsertDrill(ctx context.Context, arg SyncUpsertDrillParams
 		arg.Description,
 		arg.Payload,
 	)
-	return err
+	if err != nil {
+		return 0, err
+	}
+	return result.RowsAffected(), nil
 }
 
-const syncUpsertEvent = `-- name: SyncUpsertEvent :exec
+const syncUpsertEvent = `-- name: SyncUpsertEvent :execrows
 INSERT INTO events (id, sync_account_id, team_id, title, kind, payload, deleted, seq)
 VALUES ($1, $2, $3, $4, $5, $6, false, nextval('sync_seq'))
 ON CONFLICT (id) DO UPDATE
 SET team_id = EXCLUDED.team_id, title = EXCLUDED.title, kind = EXCLUDED.kind,
-    sync_account_id = EXCLUDED.sync_account_id, payload = EXCLUDED.payload,
+    payload = EXCLUDED.payload,
     deleted = false, seq = nextval('sync_seq'), updated_at = now()
+WHERE events.sync_account_id = EXCLUDED.sync_account_id
 `
 
 type SyncUpsertEventParams struct {
@@ -310,8 +346,8 @@ type SyncUpsertEventParams struct {
 	Payload       []byte     `json:"payload"`
 }
 
-func (q *Queries) SyncUpsertEvent(ctx context.Context, arg SyncUpsertEventParams) error {
-	_, err := q.db.Exec(ctx, syncUpsertEvent,
+func (q *Queries) SyncUpsertEvent(ctx context.Context, arg SyncUpsertEventParams) (int64, error) {
+	result, err := q.db.Exec(ctx, syncUpsertEvent,
 		arg.ID,
 		arg.SyncAccountID,
 		arg.TeamID,
@@ -319,10 +355,13 @@ func (q *Queries) SyncUpsertEvent(ctx context.Context, arg SyncUpsertEventParams
 		arg.Kind,
 		arg.Payload,
 	)
-	return err
+	if err != nil {
+		return 0, err
+	}
+	return result.RowsAffected(), nil
 }
 
-const syncUpsertPerson = `-- name: SyncUpsertPerson :exec
+const syncUpsertPerson = `-- name: SyncUpsertPerson :execrows
 INSERT INTO persons (id, sync_account_id, display_name, emergency_contact_name, emergency_contact_phone, medical_notes, payload, deleted, seq)
 VALUES ($1, $2, $3, $4, $5, $6, $7, false, nextval('sync_seq'))
 ON CONFLICT (id) DO UPDATE
@@ -332,6 +371,8 @@ SET display_name = EXCLUDED.display_name,
     medical_notes = EXCLUDED.medical_notes,
     sync_account_id = EXCLUDED.sync_account_id, payload = EXCLUDED.payload,
     deleted = false, seq = nextval('sync_seq'), updated_at = now()
+WHERE persons.sync_account_id = EXCLUDED.sync_account_id
+   OR (persons.sync_account_id IS NULL AND persons.id = EXCLUDED.sync_account_id)
 `
 
 type SyncUpsertPersonParams struct {
@@ -344,8 +385,14 @@ type SyncUpsertPersonParams struct {
 	Payload               []byte     `json:"payload"`
 }
 
-func (q *Queries) SyncUpsertPerson(ctx context.Context, arg SyncUpsertPersonParams) error {
-	_, err := q.db.Exec(ctx, syncUpsertPerson,
+// The one statement that may adopt an unowned row, and only the caller's own Person.
+// /auth/apple provisions the coach's Person through CreatePersonWithID with a NULL
+// sync_account_id, and the app then pushes that same id expecting the two to reconcile
+// into one identity (see 0003_person_sync.sql). The second disjunct permits exactly that:
+// persons.id equals the pushing account's id only for the caller's own row, so it cannot
+// be used to claim anyone else's.
+func (q *Queries) SyncUpsertPerson(ctx context.Context, arg SyncUpsertPersonParams) (int64, error) {
+	result, err := q.db.Exec(ctx, syncUpsertPerson,
 		arg.ID,
 		arg.SyncAccountID,
 		arg.DisplayName,
@@ -354,16 +401,20 @@ func (q *Queries) SyncUpsertPerson(ctx context.Context, arg SyncUpsertPersonPara
 		arg.MedicalNotes,
 		arg.Payload,
 	)
-	return err
+	if err != nil {
+		return 0, err
+	}
+	return result.RowsAffected(), nil
 }
 
-const syncUpsertPlayer = `-- name: SyncUpsertPlayer :exec
+const syncUpsertPlayer = `-- name: SyncUpsertPlayer :execrows
 INSERT INTO players (id, sync_account_id, person_id, name, number, position, payload, deleted, seq)
 VALUES ($1, $2, $3, $4, $5, $6, $7, false, nextval('sync_seq'))
 ON CONFLICT (id) DO UPDATE
 SET person_id = EXCLUDED.person_id, name = EXCLUDED.name, number = EXCLUDED.number,
-    position = EXCLUDED.position, sync_account_id = EXCLUDED.sync_account_id,
+    position = EXCLUDED.position,
     payload = EXCLUDED.payload, deleted = false, seq = nextval('sync_seq'), updated_at = now()
+WHERE players.sync_account_id = EXCLUDED.sync_account_id
 `
 
 type SyncUpsertPlayerParams struct {
@@ -376,8 +427,8 @@ type SyncUpsertPlayerParams struct {
 	Payload       []byte     `json:"payload"`
 }
 
-func (q *Queries) SyncUpsertPlayer(ctx context.Context, arg SyncUpsertPlayerParams) error {
-	_, err := q.db.Exec(ctx, syncUpsertPlayer,
+func (q *Queries) SyncUpsertPlayer(ctx context.Context, arg SyncUpsertPlayerParams) (int64, error) {
+	result, err := q.db.Exec(ctx, syncUpsertPlayer,
 		arg.ID,
 		arg.SyncAccountID,
 		arg.PersonID,
@@ -386,16 +437,20 @@ func (q *Queries) SyncUpsertPlayer(ctx context.Context, arg SyncUpsertPlayerPara
 		arg.Position,
 		arg.Payload,
 	)
-	return err
+	if err != nil {
+		return 0, err
+	}
+	return result.RowsAffected(), nil
 }
 
-const syncUpsertSession = `-- name: SyncUpsertSession :exec
+const syncUpsertSession = `-- name: SyncUpsertSession :execrows
 INSERT INTO sessions (id, organization_id, author_person_id, sync_account_id, title, notes, payload, deleted, seq)
 VALUES ($1, $2, $3, $4, $5, $6, $7, false, nextval('sync_seq'))
 ON CONFLICT (id) DO UPDATE
 SET title = EXCLUDED.title, notes = EXCLUDED.notes,
-    sync_account_id = EXCLUDED.sync_account_id, payload = EXCLUDED.payload,
+    payload = EXCLUDED.payload,
     deleted = false, seq = nextval('sync_seq'), updated_at = now()
+WHERE sessions.sync_account_id = EXCLUDED.sync_account_id
 `
 
 type SyncUpsertSessionParams struct {
@@ -408,8 +463,8 @@ type SyncUpsertSessionParams struct {
 	Payload        []byte     `json:"payload"`
 }
 
-func (q *Queries) SyncUpsertSession(ctx context.Context, arg SyncUpsertSessionParams) error {
-	_, err := q.db.Exec(ctx, syncUpsertSession,
+func (q *Queries) SyncUpsertSession(ctx context.Context, arg SyncUpsertSessionParams) (int64, error) {
+	result, err := q.db.Exec(ctx, syncUpsertSession,
 		arg.ID,
 		arg.OrganizationID,
 		arg.AuthorPersonID,
@@ -418,16 +473,21 @@ func (q *Queries) SyncUpsertSession(ctx context.Context, arg SyncUpsertSessionPa
 		arg.Notes,
 		arg.Payload,
 	)
-	return err
+	if err != nil {
+		return 0, err
+	}
+	return result.RowsAffected(), nil
 }
 
-const syncUpsertTeam = `-- name: SyncUpsertTeam :exec
+const syncUpsertTeam = `-- name: SyncUpsertTeam :execrows
+
 INSERT INTO teams (id, organization_id, sync_account_id, name, age_group, season, payload, deleted, seq)
 VALUES ($1, $2, $3, $4, $5, $6, $7, false, nextval('sync_seq'))
 ON CONFLICT (id) DO UPDATE
 SET name = EXCLUDED.name, age_group = EXCLUDED.age_group, season = EXCLUDED.season,
-    sync_account_id = EXCLUDED.sync_account_id, payload = EXCLUDED.payload,
+    payload = EXCLUDED.payload,
     deleted = false, seq = nextval('sync_seq'), updated_at = now()
+WHERE teams.sync_account_id = EXCLUDED.sync_account_id
 `
 
 type SyncUpsertTeamParams struct {
@@ -440,8 +500,14 @@ type SyncUpsertTeamParams struct {
 	Payload        []byte     `json:"payload"`
 }
 
-func (q *Queries) SyncUpsertTeam(ctx context.Context, arg SyncUpsertTeamParams) error {
-	_, err := q.db.Exec(ctx, syncUpsertTeam,
+// Upserts are keyed on the client-supplied primary key, so each conflict clause is
+// guarded on the row's owner: a push naming a row this account does not own affects
+// zero rows, and the handler returns it to the client as a conflict. A NULL owner
+// (a REST-created row) fails the guard too — the separation 0002_sync.sql describes.
+// Ownership never transfers on update, so the SET clauses do not reassign
+// sync_account_id; SyncUpsertPerson is the one exception, see its comment.
+func (q *Queries) SyncUpsertTeam(ctx context.Context, arg SyncUpsertTeamParams) (int64, error) {
+	result, err := q.db.Exec(ctx, syncUpsertTeam,
 		arg.ID,
 		arg.OrganizationID,
 		arg.SyncAccountID,
@@ -450,5 +516,8 @@ func (q *Queries) SyncUpsertTeam(ctx context.Context, arg SyncUpsertTeamParams) 
 		arg.Season,
 		arg.Payload,
 	)
-	return err
+	if err != nil {
+		return 0, err
+	}
+	return result.RowsAffected(), nil
 }
