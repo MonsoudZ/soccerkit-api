@@ -37,7 +37,9 @@ func TestDeleteMeCascadesAndErasesAthletePII(t *testing.T) {
 	preGame := templateID(t, coach, "pre_game")
 	inst := do(t, http.MethodPost, "/api/v1/form-instances", coach, map[string]any{
 		"templateId": preGame, "subjectPersonId": athlete,
-		"answers": []map[string]any{{"key": "sleep", "numericValue": 8}},
+		// 4, not 8: "sleep" is a scale field declared min 1 / max 5, and answers are
+		// now range-checked against their field's config.
+		"answers": []map[string]any{{"key": "sleep", "numericValue": 4}},
 	})
 	if inst.status != http.StatusCreated {
 		t.Fatalf("submit instance: %d %s", inst.status, inst.raw)

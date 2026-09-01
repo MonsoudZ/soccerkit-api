@@ -4,6 +4,8 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
+	"math"
 	"net/http"
 
 	"github.com/google/uuid"
@@ -304,6 +306,30 @@ func (s *Server) handleSubmitInstance(w http.ResponseWriter, r *http.Request) {
 		fieldByKey[f.Key] = f
 	}
 
+	// Validate every answer before opening the transaction. The aggregate endpoint
+	// averages numeric_value across instances, so an unvalidated answer is not a bad
+	// row in isolation — it permanently skews that athlete's trend.
+	seen := make(map[string]bool, len(req.Answers))
+	for _, a := range req.Answers {
+		field, ok := fieldByKey[a.Key]
+		if !ok {
+			writeError(w, errValidation("unknown field key: "+a.Key))
+			return
+		}
+		// CreateFormAnswer upserts on (instance_id, field_id), so a repeated key used to
+		// silently overwrite the earlier answer — usually with NULL — while the response
+		// echoed both as though both had been stored.
+		if seen[a.Key] {
+			writeError(w, errValidation("duplicate answer for field: "+a.Key))
+			return
+		}
+		seen[a.Key] = true
+		if err := validateAnswer(field, a.NumericValue, a.BoolValue, a.TextValue); err != nil {
+			writeError(w, err)
+			return
+		}
+	}
+
 	personID := personIDFrom(r.Context())
 	tx, err := s.pool.Begin(r.Context())
 	if err != nil {
@@ -323,11 +349,7 @@ func (s *Server) handleSubmitInstance(w http.ResponseWriter, r *http.Request) {
 	}
 	answerDTOs := make([]Answer, 0, len(req.Answers))
 	for _, a := range req.Answers {
-		field, ok := fieldByKey[a.Key]
-		if !ok {
-			writeError(w, errValidation("unknown field key: "+a.Key))
-			return
-		}
+		field := fieldByKey[a.Key]
 		if _, err := q.CreateFormAnswer(r.Context(), store.CreateFormAnswerParams{
 			InstanceID: instance.ID, FieldID: field.ID,
 			NumericValue: a.NumericValue, BoolValue: a.BoolValue, TextValue: a.TextValue,
@@ -427,4 +449,69 @@ func (s *Server) templateFor(r *http.Request, oc orgContext, id uuid.UUID) (stor
 		return store.FormTemplate{}, errNotFound("template not found")
 	}
 	return tpl, nil
+}
+
+// scaleConfig is the shape a "scale" field stores in form_fields.config.
+type scaleConfig struct {
+	Min *float64 `json:"min"`
+	Max *float64 `json:"max"`
+}
+
+// validateAnswer checks one answer against the field it claims to answer. Each kind
+// requires its own value column and rejects the others, so a bool field can no longer
+// be handed a number and end up in the score aggregate.
+func validateAnswer(field store.FormField, numeric *float64, boolean *bool, text *string) error {
+	provided := 0
+	for _, present := range []bool{numeric != nil, boolean != nil, text != nil} {
+		if present {
+			provided++
+		}
+	}
+	if provided == 0 {
+		return errValidation("answer for " + field.Key + " has no value")
+	}
+	if provided > 1 {
+		return errValidation("answer for " + field.Key + " must set exactly one of numericValue, boolValue or textValue")
+	}
+
+	switch field.Kind {
+	case "scale", "number":
+		if numeric == nil {
+			return errValidation(field.Key + " is a " + field.Kind + " field and needs a numericValue")
+		}
+		if math.IsNaN(*numeric) || math.IsInf(*numeric, 0) {
+			return errValidation(field.Key + " must be a finite number")
+		}
+		if field.Kind == "scale" {
+			return validateScaleRange(field, *numeric)
+		}
+	case "bool":
+		if boolean == nil {
+			return errValidation(field.Key + " is a bool field and needs a boolValue")
+		}
+	case "text", "select":
+		if text == nil {
+			return errValidation(field.Key + " is a " + field.Kind + " field and needs a textValue")
+		}
+	}
+	return nil
+}
+
+// validateScaleRange enforces the min/max a scale field declares in its config. A
+// template author is free to omit either bound, in which case that end is unbounded.
+func validateScaleRange(field store.FormField, v float64) error {
+	if len(field.Config) == 0 {
+		return nil
+	}
+	var cfg scaleConfig
+	if err := json.Unmarshal(field.Config, &cfg); err != nil {
+		return nil // a config we cannot read is not the submitter's problem
+	}
+	if cfg.Min != nil && v < *cfg.Min {
+		return errValidation(fmt.Sprintf("%s must be at least %g", field.Key, *cfg.Min))
+	}
+	if cfg.Max != nil && v > *cfg.Max {
+		return errValidation(fmt.Sprintf("%s must be at most %g", field.Key, *cfg.Max))
+	}
+	return nil
 }

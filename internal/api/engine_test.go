@@ -154,3 +154,61 @@ func TestEvaluationIsScopedToTheOrg(t *testing.T) {
 		t.Errorf("owner instance read: got %d %s, want 200", r.status, r.raw)
 	}
 }
+
+// TestAnswersAreValidatedAgainstTheirField — answers used to be written straight
+// through without consulting the field they claimed to answer, so the aggregate the
+// product is built on averaged unvalidated client input.
+func TestAnswersAreValidatedAgainstTheirField(t *testing.T) {
+	resetDB(t)
+	coach, _ := registerUser(t, "answers@e.com")
+	athlete := createAthlete(t, coach, "Val Idation")
+	preGame := templateID(t, coach, "pre_game")
+
+	submit := func(answers []map[string]any) resp {
+		return do(t, http.MethodPost, "/api/v1/form-instances", coach, map[string]any{
+			"templateId": preGame, "subjectPersonId": athlete, "answers": answers,
+		})
+	}
+
+	cases := []struct {
+		name    string
+		answers []map[string]any
+	}{
+		// "warmed_up" is a bool field; a number here used to land in the score aggregate.
+		{"number into a bool field", []map[string]any{{"key": "warmed_up", "numericValue": 77}}},
+		{"text into a scale field", []map[string]any{{"key": "sleep", "textValue": "great"}}},
+		{"bool into a scale field", []map[string]any{{"key": "sleep", "boolValue": true}}},
+		{"scale below its configured min", []map[string]any{{"key": "sleep", "numericValue": -4200.5}}},
+		{"scale above its configured max", []map[string]any{{"key": "sleep", "numericValue": 999999}}},
+		{"two values in one answer", []map[string]any{{"key": "sleep", "numericValue": 3, "textValue": "x"}}},
+		{"no value at all", []map[string]any{{"key": "sleep"}}},
+		// The upsert on (instance_id, field_id) used to let the second silently
+		// overwrite the first, usually with NULL, while the response echoed both.
+		{"duplicate key", []map[string]any{
+			{"key": "sleep", "numericValue": 4},
+			{"key": "sleep", "textValue": "second"},
+		}},
+	}
+	for _, tc := range cases {
+		if r := submit(tc.answers); r.status != http.StatusBadRequest {
+			t.Errorf("%s: got %d %s, want 400", tc.name, r.status, r.raw)
+		}
+	}
+
+	// Nothing above was recorded.
+	if agg := do(t, http.MethodGet, "/api/v1/persons/"+athlete+"/aggregate", coach, nil).arr(); len(agg) != 0 {
+		t.Errorf("no rejected answer should reach the aggregate, got %v", agg)
+	}
+
+	// A well-formed submission still works, at both ends of the declared range.
+	if r := submit([]map[string]any{
+		{"key": "sleep", "numericValue": 1},
+		{"key": "energy", "numericValue": 5},
+		{"key": "warmed_up", "boolValue": true},
+	}); r.status != http.StatusCreated {
+		t.Fatalf("valid submission: %d %s", r.status, r.raw)
+	}
+	if agg := do(t, http.MethodGet, "/api/v1/persons/"+athlete+"/aggregate", coach, nil).arr(); len(agg) != 2 {
+		t.Errorf("expected sleep and energy in the aggregate, got %v", agg)
+	}
+}
