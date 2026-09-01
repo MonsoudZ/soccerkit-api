@@ -1,6 +1,7 @@
 package api_test
 
 import (
+	"context"
 	"net/http"
 	"testing"
 
@@ -8,11 +9,18 @@ import (
 )
 
 // devIdentityToken forges an unsigned Apple-style identity token. Accepted only
-// because the test server runs with DEV_APPLE_BYPASS=true.
+// because the test server runs with DEV_APPLE_BYPASS=true. email_verified is set
+// because Apple sends it on real identity tokens for genuine Apple IDs.
 func devIdentityToken(t *testing.T, sub, email string) string {
+	t.Helper()
+	return devIdentityTokenVerified(t, sub, email, true)
+}
+
+func devIdentityTokenVerified(t *testing.T, sub, email string, verified bool) string {
 	t.Helper()
 	tok := jwt.NewWithClaims(jwt.SigningMethodHS256, jwt.MapClaims{
 		"iss": "https://appleid.apple.com", "sub": sub, "email": email,
+		"email_verified": verified,
 	})
 	s, err := tok.SignedString([]byte("irrelevant-in-bypass"))
 	if err != nil {
@@ -138,5 +146,47 @@ func TestAppleAuthRejectsMissingToken(t *testing.T) {
 	r := do(t, http.MethodPost, "/api/v1/auth/apple", "", map[string]any{})
 	if r.status != http.StatusBadRequest {
 		t.Fatalf("missing identityToken: status %d, want 400", r.status)
+	}
+}
+
+// TestAppleAuthRefusesToLinkUnverifiedEmail — taking over an existing password account
+// by presenting an Apple identity that merely claims its address is a standard
+// primitive, and the claim that settles it was already in the token.
+func TestAppleAuthRefusesToLinkUnverifiedEmail(t *testing.T) {
+	resetDB(t)
+	const email = "victim-link@example.com"
+
+	if r := do(t, http.MethodPost, "/api/v1/auth/register", "", map[string]any{
+		"email": email, "password": "password123", "displayName": "Victim",
+	}); r.status != http.StatusCreated {
+		t.Fatalf("register victim: %d %s", r.status, r.raw)
+	}
+
+	unverified := do(t, http.MethodPost, "/api/v1/auth/apple", "", map[string]any{
+		"identityToken": devIdentityTokenVerified(t, "attacker-sub", email, false),
+	})
+	if unverified.status != http.StatusUnauthorized {
+		t.Fatalf("unverified link: got %d %s, want 401", unverified.status, unverified.raw)
+	}
+
+	// The account is untouched: no apple_sub was attached to it.
+	var linked int
+	if err := testPool.QueryRow(context.Background(),
+		`SELECT count(*) FROM user_accounts WHERE email = $1 AND apple_sub IS NOT NULL`,
+		email).Scan(&linked); err != nil {
+		t.Fatal(err)
+	}
+	if linked != 0 {
+		t.Error("an unverified Apple identity was linked to an existing account")
+	}
+
+	// The password login still works, and a verified token links as before.
+	if r := do(t, http.MethodPost, "/api/v1/auth/login", "", map[string]any{
+		"email": email, "password": "password123",
+	}); r.status != http.StatusOK {
+		t.Errorf("password login: %d %s", r.status, r.raw)
+	}
+	if r := appleSignIn(t, "genuine-sub", email, nil); r.status != http.StatusOK {
+		t.Errorf("verified link should still work: %d %s", r.status, r.raw)
 	}
 }

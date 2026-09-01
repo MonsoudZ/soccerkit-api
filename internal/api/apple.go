@@ -23,6 +23,11 @@ const (
 type appleIdentity struct {
 	Sub   string // stable Apple user id — our account key
 	Email string // may be empty (user chose to hide it) or a private relay address
+	// EmailVerified is Apple's own assertion about the address. It gates linking this
+	// Apple identity to an existing password account: merging accounts on an
+	// unverified address is a standard takeover primitive, and the claim is right
+	// there in the token.
+	EmailVerified bool
 }
 
 // appleVerifier validates Apple identity tokens. In production it fetches and
@@ -34,10 +39,28 @@ type appleVerifier struct {
 	bypass   bool
 	client   *http.Client
 
-	mu       sync.Mutex
-	keys     map[string]*rsa.PublicKey
-	fetchedA time.Time
+	mu sync.Mutex
+	// keys is the cached JWKS, fetchedAt when it was last successfully refreshed, and
+	// attemptedAt when a refresh was last *tried* — success or not.
+	//
+	// attemptedAt is what stops an unknown `kid` from reaching Apple. The cache only
+	// ever holds keys Apple returned, so a token carrying an arbitrary kid missed every
+	// time and forced an outbound request; since /auth/apple is unauthenticated and the
+	// header is attacker-controlled, that turned this service into an amplifier —
+	// N requests in, N requests to Apple, each held open for up to 10s.
+	keys        map[string]*rsa.PublicKey
+	fetchedAt   time.Time
+	attemptedAt time.Time
 }
+
+const (
+	// jwksTTL is how long a successful JWKS fetch is trusted before a miss may refresh.
+	jwksTTL = time.Hour
+	// jwksRetryCooldown is the minimum spacing between refresh attempts, applied
+	// whether or not the last one succeeded. Apple rotates keys on the order of
+	// months, so a miss waiting this long costs nothing real.
+	jwksRetryCooldown = time.Minute
+)
 
 func newAppleVerifier(clientID string, bypass bool) *appleVerifier {
 	return &appleVerifier{
@@ -85,7 +108,23 @@ func identityFromClaims(claims jwt.MapClaims) (appleIdentity, error) {
 		return appleIdentity{}, fmt.Errorf("apple token missing sub")
 	}
 	email, _ := claims["email"].(string)
-	return appleIdentity{Sub: sub, Email: email}, nil
+	return appleIdentity{
+		Sub:           sub,
+		Email:         email,
+		EmailVerified: claimIsTrue(claims["email_verified"]),
+	}, nil
+}
+
+// claimIsTrue reads a boolean claim that Apple sends as either a JSON bool or the
+// string "true", depending on the endpoint and the era. Anything else is not true.
+func claimIsTrue(v any) bool {
+	switch t := v.(type) {
+	case bool:
+		return t
+	case string:
+		return t == "true"
+	}
+	return false
 }
 
 // keyForKID returns the public key for a key id, refreshing the JWKS cache if
@@ -93,10 +132,19 @@ func identityFromClaims(claims jwt.MapClaims) (appleIdentity, error) {
 func (v *appleVerifier) keyForKID(ctx context.Context, kid string) (*rsa.PublicKey, error) {
 	v.mu.Lock()
 	key, ok := v.keys[kid]
-	stale := time.Since(v.fetchedA) > time.Hour
+	stale := time.Since(v.fetchedAt) > jwksTTL
+	cooling := time.Since(v.attemptedAt) < jwksRetryCooldown
 	v.mu.Unlock()
 	if ok && !stale {
 		return key, nil
+	}
+	// A miss right after a refresh attempt is an unrecognised kid, not a stale cache.
+	// Answer it from what we already have rather than going back to Apple.
+	if cooling {
+		if ok {
+			return key, nil
+		}
+		return nil, fmt.Errorf("apple signing key %q not found", kid)
 	}
 
 	if err := v.refreshKeys(ctx); err != nil {
@@ -118,6 +166,13 @@ func (v *appleVerifier) keyForKID(ctx context.Context, kid string) (*rsa.PublicK
 }
 
 func (v *appleVerifier) refreshKeys(ctx context.Context) error {
+	// Stamped before the request, and regardless of how it goes: the cooldown exists to
+	// bound outbound requests, so a failing fetch must not be retryable any faster than
+	// a succeeding one.
+	v.mu.Lock()
+	v.attemptedAt = time.Now()
+	v.mu.Unlock()
+
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, appleKeysURL, nil)
 	if err != nil {
 		return err
@@ -156,7 +211,7 @@ func (v *appleVerifier) refreshKeys(ctx context.Context) error {
 
 	v.mu.Lock()
 	v.keys = keys
-	v.fetchedA = time.Now()
+	v.fetchedAt = time.Now()
 	v.mu.Unlock()
 	return nil
 }

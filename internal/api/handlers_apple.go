@@ -97,7 +97,16 @@ func (s *Server) handleAppleAuth(w http.ResponseWriter, r *http.Request) {
 	existing, err := q.GetUserAccountByEmail(ctx, email)
 	switch {
 	case err == nil:
-		// An email/password account already exists for this address — link it.
+		// An email/password account already exists for this address — link it, but only
+		// on Apple's word that the address is verified. Merging an account on an
+		// unverified email is a standard takeover primitive, and refusing costs nothing
+		// real: Apple issues verified addresses for genuine Apple IDs, and a hidden
+		// relay never reaches this branch because appleEmail synthesizes an address
+		// that matches no existing account.
+		if !identity.EmailVerified {
+			writeError(w, errUnauthorized("Apple sign-in could not be verified"))
+			return
+		}
 		if err := q.LinkAppleSub(ctx, store.LinkAppleSubParams{ID: existing.ID, AppleSub: &identity.Sub}); err != nil {
 			writeError(w, err)
 			return

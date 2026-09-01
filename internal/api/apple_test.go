@@ -4,6 +4,8 @@ import (
 	"context"
 	"crypto/rand"
 	"crypto/rsa"
+	"errors"
+	"net/http"
 	"testing"
 	"time"
 
@@ -17,7 +19,7 @@ const testKID = "test-key-id"
 func verifierWith(clientID string, pub *rsa.PublicKey) *appleVerifier {
 	v := newAppleVerifier(clientID, false)
 	v.keys = map[string]*rsa.PublicKey{testKID: pub}
-	v.fetchedA = time.Now() // fresh, so keyForKID never refreshes over the network
+	v.fetchedAt = time.Now() // fresh, so keyForKID never refreshes over the network
 	return v
 }
 
@@ -119,3 +121,65 @@ func TestAppleVerify(t *testing.T) {
 		}
 	})
 }
+
+// TestUnknownKIDDoesNotRefetchWhileCooling — the JWKS cache only ever holds keys Apple
+// returned, so a token carrying an arbitrary kid missed every time and forced an
+// outbound request. /auth/apple is unauthenticated and the header is caller-controlled,
+// which made this service an amplifier for requests to Apple.
+func TestUnknownKIDDoesNotRefetchWhileCooling(t *testing.T) {
+	key, err := rsa.GenerateKey(rand.Reader, 2048)
+	if err != nil {
+		t.Fatalf("gen key: %v", err)
+	}
+	v := verifierWith("com.example.app", &key.PublicKey)
+	// Pretend a refresh was just attempted, as one would have been on the first miss.
+	v.attemptedAt = time.Now()
+	// Point the fetcher at a dead address, so any real attempt is unmistakable.
+	v.client = &http.Client{
+		Transport: roundTripFunc(func(*http.Request) (*http.Response, error) {
+			t.Error("keyForKID went to the network for an unknown kid inside the cooldown")
+			return nil, errors.New("no network in this test")
+		}),
+		Timeout: time.Second,
+	}
+
+	if _, err := v.keyForKID(context.Background(), "some-kid-we-have-never-seen"); err == nil {
+		t.Error("an unknown kid should be an error, not a silent pass")
+	}
+	// A kid we do hold still resolves from cache.
+	if _, err := v.keyForKID(context.Background(), testKID); err != nil {
+		t.Errorf("a cached kid should still resolve: %v", err)
+	}
+}
+
+// TestRefreshKeysStampsAttemptEvenOnFailure — the cooldown bounds outbound requests, so
+// a failing fetch must not be retryable any faster than a succeeding one.
+func TestRefreshKeysStampsAttemptEvenOnFailure(t *testing.T) {
+	v := newAppleVerifier("com.example.app", false)
+	var calls int
+	v.client = &http.Client{
+		Transport: roundTripFunc(func(*http.Request) (*http.Response, error) {
+			calls++
+			return nil, errors.New("apple is unreachable")
+		}),
+		Timeout: time.Second,
+	}
+
+	if err := v.refreshKeys(context.Background()); err == nil {
+		t.Fatal("expected the failing fetch to error")
+	}
+	if v.attemptedAt.IsZero() {
+		t.Fatal("a failed attempt must still be stamped, or the cooldown never applies")
+	}
+	// The next miss is inside the cooldown, so it must not reach the network again.
+	if _, err := v.keyForKID(context.Background(), "another-kid"); err == nil {
+		t.Error("expected an error for an uncached kid")
+	}
+	if calls != 1 {
+		t.Errorf("network attempts = %d, want 1", calls)
+	}
+}
+
+type roundTripFunc func(*http.Request) (*http.Response, error)
+
+func (f roundTripFunc) RoundTrip(r *http.Request) (*http.Response, error) { return f(r) }
