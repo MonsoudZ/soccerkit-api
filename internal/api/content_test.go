@@ -111,3 +111,60 @@ func TestGameDayFlow(t *testing.T) {
 		t.Errorf("instance should reference the game, got %v", inst.body)
 	}
 }
+
+// TestUpdateGameRejectsWrongTypes — the previous decode marked a field as "supplied"
+// on mere presence and assigned it only if the type matched, so a wrong-typed value
+// wrote NULL and skipped its own validation. A malformed client request returned 200
+// and destroyed the recorded result of a match, with no undo.
+func TestUpdateGameRejectsWrongTypes(t *testing.T) {
+	resetDB(t)
+	coach, _ := registerUser(t, "patchgame@e.com")
+	team := do(t, http.MethodPost, "/api/v1/teams", coach, map[string]any{"name": "T"})
+	teamID, _ := team.body["id"].(string)
+	created := do(t, http.MethodPost, "/api/v1/teams/"+teamID+"/games", coach, map[string]any{
+		"opponent": "Rivals FC", "homeAway": "home",
+	})
+	gameID, _ := created.body["id"].(string)
+
+	if r := do(t, http.MethodPatch, "/api/v1/games/"+gameID, coach, map[string]any{
+		"ourScore": 3, "opponentScore": 1, "status": "completed",
+	}); r.status != http.StatusOK {
+		t.Fatalf("record result: %d %s", r.status, r.raw)
+	}
+
+	for _, bad := range []map[string]any{
+		{"opponent": 12345},
+		{"homeAway": true},
+		{"homeAway": "sideways"},
+		{"ourScore": "x", "opponentScore": "y"},
+		{"ourScore": 1.5, "opponentScore": 2},
+		{"kickoffAt": 99},
+		{"status": 7},
+		{"totallyUnknownField": 1},
+	} {
+		if r := do(t, http.MethodPatch, "/api/v1/games/"+gameID, coach, bad); r.status != http.StatusBadRequest {
+			t.Errorf("PATCH %v: got %d %s, want 400", bad, r.status, r.raw)
+		}
+	}
+
+	// Nothing above touched the stored game.
+	after := do(t, http.MethodGet, "/api/v1/games/"+gameID, coach, nil)
+	if after.body["opponent"] != "Rivals FC" || after.body["homeAway"] != "home" {
+		t.Errorf("opponent/homeAway changed: %s", after.raw)
+	}
+	if after.body["ourScore"] != float64(3) || after.body["opponentScore"] != float64(1) {
+		t.Errorf("score changed: %s", after.raw)
+	}
+
+	// An explicit null still clears a nullable column — absence and null differ.
+	clear := do(t, http.MethodPatch, "/api/v1/games/"+gameID, coach, map[string]any{"opponent": nil})
+	if clear.status != http.StatusOK {
+		t.Fatalf("explicit null: %d %s", clear.status, clear.raw)
+	}
+	if clear.body["opponent"] != nil {
+		t.Errorf("opponent should be cleared, got %s", clear.raw)
+	}
+	if clear.body["ourScore"] != float64(3) {
+		t.Errorf("clearing opponent must not disturb the score: %s", clear.raw)
+	}
+}

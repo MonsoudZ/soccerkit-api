@@ -1,7 +1,9 @@
 package api
 
 import (
+	"encoding/json"
 	"errors"
+	"math"
 	"net/http"
 	"time"
 
@@ -116,6 +118,13 @@ func (s *Server) handleGetGame(w http.ResponseWriter, r *http.Request) {
 }
 
 // handleUpdateGame records game-day changes: kickoff, status, and the result.
+//
+// PATCH semantics mean absence and null are different, so the body is decoded one key
+// at a time. Each key is decoded into its typed target and only then marks itself as
+// set: the previous version set the "field was supplied" flag on mere presence and
+// assigned the value only if the type matched, so a wrong-typed field wrote NULL and
+// skipped its own validation. `{"homeAway": true}` returned 200 and erased the result
+// of a match.
 func (s *Server) handleUpdateGame(w http.ResponseWriter, r *http.Request) {
 	oc, err := s.requireCoach(r)
 	if err != nil {
@@ -127,37 +136,56 @@ func (s *Server) handleUpdateGame(w http.ResponseWriter, r *http.Request) {
 		writeError(w, err)
 		return
 	}
-	var raw map[string]any
+	var raw map[string]json.RawMessage
 	if err := decodeJSON(r, &raw); err != nil {
 		writeError(w, err)
 		return
 	}
-
-	params := store.UpdateGameParams{ID: game.ID, KickoffAt: nullTimestamptz()}
-	if _, ok := raw["opponent"]; ok {
-		params.SetOpponent = true
-		if v, ok := raw["opponent"].(string); ok {
-			params.Opponent = &v
+	// decodeJSON's DisallowUnknownFields is a no-op against a map, so unknown keys are
+	// rejected here instead — every other endpoint in this API decodes strictly.
+	for key := range raw {
+		if !updatableGameFields[key] {
+			writeError(w, errValidation("unknown field: "+key))
+			return
 		}
 	}
-	if v, ok := raw["kickoffAt"].(string); ok {
-		t, perr := time.Parse(time.RFC3339, v)
+
+	params := store.UpdateGameParams{ID: game.ID, KickoffAt: nullTimestamptz()}
+
+	if v, ok := raw["opponent"]; ok {
+		opponent, err := optionalString(v, "opponent")
+		if err != nil {
+			writeError(w, err)
+			return
+		}
+		params.SetOpponent, params.Opponent = true, opponent
+	}
+	if v, ok := raw["kickoffAt"]; ok {
+		var text string
+		if err := json.Unmarshal(v, &text); err != nil {
+			writeError(w, errValidation("kickoffAt must be an RFC3339 timestamp"))
+			return
+		}
+		t, perr := time.Parse(time.RFC3339, text)
 		if perr != nil {
 			writeError(w, errValidation("kickoffAt must be an RFC3339 timestamp"))
 			return
 		}
 		params.KickoffAt = timestamptz(t)
 	}
-	if _, ok := raw["homeAway"]; ok {
-		params.SetHomeAway = true
-		if v, ok := raw["homeAway"].(string); ok {
-			if !validHomeAway[v] {
-				writeError(w, errValidation("homeAway must be home, away or neutral"))
-				return
-			}
-			params.HomeAway = &v
+	if v, ok := raw["homeAway"]; ok {
+		homeAway, err := optionalString(v, "homeAway")
+		if err != nil {
+			writeError(w, err)
+			return
 		}
+		if homeAway != nil && !validHomeAway[*homeAway] {
+			writeError(w, errValidation("homeAway must be home, away or neutral"))
+			return
+		}
+		params.SetHomeAway, params.HomeAway = true, homeAway
 	}
+
 	_, hasOur := raw["ourScore"]
 	_, hasOpp := raw["opponentScore"]
 	if hasOur || hasOpp {
@@ -165,22 +193,27 @@ func (s *Server) handleUpdateGame(w http.ResponseWriter, r *http.Request) {
 			writeError(w, errValidation("ourScore and opponentScore must be provided together"))
 			return
 		}
+		ours, err := optionalInt32(raw["ourScore"], "ourScore")
+		if err != nil {
+			writeError(w, err)
+			return
+		}
+		theirs, err := optionalInt32(raw["opponentScore"], "opponentScore")
+		if err != nil {
+			writeError(w, err)
+			return
+		}
 		params.SetScores = true
-		if v, ok := raw["ourScore"].(float64); ok {
-			n := int32(v)
-			params.OurScore = &n
-		}
-		if v, ok := raw["opponentScore"].(float64); ok {
-			n := int32(v)
-			params.OpponentScore = &n
-		}
+		params.OurScore, params.OpponentScore = ours, theirs
 	}
-	if v, ok := raw["status"].(string); ok {
-		if !validGameStatus[v] {
+
+	if v, ok := raw["status"]; ok {
+		var status string
+		if err := json.Unmarshal(v, &status); err != nil || !validGameStatus[status] {
 			writeError(w, errValidation("invalid status"))
 			return
 		}
-		params.Status = &v
+		params.Status = &status
 	}
 
 	updated, err := s.store.UpdateGame(r.Context(), params)
@@ -189,4 +222,40 @@ func (s *Server) handleUpdateGame(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusOK, gameDTO(updated))
+}
+
+// updatableGameFields is the set PATCH /games/{id} accepts.
+var updatableGameFields = map[string]bool{
+	"opponent": true, "kickoffAt": true, "homeAway": true,
+	"ourScore": true, "opponentScore": true, "status": true,
+}
+
+// optionalString decodes a JSON string or an explicit null, rejecting any other type.
+// Null is meaningful here: it is how a caller clears a nullable column.
+func optionalString(raw json.RawMessage, field string) (*string, error) {
+	if string(raw) == "null" {
+		return nil, nil
+	}
+	var v string
+	if err := json.Unmarshal(raw, &v); err != nil {
+		return nil, errValidation(field + " must be a string or null")
+	}
+	return &v, nil
+}
+
+// optionalInt32 decodes a JSON integer or an explicit null, rejecting any other type
+// and any number with a fractional part.
+func optionalInt32(raw json.RawMessage, field string) (*int32, error) {
+	if string(raw) == "null" {
+		return nil, nil
+	}
+	var v float64
+	if err := json.Unmarshal(raw, &v); err != nil || v != math.Trunc(v) {
+		return nil, errValidation(field + " must be a whole number or null")
+	}
+	if v < math.MinInt32 || v > math.MaxInt32 {
+		return nil, errValidation(field + " is out of range")
+	}
+	n := int32(v)
+	return &n, nil
 }
