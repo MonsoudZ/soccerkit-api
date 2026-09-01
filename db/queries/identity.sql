@@ -50,7 +50,10 @@ SELECT m.id, m.role, m.organization_id, o.name AS organization_name, o.kind AS o
 FROM memberships m
 JOIN organizations o ON o.id = m.organization_id
 WHERE m.person_id = $1
-ORDER BY o.created_at ASC;
+-- Tie-broken on id: orgs created inside one transaction share a now() timestamp, and
+-- resolveOrg takes the first row as the caller's default org when no X-Organization-ID
+-- is sent. Without the tie-break that default is whatever Postgres happens to return.
+ORDER BY o.created_at ASC, o.id ASC;
 
 -- name: ListRolesInOrg :many
 SELECT role FROM memberships WHERE person_id = $1 AND organization_id = $2;

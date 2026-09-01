@@ -17,6 +17,7 @@ tags:
   - name: persons
   - name: teams
   - name: evaluation
+  - name: sync
 
 paths:
   /health:
@@ -84,6 +85,125 @@ paths:
             schema: { $ref: "#/components/schemas/RefreshRequest" }
       responses:
         "200": { $ref: "#/components/responses/Ok" }
+
+  /api/v1/auth/apple:
+    post:
+      tags: [auth]
+      summary: Sign in with Apple
+      description: >
+        Verifies an Apple identity token and resolves it to a Person: an account already
+        linked by Apple subject, an account matched by a verified email address (linked
+        on the spot), or a freshly provisioned identity — the same provisioning as email
+        registration, including the seeded evaluation templates.
+
+
+        Linking to an existing password account requires Apple to have marked the address
+        verified. When the user hides their address, a stable synthesized one is used,
+        which never matches an existing account and so always provisions anew.
+
+
+        The response shape is the iOS app's, not the shared AuthResponse.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [identityToken]
+              properties:
+                identityToken:
+                  type: string
+                  description: The identity token from ASAuthorizationAppleIDCredential.
+                authorizationCode:
+                  type: string
+                  nullable: true
+                  description: The one-time authorization code. Accepted, not yet used.
+                fullName:
+                  type: string
+                  nullable: true
+                  description: >
+                    Apple sends the name only on the very first authorization, so send it
+                    when present or the display name falls back to the email local part.
+      responses:
+        "200":
+          description: Signed in
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  token:
+                    type: string
+                    description: Access token (JWT). Same token type as accessToken elsewhere.
+                  refreshToken: { type: string }
+                  personID: { type: string, format: uuid }
+        "400": { $ref: "#/components/responses/Error" }
+        "401": { $ref: "#/components/responses/Error" }
+        "429": { $ref: "#/components/responses/Error" }
+
+  /api/v1/sync:
+    get:
+      tags: [sync]
+      summary: Pull the changes this account has not seen
+      description: >
+        Delta sync for the offline-first iOS app. Returns every record written after the
+        client's cursor, unioned across the projected domain tables and the generic
+        document store, scoped to the authenticated account.
+
+
+        Projected types (Team, Drill, Session, Person, Player, Event, Diagram) land in
+        their real tables with columns projected out of the payload and the full payload
+        retained; every other type round-trips losslessly through a generic store until
+        it graduates. Either way the wire format is the same opaque {type, id, payload}.
+      security: [{ bearerAuth: [] }]
+      parameters:
+        - in: query
+          name: since
+          schema: { type: string }
+          description: >
+            The cursor from a previous response. Omit for a full sync. An unparseable
+            value is treated as the beginning rather than an error.
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/SyncPullResponse" }
+        "401": { $ref: "#/components/responses/Error" }
+    post:
+      tags: [sync]
+      summary: Push local changes
+      description: >
+        Applies the client's changes in one transaction. Writes are last-write-wins
+        within an account.
+
+
+        A record naming a row this account does not own affects nothing and comes back in
+        `conflicts`, so a rejected write is visible rather than silently lost. Rows created
+        through the REST API are owned by no sync account and cannot be adopted this way.
+
+
+        The cursor is echoed, not advanced — only a pull advances it, so a second device's
+        interleaved changes are never skipped.
+      security: [{ bearerAuth: [] }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/SyncPushRequest" }
+      responses:
+        "200":
+          description: Applied
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/SyncPushResponse" }
+        "400":
+          description: >
+            Malformed record, or a batch over the 1000-record limit. Nothing is written.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+        "401": { $ref: "#/components/responses/Error" }
 
   /api/v1/me:
     get:
@@ -507,6 +627,69 @@ components:
             type: object
             properties: { ok: { type: boolean } }
   schemas:
+    SyncRecord:
+      type: object
+      description: One synced entity. The payload is opaque to the server beyond the few columns it projects out.
+      properties:
+        type:
+          type: string
+          description: Client type name, e.g. Team, Drill, Session, Person, Player, Event, Diagram, Prefs.
+          example: Team
+        id:
+          type: string
+          description: >
+            The client's id for the record. A UUID for every projected type; free-form
+            text for types held in the generic store.
+        payload:
+          type: object
+          additionalProperties: true
+          nullable: true
+    SyncKey:
+      type: object
+      description: Identifies a record without its body, used for deletes.
+      properties:
+        type: { type: string }
+        id: { type: string }
+    SyncPullResponse:
+      type: object
+      properties:
+        records:
+          type: array
+          items: { $ref: "#/components/schemas/SyncRecord" }
+        deletes:
+          type: array
+          description: Tombstones — records deleted since the client's cursor.
+          items: { $ref: "#/components/schemas/SyncKey" }
+        cursor:
+          type: string
+          nullable: true
+          description: Pass as `since` on the next pull.
+    SyncPushRequest:
+      type: object
+      properties:
+        upserts:
+          type: array
+          items: { $ref: "#/components/schemas/SyncRecord" }
+        deletes:
+          type: array
+          items: { $ref: "#/components/schemas/SyncKey" }
+        cursor:
+          type: string
+          nullable: true
+          description: Echoed back unchanged. Only a pull advances the cursor.
+      description: At most 1000 records across upserts and deletes combined.
+    SyncPushResponse:
+      type: object
+      properties:
+        cursor:
+          type: string
+          nullable: true
+        conflicts:
+          type: array
+          description: >
+            Records that were not applied because this account does not own the target
+            row. Empty on a clean push.
+          items: { $ref: "#/components/schemas/SyncRecord" }
     Error:
       type: object
       properties:

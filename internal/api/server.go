@@ -2,6 +2,7 @@
 package api
 
 import (
+	"log"
 	"net/http"
 	"strings"
 	"time"
@@ -47,11 +48,19 @@ func (s *Server) Router() http.Handler {
 	origins := []string{"*"}
 	if s.cfg.CORSOrigins != "*" {
 		origins = splitTrim(s.cfg.CORSOrigins)
+	} else if s.cfg.IsDeployed() {
+		// Not fatal: with AllowCredentials off and bearer-token auth, a wildcard origin
+		// does not by itself let a page read anything it does not already hold a token
+		// for. Still worth saying out loud, because it is a default nobody chose.
+		log.Printf("warning: CORS_ORIGINS is %q in a deployed environment (ENV=%s); "+
+			"set it to your actual origins", s.cfg.CORSOrigins, s.cfg.Env)
 	}
 	r.Use(cors.Handler(cors.Options{
-		AllowedOrigins:   origins,
-		AllowedMethods:   []string{"GET", "POST", "PATCH", "PUT", "DELETE", "OPTIONS"},
-		AllowedHeaders:   []string{"Authorization", "Content-Type"},
+		AllowedOrigins: origins,
+		AllowedMethods: []string{"GET", "POST", "PATCH", "PUT", "DELETE", "OPTIONS"},
+		// X-Organization-ID is how a caller picks which org to act in, so a browser
+		// client could not send it while it was missing here: preflight rejected it.
+		AllowedHeaders:   []string{"Authorization", "Content-Type", "X-Organization-ID"},
 		AllowCredentials: false,
 		MaxAge:           300,
 	}))

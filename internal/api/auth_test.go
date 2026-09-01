@@ -3,7 +3,9 @@ package api_test
 import (
 	"context"
 	"net/http"
+	"sync"
 	"testing"
+	"time"
 )
 
 func TestRegisterCreatesIdentityGraph(t *testing.T) {
@@ -236,5 +238,71 @@ func TestLogoutDoesNotCascadeToOtherDevices(t *testing.T) {
 		"refreshToken": deviceB,
 	}); b.status != http.StatusOK {
 		t.Errorf("signing out one device must not sign out the others, got %d %s", b.status, b.raw)
+	}
+}
+
+// TestLoginDoesNotRevealWhichEmailsExist — login returned immediately on an unknown
+// address and spent a bcrypt comparison on a known one, and that difference is
+// measurable, so it told an attacker which addresses have accounts.
+func TestLoginDoesNotRevealWhichEmailsExist(t *testing.T) {
+	resetDB(t)
+	registerUser(t, "known@e.com")
+
+	timeLogin := func(email string) time.Duration {
+		start := time.Now()
+		r := do(t, http.MethodPost, "/api/v1/auth/login", "", map[string]any{
+			"email": email, "password": "definitely-wrong-password",
+		})
+		if r.status != http.StatusUnauthorized {
+			t.Fatalf("login %s: got %d, want 401", email, r.status)
+		}
+		return time.Since(start)
+	}
+	// Warm the lazily-built dummy hash so it is not charged to the first call.
+	timeLogin("unknown@e.com")
+
+	known, unknown := timeLogin("known@e.com"), timeLogin("unknown@e.com")
+	ratio := float64(known) / float64(unknown)
+	if ratio > 3 || ratio < 0.33 {
+		t.Errorf("login timing differs by %.1fx between a known and unknown address "+
+			"(known %v, unknown %v) — that is an enumeration oracle", ratio, known, unknown)
+	}
+}
+
+// TestConcurrentRegistrationConflicts — the existence check races the insert, and the
+// loser hit the unique constraint and surfaced as a 500.
+func TestConcurrentRegistrationConflicts(t *testing.T) {
+	resetDB(t)
+	const n = 4
+	body := map[string]any{"email": "race@e.com", "password": "password123", "displayName": "Race"}
+
+	statuses := make(chan int, n)
+	var wg sync.WaitGroup
+	for i := 0; i < n; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			statuses <- do(t, http.MethodPost, "/api/v1/auth/register", "", body).status
+		}()
+	}
+	wg.Wait()
+	close(statuses)
+
+	created, conflict := 0, 0
+	for st := range statuses {
+		switch st {
+		case http.StatusCreated:
+			created++
+		case http.StatusConflict:
+			conflict++
+		default:
+			t.Errorf("unexpected status %d — a duplicate registration should be 409", st)
+		}
+	}
+	if created != 1 {
+		t.Errorf("exactly one registration should succeed, got %d", created)
+	}
+	if conflict != n-1 {
+		t.Errorf("the rest should be 409, got %d", conflict)
 	}
 }

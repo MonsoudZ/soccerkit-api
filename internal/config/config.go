@@ -96,6 +96,7 @@ var placeholderSecrets = map[string]bool{
 	"change-me-too-in-production": true,
 	"change-me":                   true,
 	"dev-access-secret":           true,
+	"dev-access-secret-change-me": true, // the literal shipped in .env.example
 	"dev-refresh-secret":          true,
 	"test-access-secret":          true,
 	"test-refresh-secret":         true,

@@ -81,6 +81,13 @@ func (s *Server) handleRegister(w http.ResponseWriter, r *http.Request) {
 		PersonID: person.ID, Email: email, PasswordHash: &hash,
 	})
 	if err != nil {
+		// The check above races: two concurrent registrations for the same address both
+		// pass it and one reaches the unique constraint. That is the same conflict, so
+		// it gets the same 409 rather than surfacing as a 500.
+		if isUniqueViolation(err) {
+			writeError(w, errConflict("an account with that email already exists"))
+			return
+		}
 		writeError(w, err)
 		return
 	}
@@ -130,13 +137,22 @@ func (s *Server) handleLogin(w http.ResponseWriter, r *http.Request) {
 
 	account, err := s.store.GetUserAccountByEmail(r.Context(), email)
 	if errors.Is(err, pgx.ErrNoRows) {
+		// Spend the same work a real comparison would, so the response time does not
+		// reveal whether the address has an account.
+		burnPasswordComparison(req.Password)
 		writeError(w, errUnauthorized("invalid email or password"))
 		return
 	} else if err != nil {
 		writeError(w, err)
 		return
 	}
-	if account.PasswordHash == nil || !verifyPassword(req.Password, *account.PasswordHash) {
+	if account.PasswordHash == nil {
+		// An Apple-only account has no password to check; burn the same work anyway.
+		burnPasswordComparison(req.Password)
+		writeError(w, errUnauthorized("invalid email or password"))
+		return
+	}
+	if !verifyPassword(req.Password, *account.PasswordHash) {
 		writeError(w, errUnauthorized("invalid email or password"))
 		return
 	}

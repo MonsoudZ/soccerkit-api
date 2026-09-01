@@ -79,6 +79,9 @@ type Querier interface {
 	ListFormTemplates(ctx context.Context, arg ListFormTemplatesParams) ([]FormTemplate, error)
 	ListGamesForTeam(ctx context.Context, teamID uuid.UUID) ([]Game, error)
 	ListInstancesForPerson(ctx context.Context, arg ListInstancesForPersonParams) ([]ListInstancesForPersonRow, error)
+	// Tie-broken on id: orgs created inside one transaction share a now() timestamp, and
+	// resolveOrg takes the first row as the caller's default org when no X-Organization-ID
+	// is sent. Without the tie-break that default is whatever Postgres happens to return.
 	ListMembershipsForPerson(ctx context.Context, personID uuid.UUID) ([]ListMembershipsForPersonRow, error)
 	// The personal org(s) this person owns. A personal org is created with its owner
 	// as sole member (see handleRegister), so "member of a personal org" == "owns

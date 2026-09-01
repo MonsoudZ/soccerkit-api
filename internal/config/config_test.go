@@ -1,6 +1,7 @@
 package config
 
 import (
+	"os"
 	"strings"
 	"testing"
 )
@@ -109,5 +110,29 @@ func TestUnsetEnvIsDevelopment(t *testing.T) {
 	}
 	if cfg.Env != "development" || cfg.IsDeployed() {
 		t.Errorf("unset ENV = %q, IsDeployed=%v; want development/false", cfg.Env, cfg.IsDeployed())
+	}
+}
+
+// TestDeployedRejectsTheEnvExampleSecret — placeholderSecrets listed several literals
+// but not the one this repo actually ships in .env.example. It was caught only by the
+// length minimum, which is luck rather than the check written for it.
+func TestDeployedRejectsTheEnvExampleSecret(t *testing.T) {
+	envExample, err := os.ReadFile("../../.env.example")
+	if err != nil {
+		t.Fatalf("read .env.example: %v", err)
+	}
+	var secret string
+	for _, line := range strings.Split(string(envExample), "\n") {
+		if v, ok := strings.CutPrefix(strings.TrimSpace(line), "JWT_ACCESS_SECRET="); ok {
+			secret = v
+			break
+		}
+	}
+	if secret == "" {
+		t.Fatal("no JWT_ACCESS_SECRET in .env.example")
+	}
+	if !placeholderSecrets[secret] {
+		t.Errorf("the secret shipped in .env.example (%q) is not in placeholderSecrets, "+
+			"so a deployment using it verbatim is refused only if it happens to be short", secret)
 	}
 }

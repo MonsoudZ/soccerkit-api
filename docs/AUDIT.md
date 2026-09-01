@@ -11,10 +11,9 @@ quoted verbatim. Findings without that marker are read-only observations.
 
 Baseline health: `go vet`, `go build` and `go test ./...` all pass clean.
 
-> **Status.** C1, C2, H1–H4 and M1–M7 are fixed in the commits following this report.
-> Every reproduction below was re-run against the fixed code and now fails closed. The
-> findings are left described in the present tense as a record of what was wrong and
-> why. **L1–L7 are still open.**
+> **Status.** All twenty findings are fixed in the commits following this report. Every
+> reproduction below was re-run against the fixed code and now fails closed. The findings
+> are left described in the present tense as a record of what was wrong and why.
 >
 > Three of the fixes changed behaviour deliberately, and each is worth knowing about:
 > `POST /persons` replaces `asPlayer` with `role` and always creates a membership;
@@ -42,13 +41,13 @@ Baseline health: `go vet`, `go build` and `go test ./...` all pass clean.
 | M5 ✅ | Medium | Refresh tokens stored in plaintext; no reuse detection |
 | M6 ✅ | Medium | Apple sign-in links accounts by email without checking `email_verified` |
 | M7 ✅ | Medium | Unknown `kid` triggers a JWKS fetch on every request |
-| L1 | Low | CORS `AllowedHeaders` omits `X-Organization-ID` |
-| L2 | Low | OpenAPI spec is missing `/auth/apple` and `/sync` |
-| L3 | Low | Login timing side channel enables user enumeration |
-| L4 | Low | `.env.example`'s secret is not in the `placeholderSecrets` list |
-| L5 | Low | Default org selection is non-deterministic |
-| L6 | Low | Registration race returns 500 instead of 409 |
-| L7 | Low | The "isolation" tests only cover reads |
+| L1 ✅ | Low | CORS `AllowedHeaders` omits `X-Organization-ID` |
+| L2 ✅ | Low | OpenAPI spec is missing `/auth/apple` and `/sync` |
+| L3 ✅ | Low | Login timing side channel enables user enumeration |
+| L4 ✅ | Low | `.env.example`'s secret is not in the `placeholderSecrets` list |
+| L5 ✅ | Low | Default org selection is non-deterministic |
+| L6 ✅ | Low | Registration race returns 500 instead of 409 |
+| L7 ✅ | Low | The "isolation" tests only cover reads |
 
 The two Critical and four High findings share one root cause, described next.
 

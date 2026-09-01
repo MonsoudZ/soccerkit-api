@@ -139,6 +139,31 @@ func TestSyncIsolatedPerAccount(t *testing.T) {
 	if got := pullSync(t, alice, ""); len(got.Records) != 1 {
 		t.Fatalf("alice should see her own record, got %d", len(got.Records))
 	}
+
+	// Isolation is not only a read property: Bob must not be able to write over the
+	// record either. Asserting only the pull direction is what let a cross-tenant write
+	// live in a green suite.
+	push := do(t, http.MethodPost, "/api/v1/sync", bob, map[string]any{
+		"upserts": []map[string]any{
+			{"type": "Diagram", "id": "aaaa1111-1111-1111-1111-111111111111", "payload": map[string]any{"x": 99}},
+		},
+	})
+	if conflicts, _ := push.body["conflicts"].([]any); len(conflicts) != 1 {
+		t.Fatalf("bob's write to alice's record should be refused, conflicts=%v", push.body["conflicts"])
+	}
+	got := pullSync(t, alice, "")
+	if len(got.Records) != 1 {
+		t.Fatalf("alice should still have exactly her own record, got %d", len(got.Records))
+	}
+	var payload struct {
+		X int `json:"x"`
+	}
+	if err := json.Unmarshal(got.Records[0].Payload, &payload); err != nil {
+		t.Fatalf("decode alice's payload: %v", err)
+	}
+	if payload.X != 1 {
+		t.Errorf("alice's record was altered: x = %d, want 1", payload.X)
+	}
 }
 
 func TestSyncRequiresAuth(t *testing.T) {

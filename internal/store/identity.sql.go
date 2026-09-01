@@ -476,7 +476,7 @@ SELECT m.id, m.role, m.organization_id, o.name AS organization_name, o.kind AS o
 FROM memberships m
 JOIN organizations o ON o.id = m.organization_id
 WHERE m.person_id = $1
-ORDER BY o.created_at ASC
+ORDER BY o.created_at ASC, o.id ASC
 `
 
 type ListMembershipsForPersonRow struct {
@@ -487,6 +487,9 @@ type ListMembershipsForPersonRow struct {
 	OrganizationKind string    `json:"organization_kind"`
 }
 
+// Tie-broken on id: orgs created inside one transaction share a now() timestamp, and
+// resolveOrg takes the first row as the caller's default org when no X-Organization-ID
+// is sent. Without the tie-break that default is whatever Postgres happens to return.
 func (q *Queries) ListMembershipsForPerson(ctx context.Context, personID uuid.UUID) ([]ListMembershipsForPersonRow, error) {
 	rows, err := q.db.Query(ctx, listMembershipsForPerson, personID)
 	if err != nil {

@@ -68,6 +68,26 @@ func TestTeamIsolatedByOrg(t *testing.T) {
 	if r := do(t, http.MethodDelete, "/api/v1/teams/"+teamID, coachB, nil); r.status != http.StatusForbidden {
 		t.Errorf("cross-org team delete should be 403, got %d", r.status)
 	}
+
+	// Nor write to it. This test used to assert only the read direction, which is how a
+	// cross-tenant write sat in a passing suite: the REST path checked the org, and the
+	// sync path — reaching the same table — did not.
+	if r := do(t, http.MethodPost, "/api/v1/teams/"+teamID+"/games", coachB, map[string]any{
+		"opponent": "Ghost FC",
+	}); r.status != http.StatusForbidden {
+		t.Errorf("cross-org game create should be 403, got %d %s", r.status, r.raw)
+	}
+	push := do(t, http.MethodPost, "/api/v1/sync", coachB, map[string]any{
+		"upserts": []map[string]any{{"type": "Team", "id": teamID, "payload": map[string]any{"name": "Taken"}}},
+	})
+	if conflicts, _ := push.body["conflicts"].([]any); len(conflicts) != 1 {
+		t.Errorf("cross-org sync write should be refused, conflicts=%v", push.body["conflicts"])
+	}
+	if after := do(t, http.MethodGet, "/api/v1/teams/"+teamID, coachA, nil); after.status != http.StatusOK {
+		t.Fatalf("owner read after the attempts: %d %s", after.status, after.raw)
+	} else if team, _ := after.body["team"].(map[string]any); team["name"] != "A Team" {
+		t.Errorf("team was modified across the org boundary: %v", team)
+	}
 }
 
 // TestPersonReadsAreScopedToTheOrg covers the read side of the org boundary. These
