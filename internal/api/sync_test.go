@@ -3,7 +3,9 @@ package api_test
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"net/http"
+	"strings"
 	"testing"
 )
 
@@ -354,5 +356,44 @@ func TestRESTDeleteReachesSyncClients(t *testing.T) {
 	}
 	if len(delta.Records) != 0 {
 		t.Errorf("expected no live records in the delta, got %+v", delta.Records)
+	}
+}
+
+// TestSyncPushRejectsOversizedBatch — every record in a push is a statement inside one
+// transaction, so an unbounded batch held it open for as long as it took.
+func TestSyncPushRejectsOversizedBatch(t *testing.T) {
+	resetDB(t)
+	coach, _ := registerUser(t, "batch@e.com")
+
+	upserts := make([]map[string]any, 1001)
+	for i := range upserts {
+		upserts[i] = map[string]any{
+			"type": "Prefs", "id": fmt.Sprintf("k%04d", i), "payload": map[string]any{"i": i},
+		}
+	}
+	r := do(t, http.MethodPost, "/api/v1/sync", coach, map[string]any{"upserts": upserts})
+	if r.status != http.StatusBadRequest {
+		t.Fatalf("oversized batch: got %d %s, want 400", r.status, r.raw)
+	}
+	// Rejected before the transaction opens, so nothing landed.
+	if got := pullSync(t, coach, ""); len(got.Records) != 0 {
+		t.Errorf("a rejected batch must write nothing, got %d records", len(got.Records))
+	}
+
+	// One under the cap still works.
+	if r := do(t, http.MethodPost, "/api/v1/sync", coach, map[string]any{"upserts": upserts[:1000]}); r.status != http.StatusOK {
+		t.Fatalf("batch at the cap: got %d %s, want 200", r.status, r.raw)
+	}
+}
+
+// TestRequestBodyIsCapped — decodeJSON would previously read a body of any size.
+func TestRequestBodyIsCapped(t *testing.T) {
+	resetDB(t)
+	coach, _ := registerUser(t, "bodycap@e.com")
+
+	huge := strings.Repeat("a", 5<<20) // 5 MiB, over the 4 MiB cap
+	r := do(t, http.MethodPost, "/api/v1/drills", coach, map[string]any{"name": huge})
+	if r.status != http.StatusBadRequest {
+		t.Fatalf("oversized body: got %d, want 400", r.status)
 	}
 }

@@ -16,18 +16,20 @@ import (
 )
 
 type Server struct {
-	cfg   *config.Config
-	pool  *pgxpool.Pool
-	store *store.Queries
-	apple *appleVerifier
+	cfg         *config.Config
+	pool        *pgxpool.Pool
+	store       *store.Queries
+	apple       *appleVerifier
+	authLimiter *ipRateLimiter
 }
 
 func NewServer(cfg *config.Config, pool *pgxpool.Pool) *Server {
 	return &Server{
-		cfg:   cfg,
-		pool:  pool,
-		store: store.New(pool),
-		apple: newAppleVerifier(cfg.AppleClientID, cfg.DevAppleBypass),
+		cfg:         cfg,
+		pool:        pool,
+		store:       store.New(pool),
+		apple:       newAppleVerifier(cfg.AppleClientID, cfg.DevAppleBypass),
+		authLimiter: newIPRateLimiter(authRate, authBurst),
 	}
 }
 
@@ -40,6 +42,7 @@ func (s *Server) Router() http.Handler {
 	r.Use(middleware.Logger)
 	r.Use(middleware.Recoverer)
 	r.Use(middleware.Timeout(30 * time.Second))
+	r.Use(limitBody)
 
 	origins := []string{"*"}
 	if s.cfg.CORSOrigins != "*" {
@@ -58,8 +61,15 @@ func (s *Server) Router() http.Handler {
 	r.Get("/docs", s.handleDocs)
 
 	r.Route("/api/v1", func(r chi.Router) {
-		// Auth (public)
+		// Auth (public). Throttled per IP in deployed environments: these are the only
+		// unauthenticated write endpoints, and login spends a bcrypt comparison on
+		// every attempt. Left off on a laptop, where the only traffic is the developer
+		// and the test suite — the same fail-closed IsDeployed switch config.go uses
+		// for the other environment-specific behaviour.
 		r.Route("/auth", func(r chi.Router) {
+			if s.hasAuthLimiter() {
+				r.Use(s.authLimiter.middleware)
+			}
 			r.Post("/register", s.handleRegister)
 			r.Post("/login", s.handleLogin)
 			r.Post("/apple", s.handleAppleAuth)

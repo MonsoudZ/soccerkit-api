@@ -1,0 +1,130 @@
+package api
+
+import (
+	"net/http"
+	"sync"
+	"time"
+)
+
+// Request limits. None of these existed: an unauthenticated caller could POST an
+// unbounded body, hammer /auth/login (a ~60ms bcrypt comparison each time, so a cheap
+// resource-exhaustion lever as well as an unmetered credential-stuffing target), or
+// push a sync batch of any size into a single transaction.
+const (
+	// maxBodyBytes caps any request body. The largest legitimate body is a sync push,
+	// which is JSON payloads mirrored from a phone.
+	maxBodyBytes = 4 << 20 // 4 MiB
+
+	// maxSyncBatch caps the records in one push. Each is a statement inside one
+	// transaction, so an unbounded batch holds it open for as long as it takes.
+	maxSyncBatch = 1000
+
+	// authRate is the sustained requests-per-minute allowed per client IP on the
+	// credential endpoints, and authBurst how many may arrive at once. A coach signing
+	// in, mistyping, and retrying stays far below this.
+	authRate  = 20
+	authBurst = 10
+)
+
+// limitBody caps the request body for every route. MaxBytesReader makes the overrun
+// surface as a read error, which decodeJSON already reports as a 400.
+func limitBody(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Body != nil {
+			r.Body = http.MaxBytesReader(w, r.Body, maxBodyBytes)
+		}
+		next.ServeHTTP(w, r)
+	})
+}
+
+// ipRateLimiter is a token bucket per client IP.
+//
+// It is deliberately in-process: this service runs as a single instance today, and a
+// shared-state limiter would mean a new dependency and a Redis to run it against. That
+// makes it a per-instance limit, so it is a brake on brute force rather than a quota —
+// if this is ever run behind more than one replica the budget multiplies by the replica
+// count, and it should move to shared state.
+type ipRateLimiter struct {
+	rate   float64 // tokens per second
+	burst  float64
+	mu     sync.Mutex
+	perIP  map[string]*bucket
+	lastGC time.Time
+}
+
+type bucket struct {
+	tokens float64
+	seen   time.Time
+}
+
+func newIPRateLimiter(perMinute, burst int) *ipRateLimiter {
+	return &ipRateLimiter{
+		rate:   float64(perMinute) / 60,
+		burst:  float64(burst),
+		perIP:  make(map[string]*bucket),
+		lastGC: time.Now(),
+	}
+}
+
+// allow reports whether this key has a token to spend, refilling first.
+func (l *ipRateLimiter) allow(key string, now time.Time) bool {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+
+	// Drop buckets nobody has touched for a while, so the map cannot grow without
+	// bound on a stream of distinct source addresses.
+	if now.Sub(l.lastGC) > 10*time.Minute {
+		for k, b := range l.perIP {
+			if now.Sub(b.seen) > 10*time.Minute {
+				delete(l.perIP, k)
+			}
+		}
+		l.lastGC = now
+	}
+
+	b, ok := l.perIP[key]
+	if !ok {
+		b = &bucket{tokens: l.burst, seen: now}
+		l.perIP[key] = b
+	}
+	b.tokens += now.Sub(b.seen).Seconds() * l.rate
+	if b.tokens > l.burst {
+		b.tokens = l.burst
+	}
+	b.seen = now
+	if b.tokens < 1 {
+		return false
+	}
+	b.tokens--
+	return true
+}
+
+// middleware throttles by client IP. RealIP has already run, so RemoteAddr reflects the
+// forwarded address when the service sits behind a proxy.
+func (l *ipRateLimiter) middleware(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if !l.allow(clientIP(r), time.Now()) {
+			w.Header().Set("Retry-After", "60")
+			writeError(w, &apiError{http.StatusTooManyRequests, "RATE_LIMITED",
+				"Too many attempts. Try again in a minute."})
+			return
+		}
+		next.ServeHTTP(w, r)
+	})
+}
+
+// clientIP strips the port from RemoteAddr, so one client is one bucket regardless of
+// the ephemeral port each connection uses.
+func clientIP(r *http.Request) string {
+	addr := r.RemoteAddr
+	for i := len(addr) - 1; i >= 0; i-- {
+		if addr[i] == ':' {
+			return addr[:i]
+		}
+	}
+	return addr
+}
+
+// hasAuthLimiter reports whether credential endpoints are throttled, so the router's
+// decision is expressed in one place and can be asserted in a test.
+func (s *Server) hasAuthLimiter() bool { return s.cfg.IsDeployed() }

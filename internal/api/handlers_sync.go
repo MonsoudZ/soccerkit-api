@@ -3,6 +3,7 @@ package api
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"strconv"
 
@@ -86,6 +87,12 @@ func (s *Server) handleSyncPush(w http.ResponseWriter, r *http.Request) {
 	var req syncPushRequest
 	if err := decodeJSON(r, &req); err != nil {
 		writeError(w, err)
+		return
+	}
+
+	if len(req.Upserts)+len(req.Deletes) > maxSyncBatch {
+		writeError(w, errValidation(fmt.Sprintf(
+			"a sync push carries at most %d records; split the batch", maxSyncBatch)))
 		return
 	}
 
