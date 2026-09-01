@@ -34,6 +34,17 @@ func errForbidden(msg string) *apiError { return &apiError{http.StatusForbidden,
 func errNotFound(msg string) *apiError  { return &apiError{http.StatusNotFound, "NOT_FOUND", msg} }
 func errConflict(msg string) *apiError  { return &apiError{http.StatusConflict, "CONFLICT", msg} }
 
+// errEmailAlreadyRegistered is what /auth/apple answers when the identity's address
+// already has an account. It carries its own code rather than a bare CONFLICT because
+// the client has to act on it: this one means "sign in with your password, then link
+// Apple from settings", while the other 409 on that endpoint (a pre-claimed Person id)
+// means "contact support". A status code alone cannot tell them apart.
+func errEmailAlreadyRegistered() *apiError {
+	return &apiError{http.StatusConflict, "EMAIL_ALREADY_REGISTERED",
+		"An account already exists for this email address. Sign in with your password, " +
+			"then link Sign in with Apple from your account settings."}
+}
+
 // writeJSON serialises v as JSON with the given status code.
 func writeJSON(w http.ResponseWriter, status int, v any) {
 	w.Header().Set("Content-Type", "application/json")

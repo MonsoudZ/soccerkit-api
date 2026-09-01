@@ -85,8 +85,17 @@ type Querier interface {
 	GetUserAccountByAppleSub(ctx context.Context, appleSub *string) (UserAccount, error)
 	GetUserAccountByEmail(ctx context.Context, email string) (UserAccount, error)
 	GetUserAccountByID(ctx context.Context, id uuid.UUID) (UserAccount, error)
+	// The account behind an authenticated Person. Access tokens name a Person, so this is
+	// how a signed-in caller reaches their own account row — used by the Apple-link
+	// endpoint, where the session is the proof of ownership that the address is not.
+	GetUserAccountByPersonID(ctx context.Context, personID uuid.UUID) (UserAccount, error)
 	HasMembership(ctx context.Context, arg HasMembershipParams) (bool, error)
-	LinkAppleSub(ctx context.Context, arg LinkAppleSubParams) error
+	// Attach an Apple identity to an account that does not have one. Guarded on
+	// apple_sub IS NULL rather than checked beforehand: the handler does read the row first
+	// (to tell an idempotent re-link from a different Apple ID, which deserve different
+	// answers), but a predicate on the write is what makes two concurrent links unable to
+	// overwrite each other and silently cut one Apple ID off from the account.
+	LinkAppleSub(ctx context.Context, arg LinkAppleSubParams) (int64, error)
 	ListActiveRoster(ctx context.Context, teamID uuid.UUID) ([]ListActiveRosterRow, error)
 	ListAnswersForInstance(ctx context.Context, instanceID uuid.UUID) ([]ListAnswersForInstanceRow, error)
 	ListChildren(ctx context.Context, guardianPersonID uuid.UUID) ([]Person, error)

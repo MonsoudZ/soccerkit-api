@@ -92,6 +92,11 @@ func (s *Server) Router() http.Handler {
 
 			r.Get("/me", s.handleGetMe)
 			r.Delete("/me", s.handleDeleteMe)
+			// Linking Apple to an existing account is an authenticated operation, not a
+			// sign-in: the session is the proof that the two identities are the same
+			// person. /auth/apple used to infer that from a matching email address, which
+			// nothing verifies. See handleAppleAuth.
+			r.Post("/me/apple-link", s.handleLinkApple)
 
 			// iOS opaque delta-sync (projection over the domain tables).
 			r.Get("/sync", s.handleSyncPull)

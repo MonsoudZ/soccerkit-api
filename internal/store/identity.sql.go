@@ -414,6 +414,28 @@ func (q *Queries) GetUserAccountByID(ctx context.Context, id uuid.UUID) (UserAcc
 	return i, err
 }
 
+const getUserAccountByPersonID = `-- name: GetUserAccountByPersonID :one
+SELECT id, person_id, email, password_hash, apple_sub, created_at, updated_at FROM user_accounts WHERE person_id = $1
+`
+
+// The account behind an authenticated Person. Access tokens name a Person, so this is
+// how a signed-in caller reaches their own account row — used by the Apple-link
+// endpoint, where the session is the proof of ownership that the address is not.
+func (q *Queries) GetUserAccountByPersonID(ctx context.Context, personID uuid.UUID) (UserAccount, error) {
+	row := q.db.QueryRow(ctx, getUserAccountByPersonID, personID)
+	var i UserAccount
+	err := row.Scan(
+		&i.ID,
+		&i.PersonID,
+		&i.Email,
+		&i.PasswordHash,
+		&i.AppleSub,
+		&i.CreatedAt,
+		&i.UpdatedAt,
+	)
+	return i, err
+}
+
 const hasMembership = `-- name: HasMembership :one
 SELECT EXISTS (
     SELECT 1 FROM memberships WHERE person_id = $1 AND organization_id = $2
@@ -432,8 +454,9 @@ func (q *Queries) HasMembership(ctx context.Context, arg HasMembershipParams) (b
 	return exists, err
 }
 
-const linkAppleSub = `-- name: LinkAppleSub :exec
-UPDATE user_accounts SET apple_sub = $2, updated_at = now() WHERE id = $1
+const linkAppleSub = `-- name: LinkAppleSub :execrows
+UPDATE user_accounts SET apple_sub = $2, updated_at = now()
+WHERE id = $1 AND apple_sub IS NULL
 `
 
 type LinkAppleSubParams struct {
@@ -441,9 +464,17 @@ type LinkAppleSubParams struct {
 	AppleSub *string   `json:"apple_sub"`
 }
 
-func (q *Queries) LinkAppleSub(ctx context.Context, arg LinkAppleSubParams) error {
-	_, err := q.db.Exec(ctx, linkAppleSub, arg.ID, arg.AppleSub)
-	return err
+// Attach an Apple identity to an account that does not have one. Guarded on
+// apple_sub IS NULL rather than checked beforehand: the handler does read the row first
+// (to tell an idempotent re-link from a different Apple ID, which deserve different
+// answers), but a predicate on the write is what makes two concurrent links unable to
+// overwrite each other and silently cut one Apple ID off from the account.
+func (q *Queries) LinkAppleSub(ctx context.Context, arg LinkAppleSubParams) (int64, error) {
+	result, err := q.db.Exec(ctx, linkAppleSub, arg.ID, arg.AppleSub)
+	if err != nil {
+		return 0, err
+	}
+	return result.RowsAffected(), nil
 }
 
 const listChildren = `-- name: ListChildren :many

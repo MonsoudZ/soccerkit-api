@@ -92,14 +92,22 @@ paths:
       summary: Sign in with Apple
       description: >
         Verifies an Apple identity token and resolves it to a Person: an account already
-        linked by Apple subject, an account matched by a verified email address (linked
-        on the spot), or a freshly provisioned identity — the same provisioning as email
-        registration, including the seeded evaluation templates.
+        linked by Apple subject, or a freshly provisioned identity — the same provisioning
+        as email registration, including the seeded evaluation templates.
 
 
-        Linking to an existing password account requires Apple to have marked the address
-        verified. When the user hides their address, a stable synthesized one is used,
-        which never matches an existing account and so always provisions anew.
+        It does NOT match an existing account by email address. An address in
+        user_accounts is one somebody typed into POST /auth/register, which sends no
+        verification mail, so linking on a match meant registering an address you do not
+        own was a way to be handed the account of whoever later signed in with Apple at
+        it. When the address already has an account this endpoint answers 409
+        EMAIL_ALREADY_REGISTERED, and the client should prompt for a password sign-in
+        followed by POST /api/v1/me/apple-link, where the session is the proof that both
+        identities are the same person.
+
+
+        When the user hides their address — or Apple has not marked it verified — a stable
+        synthesized address is used, which never collides with a real account.
 
 
         The response shape is the iOS app's, not the shared AuthResponse.
@@ -139,6 +147,16 @@ paths:
                   personID: { type: string, format: uuid }
         "400": { $ref: "#/components/responses/Error" }
         "401": { $ref: "#/components/responses/Error" }
+        "409":
+          description: >
+            Two distinct cases, told apart by the error code, because the client has to
+            act differently on them. EMAIL_ALREADY_REGISTERED — an account already holds
+            this address; sign in with the password, then POST /api/v1/me/apple-link.
+            CONFLICT — the Person id this Apple subject derives is already taken by a row
+            this sign-in did not create; that needs support, not a retry.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
         "429": { $ref: "#/components/responses/Error" }
 
   /api/v1/sync:
@@ -231,6 +249,45 @@ paths:
       responses:
         "204": { description: Account deleted (or already absent) }
         "401": { $ref: "#/components/responses/Error" }
+
+  /api/v1/me/apple-link:
+    post:
+      tags: [me]
+      summary: Link Sign in with Apple to the authenticated account
+      description: >
+        Attaches an Apple identity to the account the caller is already signed in as, so
+        that a coach who registered with a password can use Sign in with Apple from then
+        on. This is the only way the two are joined: /auth/apple deliberately will not
+        infer it from a matching email address, because nothing verifies that address.
+
+
+        Idempotent — re-linking the same Apple ID returns 200. One Apple ID belongs to at
+        most one account, and one account to at most one Apple ID; either collision is a
+        409.
+      security: [{ bearerAuth: [] }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [identityToken]
+              properties:
+                identityToken:
+                  type: string
+                  description: The identity token from ASAuthorizationAppleIDCredential.
+      responses:
+        "200":
+          description: Linked (or already linked to this same Apple ID)
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  ok: { type: boolean }
+        "400": { $ref: "#/components/responses/Error" }
+        "401": { $ref: "#/components/responses/Error" }
+        "409": { $ref: "#/components/responses/Error" }
 
   /api/v1/persons:
     post:

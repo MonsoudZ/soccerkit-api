@@ -86,19 +86,103 @@ func TestAppleAuthIsIdempotentPerSub(t *testing.T) {
 	}
 }
 
-// TestAppleAuthLinksExistingEmailAccount checks that an Apple sign-in whose email
-// matches an existing password account links to that same Person.
-func TestAppleAuthLinksExistingEmailAccount(t *testing.T) {
+// TestAppleSignInWillNotTakeOverAnExistingAddress is the whole pre-hijack, asserted
+// closed.
+//
+// POST /auth/register sends no verification mail, so an address in user_accounts is one
+// somebody typed. /auth/apple used to link a first-time Apple identity to whatever
+// account held a matching address and sign the caller into it, which meant registering
+// an address you do not own handed you the account of whoever later signed in with
+// Apple at it — and kept handing it to you, since the password stayed yours.
+func TestAppleSignInWillNotTakeOverAnExistingAddress(t *testing.T) {
 	resetDB(t)
+	const victimEmail = "victim-takeover@example.com"
 
-	_, personID := registerUser(t, "linkme@example.com")
+	// The attacker registers an address they do not own.
+	_, attackerPerson := registerUser(t, victimEmail)
 
-	r := appleSignIn(t, "apple-sub-link", "linkme@example.com", nil)
-	if r.status != http.StatusOK {
-		t.Fatalf("apple auth: status %d body %s", r.status, r.raw)
+	// The victim's first Apple sign-in at that address is refused, not merged.
+	r := appleSignIn(t, "victim-apple-sub", victimEmail, "Real Victim")
+	if r.status != http.StatusConflict {
+		t.Fatalf("apple sign-in over a registered address: got %d %s, want 409", r.status, r.raw)
 	}
-	if got, _ := r.body["personID"].(string); got != personID {
-		t.Fatalf("apple sign-in should link to existing person %q, got %q", personID, got)
+	if code, _ := errCode(r); code != "EMAIL_ALREADY_REGISTERED" {
+		// The client has to tell this apart from the other 409 on this endpoint (a
+		// pre-claimed Person id) to know the next step is a password sign-in.
+		t.Errorf("error code %q, want EMAIL_ALREADY_REGISTERED", code)
+	}
+	if _, ok := r.body["token"]; ok {
+		t.Error("a refused sign-in must not return a session")
+	}
+
+	// Nothing was linked, so the attacker never gains the victim's Apple identity.
+	if n := countRows(t, `SELECT count(*) FROM user_accounts WHERE apple_sub IS NOT NULL`); n != 0 {
+		t.Errorf("an Apple identity was linked to the pre-registered account, found %d", n)
+	}
+	// And no second identity was quietly provisioned onto the attacker's Person either.
+	if n := countRows(t, `SELECT count(*) FROM user_accounts`); n != 1 {
+		t.Errorf("expected only the attacker's own account, found %d", n)
+	}
+	_ = attackerPerson
+}
+
+// TestAppleLinkRequiresTheAccountsOwnSession covers the sanctioned replacement for that
+// merge: proof of control comes from a session, which the attacker in the test above
+// does not have and the real account holder does.
+func TestAppleLinkRequiresTheAccountsOwnSession(t *testing.T) {
+	resetDB(t)
+	const email = "linkme@example.com"
+
+	token, personID := registerUser(t, email)
+
+	// Unauthenticated, the endpoint is not reachable at all.
+	if r := do(t, http.MethodPost, "/api/v1/me/apple-link", "", map[string]any{
+		"identityToken": devIdentityToken(t, "apple-sub-link", email),
+	}); r.status != http.StatusUnauthorized {
+		t.Fatalf("unauthenticated link: got %d %s, want 401", r.status, r.raw)
+	}
+
+	// Signed in, the coach links their Apple ID to their own account.
+	link := do(t, http.MethodPost, "/api/v1/me/apple-link", token, map[string]any{
+		"identityToken": devIdentityToken(t, "apple-sub-link", email),
+	})
+	if link.status != http.StatusOK {
+		t.Fatalf("link: got %d %s, want 200", link.status, link.raw)
+	}
+	// Retrying a lost response must not fail.
+	again := do(t, http.MethodPost, "/api/v1/me/apple-link", token, map[string]any{
+		"identityToken": devIdentityToken(t, "apple-sub-link", email),
+	})
+	if again.status != http.StatusOK {
+		t.Errorf("re-linking the same Apple ID: got %d %s, want 200", again.status, again.raw)
+	}
+
+	// From then on Sign in with Apple resolves to that same Person — the outcome the
+	// merge used to reach by guessing.
+	signIn := appleSignIn(t, "apple-sub-link", email, nil)
+	if signIn.status != http.StatusOK {
+		t.Fatalf("apple sign-in after linking: got %d %s", signIn.status, signIn.raw)
+	}
+	if got, _ := signIn.body["personID"].(string); got != personID {
+		t.Errorf("apple sign-in resolved to %q, want the linked person %q", got, personID)
+	}
+
+	// A different Apple ID cannot be stacked onto the same account...
+	other := do(t, http.MethodPost, "/api/v1/me/apple-link", token, map[string]any{
+		"identityToken": devIdentityToken(t, "some-other-sub", email),
+	})
+	if other.status != http.StatusConflict {
+		t.Errorf("linking a second Apple ID: got %d %s, want 409", other.status, other.raw)
+	}
+	// ...and one Apple ID cannot be linked to two accounts, which is what keeps
+	// GetUserAccountByAppleSub unambiguous.
+	stranger, _ := registerUser(t, "stranger@example.com")
+	taken := do(t, http.MethodPost, "/api/v1/me/apple-link", stranger, map[string]any{
+		"identityToken": devIdentityToken(t, "apple-sub-link", "stranger@example.com"),
+	})
+	if taken.status != http.StatusConflict {
+		t.Errorf("linking an Apple ID that belongs to another account: got %d %s, want 409",
+			taken.status, taken.raw)
 	}
 }
 
@@ -149,10 +233,15 @@ func TestAppleAuthRejectsMissingToken(t *testing.T) {
 	}
 }
 
-// TestAppleAuthRefusesToLinkUnverifiedEmail — taking over an existing password account
-// by presenting an Apple identity that merely claims its address is a standard
-// primitive, and the claim that settles it was already in the token.
-func TestAppleAuthRefusesToLinkUnverifiedEmail(t *testing.T) {
+// TestAppleAuthIgnoresAnUnverifiedAddress — an address Apple has not vouched for is
+// treated as no address at all, so it is never written to user_accounts.email.
+//
+// The linking this used to guard is gone (see
+// TestAppleSignInWillNotTakeOverAnExistingAddress), which closes the takeover it was
+// written for outright. The claim still does work: email is UNIQUE and is what
+// /auth/login and /auth/apple key on, so storing one nobody vouched for would plant an
+// address the account holder may not own.
+func TestAppleAuthIgnoresAnUnverifiedAddress(t *testing.T) {
 	resetDB(t)
 	const email = "victim-link@example.com"
 
@@ -162,14 +251,14 @@ func TestAppleAuthRefusesToLinkUnverifiedEmail(t *testing.T) {
 		t.Fatalf("register victim: %d %s", r.status, r.raw)
 	}
 
+	// A sign-in claiming that address without Apple's verification provisions its own
+	// account under a synthesized address and leaves the victim's alone.
 	unverified := do(t, http.MethodPost, "/api/v1/auth/apple", "", map[string]any{
 		"identityToken": devIdentityTokenVerified(t, "attacker-sub", email, false),
 	})
-	if unverified.status != http.StatusUnauthorized {
-		t.Fatalf("unverified link: got %d %s, want 401", unverified.status, unverified.raw)
+	if unverified.status != http.StatusOK {
+		t.Fatalf("unverified sign-in: got %d %s, want 200", unverified.status, unverified.raw)
 	}
-
-	// The account is untouched: no apple_sub was attached to it.
 	var linked int
 	if err := testPool.QueryRow(context.Background(),
 		`SELECT count(*) FROM user_accounts WHERE email = $1 AND apple_sub IS NOT NULL`,
@@ -177,17 +266,19 @@ func TestAppleAuthRefusesToLinkUnverifiedEmail(t *testing.T) {
 		t.Fatal(err)
 	}
 	if linked != 0 {
-		t.Error("an unverified Apple identity was linked to an existing account")
+		t.Error("an unverified Apple identity was attached to the account at that address")
+	}
+	if n := countRows(t,
+		`SELECT count(*) FROM user_accounts WHERE apple_sub = $1 AND email = $2`,
+		"attacker-sub", "apple_attacker-sub@users.soccercoachkit.app"); n != 1 {
+		t.Error("an unverified address should be stored as the synthesized one")
 	}
 
-	// The password login still works, and a verified token links as before.
+	// The victim's password login still works, untouched.
 	if r := do(t, http.MethodPost, "/api/v1/auth/login", "", map[string]any{
 		"email": email, "password": "password123",
 	}); r.status != http.StatusOK {
 		t.Errorf("password login: %d %s", r.status, r.raw)
-	}
-	if r := appleSignIn(t, "genuine-sub", email, nil); r.status != http.StatusOK {
-		t.Errorf("verified link should still work: %d %s", r.status, r.raw)
 	}
 }
 
@@ -271,4 +362,14 @@ func TestAppleAuthRefusesAPreClaimedPersonID(t *testing.T) {
 	if again := appleSignIn(t, sub, "victim@example.com", nil); again.status != http.StatusOK {
 		t.Fatalf("sign-in after cleanup: expected 200, got %d %s", again.status, again.raw)
 	}
+}
+
+// errCode reads the machine-readable code out of the standard error envelope.
+func errCode(r resp) (string, bool) {
+	envelope, ok := r.body["error"].(map[string]any)
+	if !ok {
+		return "", false
+	}
+	code, ok := envelope["code"].(string)
+	return code, ok
 }

@@ -39,7 +39,7 @@ exist in the schema now:
 | Area | Endpoints |
 |------|-----------|
 | **auth** | `POST /auth/register` (provisions Person + UserAccount + personal Org + admin/director/coach memberships + seeded templates), `/auth/login`, `/auth/apple` (Sign in with Apple — same provisioning; returns `{ token, refreshToken, personID }` for the iOS app), `/auth/refresh` (rotating), `/auth/logout` |
-| **me** | `GET /me` — the authenticated person + their org memberships |
+| **me** | `GET /me` — the authenticated person + their org memberships, `DELETE /me` (full account erasure), `POST /me/apple-link` (attach Sign in with Apple to the account you are signed in as — `/auth/apple` will not join the two on a matching email address, because nothing verifies one) |
 | **persons** | `POST /persons` (add an athlete), `GET /persons/:id`, `GET /persons/:id/instances`, `GET /persons/:id/aggregate` |
 | **teams** | `GET/POST /teams`, `GET/DELETE /teams/:id`, `POST /teams/:id/roster`, `DELETE /teams/:id/roster/:personId` |
 | **evaluation** | `GET/POST /templates`, `GET /templates/:id`, `POST /form-instances`, `GET /form-instances/:id` |
