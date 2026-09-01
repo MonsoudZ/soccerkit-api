@@ -12,7 +12,18 @@ import (
 
 func (s *Server) handleGetMe(w http.ResponseWriter, r *http.Request) {
 	person, err := s.store.GetPerson(r.Context(), personIDFrom(r.Context()))
-	if err != nil {
+	if errors.Is(err, pgx.ErrNoRows) {
+		// The access token outlives the row it names — handleDeleteMe says so, and is
+		// built around it. This is the read side of the same fact, and it used to fall
+		// through to a 500: for up to JWT_ACCESS_TTL after a successful account
+		// deletion, the app's own "who am I" call reported a server fault. A client
+		// cannot tell that from an outage, so the reasonable response — keep the
+		// session, retry — is the wrong one, and the deletion the 204 completed looks
+		// half-finished. 401 says the true thing: the token is valid and identifies
+		// nobody, so sign out.
+		writeError(w, errUnauthorized("this account no longer exists"))
+		return
+	} else if err != nil {
 		writeError(w, err)
 		return
 	}

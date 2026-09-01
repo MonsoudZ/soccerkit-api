@@ -278,3 +278,21 @@ func TestDeleteMeSparesAnOrgTheCallerOnlyBelongsTo(t *testing.T) {
 		t.Errorf("owner should still see their team, got %s", teams.raw)
 	}
 }
+
+// TestMeAfterAccountDeletionIsUnauthorized — the access token outlives the row it names,
+// which handleDeleteMe is built around. The read side used to fall through to a 500, so
+// for up to JWT_ACCESS_TTL after a successful deletion the app's own "who am I" call
+// reported a server fault, which a client cannot tell from an outage.
+func TestMeAfterAccountDeletionIsUnauthorized(t *testing.T) {
+	resetDB(t)
+	token, _ := registerUser(t, "gone@example.com")
+
+	if r := do(t, http.MethodDelete, "/api/v1/me", token, nil); r.status != http.StatusNoContent {
+		t.Fatalf("delete: %d %s", r.status, r.raw)
+	}
+	me := do(t, http.MethodGet, "/api/v1/me", token, nil)
+	if me.status != http.StatusUnauthorized {
+		t.Fatalf("GET /me with a token whose account is gone: got %d %s, want 401",
+			me.status, me.raw)
+	}
+}
