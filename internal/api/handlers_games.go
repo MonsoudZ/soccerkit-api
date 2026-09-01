@@ -100,6 +100,14 @@ func (s *Server) gameInOrg(r *http.Request, oc orgContext) (store.Game, error) {
 	if game.OrganizationID != oc.orgID {
 		return store.Game{}, errForbidden("that game is not in your organization")
 	}
+	// The game's team has to still exist. DELETE /teams tombstones rather than dropping
+	// (so the deletion reaches sync clients), and games carry no tombstone of their own,
+	// so a game stayed readable — and patchable — by id after its team was gone: the
+	// team 404s, its game list 404s, and you could still record the result of the match.
+	// teamByIDInOrg is the same check every other team-scoped route already makes.
+	if _, err := s.teamByIDInOrg(r.Context(), oc, game.TeamID); err != nil {
+		return store.Game{}, errNotFound("game not found")
+	}
 	return game, nil
 }
 

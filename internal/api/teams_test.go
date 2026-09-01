@@ -172,3 +172,35 @@ func TestCreatePersonAlwaysLinksToTheOrg(t *testing.T) {
 		}
 	}
 }
+
+// TestGamesDieWithTheirTeam — DELETE /teams tombstones rather than dropping the row (so
+// the deletion reaches sync clients) and games carry no tombstone of their own, so a
+// game stayed readable and patchable by id after its team was gone: you could still
+// record the result of a match for a team that no longer existed.
+func TestGamesDieWithTheirTeam(t *testing.T) {
+	resetDB(t)
+	coach, _ := registerUser(t, "gamedel@e.com")
+
+	team := do(t, http.MethodPost, "/api/v1/teams", coach, map[string]any{"name": "U12"})
+	teamID, _ := team.body["id"].(string)
+	game := do(t, http.MethodPost, "/api/v1/teams/"+teamID+"/games", coach, map[string]any{
+		"opponent": "Rivals", "homeAway": "home",
+	})
+	if game.status != http.StatusCreated {
+		t.Fatalf("create game: %d %s", game.status, game.raw)
+	}
+	gameID, _ := game.body["id"].(string)
+
+	if r := do(t, http.MethodDelete, "/api/v1/teams/"+teamID, coach, nil); r.status != http.StatusOK {
+		t.Fatalf("delete team: %d %s", r.status, r.raw)
+	}
+
+	if r := do(t, http.MethodGet, "/api/v1/games/"+gameID, coach, nil); r.status != http.StatusNotFound {
+		t.Errorf("GET a deleted team's game: got %d %s, want 404", r.status, r.raw)
+	}
+	if r := do(t, http.MethodPatch, "/api/v1/games/"+gameID, coach, map[string]any{
+		"ourScore": 3, "opponentScore": 1,
+	}); r.status != http.StatusNotFound {
+		t.Errorf("PATCH a deleted team's game: got %d %s, want 404", r.status, r.raw)
+	}
+}
