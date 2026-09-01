@@ -460,6 +460,20 @@ func (s *Server) templateFor(r *http.Request, oc orgContext, id uuid.UUID) (stor
 	return tpl, nil
 }
 
+// maxAnswerMagnitude bounds every numeric answer. A "scale" field declares its own
+// range in config and a "number" field declares nothing, so 1e308 was a valid number of
+// goals — and two of them overflowed the running sum inside
+// AggregateScoresForPerson's avg(), which failed the whole query. Not just that key:
+// the aggregate is one GROUP BY over every answer about the athlete, so an ordinary
+// check-in filed afterwards was unreadable too, and no endpoint deletes a form instance
+// or an answer, so it stayed that way.
+//
+// 1e12 is far outside anything a coach records (goals, minutes, a 1-5 scale) and far
+// inside float8's ceiling, which is the property that matters: the sum of any realistic
+// number of these cannot overflow. The query was also made overflow-proof, because
+// validation added today does nothing about rows written yesterday.
+const maxAnswerMagnitude = 1e12
+
 // scaleConfig is the shape a "scale" field stores in form_fields.config.
 type scaleConfig struct {
 	Min *float64 `json:"min"`
@@ -490,6 +504,10 @@ func validateAnswer(field store.FormField, numeric *float64, boolean *bool, text
 		}
 		if math.IsNaN(*numeric) || math.IsInf(*numeric, 0) {
 			return errValidation(field.Key + " must be a finite number")
+		}
+		if math.Abs(*numeric) > maxAnswerMagnitude {
+			return errValidation(fmt.Sprintf("%s must be between %g and %g",
+				field.Key, -maxAnswerMagnitude, maxAnswerMagnitude))
 		}
 		if field.Kind == "scale" {
 			return validateScaleRange(field, *numeric)

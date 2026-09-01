@@ -1,6 +1,7 @@
 package api_test
 
 import (
+	"context"
 	"net/http"
 	"testing"
 )
@@ -229,5 +230,70 @@ func TestTemplateRejectsDuplicateFieldKeys(t *testing.T) {
 	})
 	if r.status != http.StatusBadRequest {
 		t.Fatalf("duplicate field key: got %d %s, want 400", r.status, r.raw)
+	}
+}
+
+// TestNumericAnswersAreBounded, and TestAggregateSurvivesUnboundedLegacyAnswers below,
+// are the two halves of one defect: a "number" field declared no range, so 1e308 was a
+// valid number of goals, and two of them overflowed the sum inside the aggregate's
+// avg(). That failed the whole query — every key about that athlete, not just the one
+// with the big values — and no endpoint deletes a form instance or an answer, so it
+// stayed failed.
+func TestNumericAnswersAreBounded(t *testing.T) {
+	resetDB(t)
+	token, personID := registerUser(t, "bounds@example.com")
+	tpl := templateID(t, token, "post_game")
+
+	for _, v := range []float64{1e308, -1e308} {
+		r := do(t, http.MethodPost, "/api/v1/form-instances", token, map[string]any{
+			"templateId": tpl, "subjectPersonId": personID,
+			"answers": []map[string]any{{"key": "goals", "numericValue": v}},
+		})
+		if r.status != http.StatusBadRequest {
+			t.Errorf("goals = %g: got %d %s, want 400", v, r.status, r.raw)
+		}
+	}
+	// An ordinary score is untouched.
+	if r := do(t, http.MethodPost, "/api/v1/form-instances", token, map[string]any{
+		"templateId": tpl, "subjectPersonId": personID,
+		"answers": []map[string]any{{"key": "goals", "numericValue": 2}},
+	}); r.status != http.StatusCreated {
+		t.Errorf("goals = 2: got %d %s, want 201", r.status, r.raw)
+	}
+}
+
+// TestAggregateSurvivesUnboundedLegacyAnswers covers what validation cannot: rows
+// written before the bound existed. They are unreachable through the API, so the query
+// itself has to tolerate them.
+func TestAggregateSurvivesUnboundedLegacyAnswers(t *testing.T) {
+	resetDB(t)
+	ctx := context.Background()
+	token, personID := registerUser(t, "legacy@example.com")
+	tpl := templateID(t, token, "post_game")
+
+	// Two answers at the ceiling, written the way the old code would have accepted them.
+	for i := 0; i < 2; i++ {
+		created := do(t, http.MethodPost, "/api/v1/form-instances", token, map[string]any{
+			"templateId": tpl, "subjectPersonId": personID,
+			"answers": []map[string]any{{"key": "goals", "numericValue": 1}},
+		})
+		if created.status != http.StatusCreated {
+			t.Fatalf("submit: %d %s", created.status, created.raw)
+		}
+		instanceID, _ := created.body["id"].(string)
+		if _, err := testPool.Exec(ctx,
+			`UPDATE form_answers SET numeric_value = 1e308 WHERE instance_id = $1`,
+			instanceID); err != nil {
+			t.Fatalf("plant a legacy answer: %v", err)
+		}
+	}
+
+	agg := do(t, http.MethodGet, "/api/v1/persons/"+personID+"/aggregate", token, nil)
+	if agg.status != http.StatusOK {
+		t.Fatalf("aggregate over out-of-range legacy answers: got %d %s, want 200",
+			agg.status, agg.raw)
+	}
+	if len(agg.arr()) == 0 {
+		t.Errorf("expected the aggregate to still report the athlete: %s", agg.raw)
 	}
 }

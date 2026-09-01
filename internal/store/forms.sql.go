@@ -15,7 +15,7 @@ import (
 const aggregateScoresForPerson = `-- name: AggregateScoresForPerson :many
 SELECT ff.key, ff.label,
     count(fa.numeric_value)::bigint      AS samples,
-    avg(fa.numeric_value)::double precision AS average,
+    avg(fa.numeric_value::numeric)::double precision AS average,
     min(fa.numeric_value)::double precision AS minimum,
     max(fa.numeric_value)::double precision AS maximum
 FROM form_instances fi
@@ -45,6 +45,19 @@ type AggregateScoresForPersonRow struct {
 
 // The moat query: cross-instance aggregation of scored fields for one athlete,
 // optionally scoped to a context. Powers readiness means, effort trends, etc.
+//
+// The average accumulates in numeric, not double precision. avg() over float8 sums in
+// float8, so two answers near the type's ceiling overflowed the running sum and the
+// whole query failed — every key at once, not just the one with the big values, because
+// this is one GROUP BY over every answer about the athlete:
+//
+//	ERROR: value out of range: overflow (SQLSTATE 22003)
+//
+// validateAnswer now bounds what can be written (see maxAnswerMagnitude), but rows
+// already in the table are not reachable by any endpoint — nothing in this API deletes a
+// form instance or an answer — so a validation-only fix would leave existing athletes
+// with a permanently 500ing aggregate. numeric has no such ceiling, and the average of
+// values that each fit in float8 always fits in float8 on the way back out.
 func (q *Queries) AggregateScoresForPerson(ctx context.Context, arg AggregateScoresForPersonParams) ([]AggregateScoresForPersonRow, error) {
 	rows, err := q.db.Query(ctx, aggregateScoresForPerson, arg.SubjectPersonID, arg.Context)
 	if err != nil {
