@@ -222,8 +222,21 @@ func (s *Server) handleRefresh(w http.ResponseWriter, r *http.Request) {
 		writeError(w, errUnauthorized("invalid or expired refresh token"))
 		return
 	}
-	if err := s.store.RevokeRefreshToken(ctx, stored.ID); err != nil {
+	// The revoke is the guard, not a formality after one. Reading the row and then
+	// revoking it unconditionally is a check-then-act with nothing between the two
+	// statements, and simultaneous presentations of one token all passed the check
+	// before any of them wrote: 32 concurrent redemptions of a single token produced six
+	// live families, none of which tripped the replay cascade. Zero rows here means
+	// another request took this token microseconds ago, which is the same situation the
+	// grace window above exists for — a retry, not a theft — so it is refused without
+	// the cascade rather than treated as evidence.
+	rotated, err := s.store.RevokeRefreshToken(ctx, stored.ID)
+	if err != nil {
 		writeError(w, err)
+		return
+	}
+	if rotated == 0 {
+		writeError(w, errUnauthorized("invalid or expired refresh token"))
 		return
 	}
 	account, err := s.store.GetUserAccountByID(ctx, stored.UserAccountID)

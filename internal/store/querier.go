@@ -135,7 +135,18 @@ type Querier interface {
 	// roster arm matters because an athlete can be added to a team without a membership
 	// row of their own.
 	PersonVisibleInOrg(ctx context.Context, arg PersonVisibleInOrgParams) (bool, error)
-	RevokeRefreshToken(ctx context.Context, id uuid.UUID) error
+	// Rotation's single-use guard, not a follow-up to one. handleRefresh used to read the
+	// row, decide it was live, and then revoke it unconditionally — a check-then-act with
+	// nothing between the two statements, so concurrent presentations of one token all read
+	// it before any of them wrote and every one of them minted a fresh family (measured: 6
+	// live chains from 32 simultaneous redemptions of a single token). That is the exact
+	// invariant reuse detection rests on: one token, one use, and a second use is evidence.
+	//
+	// The predicate makes the write itself the arbiter. Zero rows means somebody else
+	// redeemed this token between our read and our write, which the caller treats the same
+	// way it treats a replay inside the grace window — microseconds apart is the retry case,
+	// not the theft case.
+	RevokeRefreshToken(ctx context.Context, id uuid.UUID) (int64, error)
 	// Revoke every live token for one account. Used when a already-rotated token is
 	// presented again: that is a replay, and the only safe reading is that the chain has
 	// leaked, so the whole family goes rather than just the one token.

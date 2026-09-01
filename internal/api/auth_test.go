@@ -306,3 +306,59 @@ func TestConcurrentRegistrationConflicts(t *testing.T) {
 		t.Errorf("the rest should be 409, got %d", conflict)
 	}
 }
+
+// TestOneRefreshTokenRedeemsOnce pins rotation's single-use invariant against
+// concurrency. handleRefresh used to read the row, decide it was live, and revoke it in
+// a separate unconditional statement — a check-then-act that simultaneous presentations
+// of one token all passed before any of them wrote. Measured against that code: 32
+// concurrent redemptions of a single token produced six independent live families, and
+// none of them tripped the replay cascade, which is precisely the case the cascade
+// exists for.
+func TestOneRefreshTokenRedeemsOnce(t *testing.T) {
+	resetDB(t)
+
+	reg := do(t, http.MethodPost, "/api/v1/auth/register", "", map[string]any{
+		"email": "race@example.com", "password": "password123", "displayName": "Race",
+	})
+	if reg.status != http.StatusCreated {
+		t.Fatalf("register: %d %s", reg.status, reg.raw)
+	}
+	refresh, _ := reg.body["refreshToken"].(string)
+
+	const attempts = 32
+	var wg sync.WaitGroup
+	var mu sync.Mutex
+	var issued []string
+	start := make(chan struct{})
+	for i := 0; i < attempts; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			<-start
+			res := do(t, http.MethodPost, "/api/v1/auth/refresh", "", map[string]any{
+				"refreshToken": refresh,
+			})
+			if res.status == http.StatusOK {
+				tok, _ := res.body["refreshToken"].(string)
+				mu.Lock()
+				issued = append(issued, tok)
+				mu.Unlock()
+			}
+		}()
+	}
+	close(start)
+	wg.Wait()
+
+	if len(issued) != 1 {
+		t.Fatalf("%d of %d concurrent redemptions of one token succeeded; a refresh token "+
+			"is single-use, so exactly one must win", len(issued), attempts)
+	}
+	// The one that won is a working chain — refusing them all would also satisfy the
+	// count above and would log the coach out for refreshing twice.
+	next := do(t, http.MethodPost, "/api/v1/auth/refresh", "", map[string]any{
+		"refreshToken": issued[0],
+	})
+	if next.status != http.StatusOK {
+		t.Errorf("the surviving chain should still rotate: %d %s", next.status, next.raw)
+	}
+}

@@ -665,13 +665,27 @@ func (q *Queries) PersonVisibleInOrg(ctx context.Context, arg PersonVisibleInOrg
 	return exists, err
 }
 
-const revokeRefreshToken = `-- name: RevokeRefreshToken :exec
-UPDATE refresh_tokens SET revoked_at = now() WHERE id = $1
+const revokeRefreshToken = `-- name: RevokeRefreshToken :execrows
+UPDATE refresh_tokens SET revoked_at = now() WHERE id = $1 AND revoked_at IS NULL
 `
 
-func (q *Queries) RevokeRefreshToken(ctx context.Context, id uuid.UUID) error {
-	_, err := q.db.Exec(ctx, revokeRefreshToken, id)
-	return err
+// Rotation's single-use guard, not a follow-up to one. handleRefresh used to read the
+// row, decide it was live, and then revoke it unconditionally — a check-then-act with
+// nothing between the two statements, so concurrent presentations of one token all read
+// it before any of them wrote and every one of them minted a fresh family (measured: 6
+// live chains from 32 simultaneous redemptions of a single token). That is the exact
+// invariant reuse detection rests on: one token, one use, and a second use is evidence.
+//
+// The predicate makes the write itself the arbiter. Zero rows means somebody else
+// redeemed this token between our read and our write, which the caller treats the same
+// way it treats a replay inside the grace window — microseconds apart is the retry case,
+// not the theft case.
+func (q *Queries) RevokeRefreshToken(ctx context.Context, id uuid.UUID) (int64, error) {
+	result, err := q.db.Exec(ctx, revokeRefreshToken, id)
+	if err != nil {
+		return 0, err
+	}
+	return result.RowsAffected(), nil
 }
 
 const revokeRefreshTokensForAccount = `-- name: RevokeRefreshTokensForAccount :exec
