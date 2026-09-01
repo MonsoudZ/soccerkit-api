@@ -11,18 +11,26 @@ quoted verbatim. Findings without that marker are read-only observations.
 
 Baseline health: `go vet`, `go build` and `go test ./...` all pass clean.
 
+> **Status.** C1, C2 and H1–H4 were fixed in the three commits following this report
+> (`Scope sync upserts to the account that owns the row`, `Make organization scoping an
+> invariant, not a convention`, `Reject wrong-typed fields in PATCH /games instead of
+> nulling them`). Every reproduction below was re-run against the fixed code and now
+> fails closed. The findings are left described in the present tense as a record of what
+> was wrong and why. M1–M7 and L1–L7 are still open.
+
 ---
 
 ## Summary
 
 | # | Severity | Finding |
 |---|----------|---------|
-| C1 | **Critical** | Sync push writes across tenants — any row can be overwritten and stolen by id |
-| C2 | **Critical** | `GET /persons/{id}` (+ `/instances`, `/aggregate`) has no authorization — minors' medical PII |
-| H1 | High | `GET /templates/{id}` and `GET /form-instances/{id}` have no authorization |
-| H2 | High | `POST /form-instances` does not scope template or subject to the caller's org |
-| H3 | High | `POST /teams/{id}/roster` accepts any Person id, from any org |
-| H4 | High | `PATCH /games/{id}` type confusion silently nulls fields |
+<!-- ✅ = fixed; see Status above -->
+| C1 ✅ | **Critical** | Sync push writes across tenants — any row can be overwritten and stolen by id |
+| C2 ✅ | **Critical** | `GET /persons/{id}` (+ `/instances`, `/aggregate`) has no authorization — minors' medical PII |
+| H1 ✅ | High | `GET /templates/{id}` and `GET /form-instances/{id}` have no authorization |
+| H2 ✅ | High | `POST /form-instances` does not scope template or subject to the caller's org |
+| H3 ✅ | High | `POST /teams/{id}/roster` accepts any Person id, from any org |
+| H4 ✅ | High | `PATCH /games/{id}` type confusion silently nulls fields |
 | M1 | Medium | REST endpoints ignore the sync `deleted` tombstone |
 | M2 | Medium | `DELETE /teams/{id}` hard-deletes with no tombstone |
 | M3 | Medium | Form answers are not validated against their field's kind or config |
