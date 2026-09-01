@@ -11,12 +11,16 @@ quoted verbatim. Findings without that marker are read-only observations.
 
 Baseline health: `go vet`, `go build` and `go test ./...` all pass clean.
 
-> **Status.** C1, C2 and H1–H4 were fixed in the three commits following this report
-> (`Scope sync upserts to the account that owns the row`, `Make organization scoping an
-> invariant, not a convention`, `Reject wrong-typed fields in PATCH /games instead of
-> nulling them`). Every reproduction below was re-run against the fixed code and now
-> fails closed. The findings are left described in the present tense as a record of what
-> was wrong and why. M1–M7 and L1–L7 are still open.
+> **Status.** C1, C2, H1–H4 and M1–M7 are fixed in the commits following this report.
+> Every reproduction below was re-run against the fixed code and now fails closed. The
+> findings are left described in the present tense as a record of what was wrong and
+> why. **L1–L7 are still open.**
+>
+> Three of the fixes changed behaviour deliberately, and each is worth knowing about:
+> `POST /persons` replaces `asPlayer` with `role` and always creates a membership;
+> `DELETE /teams/{id}` and `DELETE /sessions/{id}` tombstone instead of hard-deleting,
+> so the deletion reaches sync clients; and migration `0005` deletes existing refresh
+> tokens, so everyone signs in once more.
 
 ---
 
@@ -31,13 +35,13 @@ Baseline health: `go vet`, `go build` and `go test ./...` all pass clean.
 | H2 ✅ | High | `POST /form-instances` does not scope template or subject to the caller's org |
 | H3 ✅ | High | `POST /teams/{id}/roster` accepts any Person id, from any org |
 | H4 ✅ | High | `PATCH /games/{id}` type confusion silently nulls fields |
-| M1 | Medium | REST endpoints ignore the sync `deleted` tombstone |
-| M2 | Medium | `DELETE /teams/{id}` hard-deletes with no tombstone |
-| M3 | Medium | Form answers are not validated against their field's kind or config |
-| M4 | Medium | No rate limiting, no request body cap, no sync batch cap |
-| M5 | Medium | Refresh tokens stored in plaintext; no reuse detection |
-| M6 | Medium | Apple sign-in links accounts by email without checking `email_verified` |
-| M7 | Medium | Unknown `kid` triggers a JWKS fetch on every request |
+| M1 ✅ | Medium | REST endpoints ignore the sync `deleted` tombstone |
+| M2 ✅ | Medium | `DELETE /teams/{id}` hard-deletes with no tombstone |
+| M3 ✅ | Medium | Form answers are not validated against their field's kind or config |
+| M4 ✅ | Medium | No rate limiting, no request body cap, no sync batch cap |
+| M5 ✅ | Medium | Refresh tokens stored in plaintext; no reuse detection |
+| M6 ✅ | Medium | Apple sign-in links accounts by email without checking `email_verified` |
+| M7 ✅ | Medium | Unknown `kid` triggers a JWKS fetch on every request |
 | L1 | Low | CORS `AllowedHeaders` omits `X-Organization-ID` |
 | L2 | Low | OpenAPI spec is missing `/auth/apple` and `/sync` |
 | L3 | Low | Login timing side channel enables user enumeration |
