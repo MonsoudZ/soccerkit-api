@@ -14,6 +14,15 @@ func isUniqueViolation(err error) bool {
 	return errors.As(err, &pgErr) && pgErr.Code == "23505"
 }
 
+// isUntranslatableCharacter reports whether err is Postgres 22P05, which jsonb raises
+// for a character it cannot store as text — in practice a \u0000 escape. That is legal
+// JSON and illegal in the column, so it is the caller's input that is wrong, not the
+// server.
+func isUntranslatableCharacter(err error) bool {
+	var pgErr *pgconn.PgError
+	return errors.As(err, &pgErr) && pgErr.Code == "22P05"
+}
+
 // apiError is a typed HTTP error rendered as a consistent JSON envelope.
 type apiError struct {
 	status  int

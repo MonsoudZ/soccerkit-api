@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"net/http"
 	"strings"
 	"testing"
@@ -420,5 +421,47 @@ func TestRequestBodyIsCapped(t *testing.T) {
 	r := do(t, http.MethodPost, "/api/v1/drills", coach, map[string]any{"name": huge})
 	if r.status != http.StatusBadRequest {
 		t.Fatalf("oversized body: got %d, want 400", r.status)
+	}
+}
+
+// TestSyncRejectsAnUnstorableCharacter — a NUL escape is valid JSON and illegal in
+// jsonb, and the failure used to abort the push as a bare 500. An offline-first client
+// retries the batch it failed to push, so that device stopped syncing until the record
+// was changed on the phone; a 400 naming the record is something it can act on.
+func TestSyncRejectsAnUnstorableCharacter(t *testing.T) {
+	resetDB(t)
+	token, _ := registerUser(t, "unstorable@example.com")
+
+	body := `{"upserts":[{"type":"Note","id":"note-1","payload":{"text":"hello` +
+		"\\u0000" + `world"}}]}`
+	req, err := http.NewRequest(http.MethodPost, testServer.URL+"/api/v1/sync", strings.NewReader(body))
+	if err != nil {
+		t.Fatal(err)
+	}
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Authorization", "Bearer "+token)
+	res, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer res.Body.Close()
+	raw, _ := io.ReadAll(res.Body)
+	if res.StatusCode != http.StatusBadRequest {
+		t.Fatalf("a payload with a NUL escape: got %d %s, want 400", res.StatusCode, raw)
+	}
+	if !strings.Contains(string(raw), "note-1") {
+		t.Errorf("the error should name the offending record: %s", raw)
+	}
+
+	// Nothing was written, and the account can still sync.
+	if n := countRows(t, `SELECT count(*) FROM sync_documents`); n != 0 {
+		t.Errorf("the rejected push wrote %d rows", n)
+	}
+	if r := do(t, http.MethodPost, "/api/v1/sync", token, map[string]any{
+		"upserts": []map[string]any{
+			{"type": "Note", "id": "note-2", "payload": map[string]any{"text": "fine"}},
+		},
+	}); r.status != http.StatusOK {
+		t.Errorf("a later clean push: %d %s", r.status, r.raw)
 	}
 }

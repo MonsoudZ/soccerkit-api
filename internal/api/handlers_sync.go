@@ -120,7 +120,7 @@ func (s *Server) handleSyncPush(w http.ResponseWriter, r *http.Request) {
 		}
 		ok, err := s.applyUpsert(ctx, q, account, org.orgID, rec)
 		if err != nil {
-			writeError(w, err)
+			writeError(w, syncRecordError(err, rec.Type, rec.ID))
 			return
 		}
 		if !ok {
@@ -134,7 +134,7 @@ func (s *Server) handleSyncPush(w http.ResponseWriter, r *http.Request) {
 		}
 		ok, err := s.applyDelete(ctx, q, account, key)
 		if err != nil {
-			writeError(w, err)
+			writeError(w, syncRecordError(err, key.Type, key.ID))
 			return
 		}
 		if !ok {
@@ -320,6 +320,24 @@ func (s *Server) applyDelete(ctx context.Context, q *store.Queries, account uuid
 			SyncAccountID: account, Type: key.Type, ID: key.ID,
 		}))
 	}
+}
+
+// syncRecordError names the record a failed statement was applying, and turns the one
+// failure mode the client can act on into a 400.
+//
+// A payload carrying a \u0000 escape is valid JSON that jsonb refuses (22P05), and it
+// used to abort the push with a bare 500. That is worse than it sounds for an
+// offline-first client: it retries the batch it failed to push, the batch fails
+// identically every time, and that device stops syncing until the offending record is
+// changed on the phone. A 400 naming the record is something the client can act on;
+// everything else is still an unexplained server error, because it is one.
+func syncRecordError(err error, recType, id string) error {
+	if isUntranslatableCharacter(err) {
+		return errValidation(fmt.Sprintf(
+			"%s %s: the payload contains a character that cannot be stored (a \\u0000 escape); "+
+				"remove it and push again", recType, id))
+	}
+	return err
 }
 
 // applied turns a sqlc :execrows result into "did this write land". Zero rows means
