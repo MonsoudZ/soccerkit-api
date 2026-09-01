@@ -177,23 +177,23 @@ func (q *Queries) CreatePersonWithID(ctx context.Context, arg CreatePersonWithID
 }
 
 const createRefreshToken = `-- name: CreateRefreshToken :one
-INSERT INTO refresh_tokens (token, user_account_id, expires_at)
+INSERT INTO refresh_tokens (token_hash, user_account_id, expires_at)
 VALUES ($1, $2, $3)
-RETURNING id, token, user_account_id, expires_at, revoked_at, created_at
+RETURNING id, token_hash, user_account_id, expires_at, revoked_at, created_at
 `
 
 type CreateRefreshTokenParams struct {
-	Token         string             `json:"token"`
+	TokenHash     string             `json:"token_hash"`
 	UserAccountID uuid.UUID          `json:"user_account_id"`
 	ExpiresAt     pgtype.Timestamptz `json:"expires_at"`
 }
 
 func (q *Queries) CreateRefreshToken(ctx context.Context, arg CreateRefreshTokenParams) (RefreshToken, error) {
-	row := q.db.QueryRow(ctx, createRefreshToken, arg.Token, arg.UserAccountID, arg.ExpiresAt)
+	row := q.db.QueryRow(ctx, createRefreshToken, arg.TokenHash, arg.UserAccountID, arg.ExpiresAt)
 	var i RefreshToken
 	err := row.Scan(
 		&i.ID,
-		&i.Token,
+		&i.TokenHash,
 		&i.UserAccountID,
 		&i.ExpiresAt,
 		&i.RevokedAt,
@@ -262,6 +262,19 @@ func (q *Queries) DeletePersonsByIDs(ctx context.Context, ids []uuid.UUID) error
 	return err
 }
 
+const deleteRefreshTokenByToken = `-- name: DeleteRefreshTokenByToken :exec
+DELETE FROM refresh_tokens WHERE token_hash = $1
+`
+
+// Logout removes the row outright rather than revoking it. A revoked row is the signal
+// that a token was rotated away, and presenting one again is treated as a replay; a
+// logged-out token must not look like that, or signing out on one device would cascade
+// every other device off too.
+func (q *Queries) DeleteRefreshTokenByToken(ctx context.Context, tokenHash string) error {
+	_, err := q.db.Exec(ctx, deleteRefreshTokenByToken, tokenHash)
+	return err
+}
+
 const getOrganization = `-- name: GetOrganization :one
 SELECT id, name, kind, created_at, updated_at FROM organizations WHERE id = $1
 `
@@ -308,15 +321,15 @@ func (q *Queries) GetPerson(ctx context.Context, id uuid.UUID) (Person, error) {
 }
 
 const getRefreshToken = `-- name: GetRefreshToken :one
-SELECT id, token, user_account_id, expires_at, revoked_at, created_at FROM refresh_tokens WHERE token = $1
+SELECT id, token_hash, user_account_id, expires_at, revoked_at, created_at FROM refresh_tokens WHERE token_hash = $1
 `
 
-func (q *Queries) GetRefreshToken(ctx context.Context, token string) (RefreshToken, error) {
-	row := q.db.QueryRow(ctx, getRefreshToken, token)
+func (q *Queries) GetRefreshToken(ctx context.Context, tokenHash string) (RefreshToken, error) {
+	row := q.db.QueryRow(ctx, getRefreshToken, tokenHash)
 	var i RefreshToken
 	err := row.Scan(
 		&i.ID,
-		&i.Token,
+		&i.TokenHash,
 		&i.UserAccountID,
 		&i.ExpiresAt,
 		&i.RevokedAt,
@@ -601,12 +614,16 @@ func (q *Queries) RevokeRefreshToken(ctx context.Context, id uuid.UUID) error {
 	return err
 }
 
-const revokeRefreshTokenByToken = `-- name: RevokeRefreshTokenByToken :exec
-UPDATE refresh_tokens SET revoked_at = now() WHERE token = $1 AND revoked_at IS NULL
+const revokeRefreshTokensForAccount = `-- name: RevokeRefreshTokensForAccount :exec
+UPDATE refresh_tokens SET revoked_at = now()
+WHERE user_account_id = $1 AND revoked_at IS NULL
 `
 
-func (q *Queries) RevokeRefreshTokenByToken(ctx context.Context, token string) error {
-	_, err := q.db.Exec(ctx, revokeRefreshTokenByToken, token)
+// Revoke every live token for one account. Used when a already-rotated token is
+// presented again: that is a replay, and the only safe reading is that the chain has
+// leaked, so the whole family goes rather than just the one token.
+func (q *Queries) RevokeRefreshTokensForAccount(ctx context.Context, userAccountID uuid.UUID) error {
+	_, err := q.db.Exec(ctx, revokeRefreshTokensForAccount, userAccountID)
 	return err
 }
 

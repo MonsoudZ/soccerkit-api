@@ -1,6 +1,7 @@
 package api_test
 
 import (
+	"context"
 	"net/http"
 	"testing"
 )
@@ -106,5 +107,134 @@ func TestProtectedRouteRequiresAuth(t *testing.T) {
 	resetDB(t)
 	if r := do(t, http.MethodGet, "/api/v1/me", "", nil); r.status != http.StatusUnauthorized {
 		t.Errorf("expected 401 without token, got %d", r.status)
+	}
+}
+
+// TestRefreshTokensAreStoredHashed — the column held the token verbatim, so a copy of
+// the database was a set of working credentials for every account.
+func TestRefreshTokensAreStoredHashed(t *testing.T) {
+	resetDB(t)
+	r := do(t, http.MethodPost, "/api/v1/auth/register", "", map[string]any{
+		"email": "hashed@e.com", "password": "password123", "displayName": "H",
+	})
+	refresh, _ := r.body["refreshToken"].(string)
+	if refresh == "" {
+		t.Fatal("no refresh token issued")
+	}
+
+	var stored string
+	if err := testPool.QueryRow(context.Background(),
+		`SELECT token_hash FROM refresh_tokens`).Scan(&stored); err != nil {
+		t.Fatal(err)
+	}
+	if stored == refresh {
+		t.Fatal("the refresh token is stored in plaintext")
+	}
+	// The stored value must still identify the token, or refresh would not work.
+	if got := do(t, http.MethodPost, "/api/v1/auth/refresh", "", map[string]any{
+		"refreshToken": refresh,
+	}); got.status != http.StatusOK {
+		t.Fatalf("hashed lookup broke refresh: %d %s", got.status, got.raw)
+	}
+}
+
+// TestReplayedRefreshTokenRevokesTheFamily — rotation already refused a replayed
+// token, but left the live chain valid for whoever held it. A replay is evidence the
+// chain leaked, so the whole family goes.
+func TestReplayedRefreshTokenRevokesTheFamily(t *testing.T) {
+	resetDB(t)
+	ctx := context.Background()
+	r := do(t, http.MethodPost, "/api/v1/auth/register", "", map[string]any{
+		"email": "replay@e.com", "password": "password123", "displayName": "R",
+	})
+	stolen, _ := r.body["refreshToken"].(string)
+
+	rotated := do(t, http.MethodPost, "/api/v1/auth/refresh", "", map[string]any{"refreshToken": stolen})
+	if rotated.status != http.StatusOK {
+		t.Fatalf("first refresh: %d %s", rotated.status, rotated.raw)
+	}
+	live, _ := rotated.body["refreshToken"].(string)
+
+	// Age the rotation past the retry grace window, so this reads as a replay rather
+	// than a client re-sending a request whose response it lost.
+	if _, err := testPool.Exec(ctx,
+		`UPDATE refresh_tokens SET revoked_at = now() - interval '5 minutes'
+		  WHERE revoked_at IS NOT NULL`); err != nil {
+		t.Fatal(err)
+	}
+
+	if replay := do(t, http.MethodPost, "/api/v1/auth/refresh", "", map[string]any{
+		"refreshToken": stolen,
+	}); replay.status != http.StatusUnauthorized {
+		t.Fatalf("replay: got %d, want 401", replay.status)
+	}
+
+	// The legitimate chain is now dead too — both parties must sign in again.
+	if after := do(t, http.MethodPost, "/api/v1/auth/refresh", "", map[string]any{
+		"refreshToken": live,
+	}); after.status != http.StatusUnauthorized {
+		t.Errorf("the live chain should be revoked after a replay, got %d %s", after.status, after.raw)
+	}
+
+	// Signing in fresh still works.
+	if login := do(t, http.MethodPost, "/api/v1/auth/login", "", map[string]any{
+		"email": "replay@e.com", "password": "password123",
+	}); login.status != http.StatusOK {
+		t.Errorf("re-login after the cascade: %d %s", login.status, login.raw)
+	}
+}
+
+// TestRefreshRetryWithinGraceDoesNotCascade — this backs an offline-first phone app, so
+// a refresh whose response was lost gets retried with the same token. That must cost
+// one failed retry, not every session on every device.
+func TestRefreshRetryWithinGraceDoesNotCascade(t *testing.T) {
+	resetDB(t)
+	r := do(t, http.MethodPost, "/api/v1/auth/register", "", map[string]any{
+		"email": "retry@e.com", "password": "password123", "displayName": "T",
+	})
+	first, _ := r.body["refreshToken"].(string)
+
+	rotated := do(t, http.MethodPost, "/api/v1/auth/refresh", "", map[string]any{"refreshToken": first})
+	live, _ := rotated.body["refreshToken"].(string)
+
+	// The client retries the request it thinks failed, immediately.
+	if retry := do(t, http.MethodPost, "/api/v1/auth/refresh", "", map[string]any{
+		"refreshToken": first,
+	}); retry.status != http.StatusUnauthorized {
+		t.Fatalf("retry: got %d, want 401", retry.status)
+	}
+	// Its real session survives.
+	if after := do(t, http.MethodPost, "/api/v1/auth/refresh", "", map[string]any{
+		"refreshToken": live,
+	}); after.status != http.StatusOK {
+		t.Errorf("a prompt retry must not revoke the live chain, got %d %s", after.status, after.raw)
+	}
+}
+
+// TestLogoutDoesNotCascadeToOtherDevices — logout deletes its row rather than revoking
+// it, so a signed-out token can never be mistaken for a rotation replay.
+func TestLogoutDoesNotCascadeToOtherDevices(t *testing.T) {
+	resetDB(t)
+	reg := do(t, http.MethodPost, "/api/v1/auth/register", "", map[string]any{
+		"email": "twodevices@e.com", "password": "password123", "displayName": "D",
+	})
+	deviceA, _ := reg.body["refreshToken"].(string)
+
+	login := do(t, http.MethodPost, "/api/v1/auth/login", "", map[string]any{
+		"email": "twodevices@e.com", "password": "password123",
+	})
+	deviceB, _ := login.body["refreshToken"].(string)
+
+	if out := do(t, http.MethodPost, "/api/v1/auth/logout", "", map[string]any{
+		"refreshToken": deviceA,
+	}); out.status != http.StatusOK {
+		t.Fatalf("logout: %d %s", out.status, out.raw)
+	}
+	// Device A's token is dead, and the app retrying it must not take B down.
+	do(t, http.MethodPost, "/api/v1/auth/refresh", "", map[string]any{"refreshToken": deviceA})
+	if b := do(t, http.MethodPost, "/api/v1/auth/refresh", "", map[string]any{
+		"refreshToken": deviceB,
+	}); b.status != http.StatusOK {
+		t.Errorf("signing out one device must not sign out the others, got %d %s", b.status, b.raw)
 	}
 }

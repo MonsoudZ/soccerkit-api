@@ -3,6 +3,7 @@ package api
 import (
 	"context"
 	"crypto/rand"
+	"crypto/sha256"
 	"encoding/base64"
 	"net/http"
 	"strings"
@@ -64,6 +65,10 @@ func (s *Server) parseAccessToken(tokenStr string) (uuid.UUID, error) {
 }
 
 // --- refresh tokens (opaque, DB-backed) -----------------------------------
+// The token is 48 bytes of entropy handed to the client once. Only its SHA-256 is
+// stored, so a copy of the database is not a set of working credentials. A plain hash
+// is the right tool here rather than a KDF: there is no low-entropy secret to grind,
+// and every refresh would pay the KDF's cost.
 
 func newRefreshToken() (string, error) {
 	b := make([]byte, 48)
@@ -71,6 +76,12 @@ func newRefreshToken() (string, error) {
 		return "", err
 	}
 	return base64.RawURLEncoding.EncodeToString(b), nil
+}
+
+// hashRefreshToken maps a token to the value stored in refresh_tokens.token_hash.
+func hashRefreshToken(token string) string {
+	sum := sha256.Sum256([]byte(token))
+	return base64.RawURLEncoding.EncodeToString(sum[:])
 }
 
 // --- middleware -----------------------------------------------------------

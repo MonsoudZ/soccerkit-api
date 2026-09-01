@@ -162,7 +162,7 @@ type Player struct {
 
 type RefreshToken struct {
 	ID            uuid.UUID          `json:"id"`
-	Token         string             `json:"token"`
+	TokenHash     string             `json:"token_hash"`
 	UserAccountID uuid.UUID          `json:"user_account_id"`
 	ExpiresAt     pgtype.Timestamptz `json:"expires_at"`
 	RevokedAt     pgtype.Timestamptz `json:"revoked_at"`

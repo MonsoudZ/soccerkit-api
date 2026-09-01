@@ -157,6 +157,12 @@ type refreshRequest struct {
 	RefreshToken string `json:"refreshToken"`
 }
 
+// refreshReplayGrace is how long after a rotation the superseded token may be presented
+// again without being treated as a stolen-chain replay. Long enough to cover a client
+// retrying a refresh whose response it never received, short enough that a leaked token
+// is of no practical use.
+const refreshReplayGrace = 30 * time.Second
+
 func (s *Server) handleRefresh(w http.ResponseWriter, r *http.Request) {
 	var req refreshRequest
 	if err := decodeJSON(r, &req); err != nil {
@@ -165,7 +171,7 @@ func (s *Server) handleRefresh(w http.ResponseWriter, r *http.Request) {
 	}
 	ctx := r.Context()
 
-	stored, err := s.store.GetRefreshToken(ctx, req.RefreshToken)
+	stored, err := s.store.GetRefreshToken(ctx, hashRefreshToken(req.RefreshToken))
 	if errors.Is(err, pgx.ErrNoRows) {
 		writeError(w, errUnauthorized("invalid or expired refresh token"))
 		return
@@ -173,7 +179,28 @@ func (s *Server) handleRefresh(w http.ResponseWriter, r *http.Request) {
 		writeError(w, err)
 		return
 	}
-	if stored.RevokedAt.Valid || stored.ExpiresAt.Time.Before(time.Now()) {
+	// A token that exists but is already revoked was rotated away by an earlier
+	// refresh, so someone is presenting a copy. Rotation alone would leave the live
+	// chain intact for whoever holds it, so the whole family is revoked and both
+	// parties must sign in again.
+	//
+	// Except immediately after the rotation, which is the one time a replay is more
+	// likely to be honest than hostile: this backs an offline-first phone app, and a
+	// refresh whose response was lost to a dropped connection gets retried with the
+	// same token. Inside the grace window that is refused without the cascade, so a
+	// flaky network costs one retry rather than every session on every device.
+	// An expired token is just expired — no signal, no cascade.
+	if stored.RevokedAt.Valid {
+		if time.Since(stored.RevokedAt.Time) > refreshReplayGrace {
+			if err := s.store.RevokeRefreshTokensForAccount(ctx, stored.UserAccountID); err != nil {
+				writeError(w, err)
+				return
+			}
+		}
+		writeError(w, errUnauthorized("invalid or expired refresh token"))
+		return
+	}
+	if stored.ExpiresAt.Time.Before(time.Now()) {
 		writeError(w, errUnauthorized("invalid or expired refresh token"))
 		return
 	}
@@ -205,7 +232,7 @@ func (s *Server) handleLogout(w http.ResponseWriter, r *http.Request) {
 		writeError(w, err)
 		return
 	}
-	if err := s.store.RevokeRefreshTokenByToken(r.Context(), req.RefreshToken); err != nil {
+	if err := s.store.DeleteRefreshTokenByToken(r.Context(), hashRefreshToken(req.RefreshToken)); err != nil {
 		writeError(w, err)
 		return
 	}
@@ -220,7 +247,7 @@ func (s *Server) issueTokens(ctx context.Context, q *store.Queries, account stor
 		return AuthResponse{}, err
 	}
 	if _, err := q.CreateRefreshToken(ctx, store.CreateRefreshTokenParams{
-		Token:         refresh,
+		TokenHash:     hashRefreshToken(refresh),
 		UserAccountID: account.ID,
 		ExpiresAt:     timestamptz(time.Now().Add(s.cfg.JWTRefreshTTL)),
 	}); err != nil {

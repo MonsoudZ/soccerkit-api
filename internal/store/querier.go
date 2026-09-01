@@ -42,6 +42,11 @@ type Querier interface {
 	DeleteOrganizationsByIDs(ctx context.Context, ids []uuid.UUID) error
 	DeletePersonByID(ctx context.Context, id uuid.UUID) error
 	DeletePersonsByIDs(ctx context.Context, ids []uuid.UUID) error
+	// Logout removes the row outright rather than revoking it. A revoked row is the signal
+	// that a token was rotated away, and presenting one again is treated as a replay; a
+	// logged-out token must not look like that, or signing out on one device would cascade
+	// every other device off too.
+	DeleteRefreshTokenByToken(ctx context.Context, tokenHash string) error
 	// Tombstoned, not dropped — see DeleteTeam.
 	DeleteSession(ctx context.Context, id uuid.UUID) error
 	// A REST delete tombstones rather than dropping the row, so the deletion reaches sync
@@ -57,7 +62,7 @@ type Querier interface {
 	GetGame(ctx context.Context, id uuid.UUID) (Game, error)
 	GetOrganization(ctx context.Context, id uuid.UUID) (Organization, error)
 	GetPerson(ctx context.Context, id uuid.UUID) (Person, error)
-	GetRefreshToken(ctx context.Context, token string) (RefreshToken, error)
+	GetRefreshToken(ctx context.Context, tokenHash string) (RefreshToken, error)
 	GetRosterMembership(ctx context.Context, id uuid.UUID) (RosterMembership, error)
 	GetSession(ctx context.Context, id uuid.UUID) (Session, error)
 	GetTeam(ctx context.Context, id uuid.UUID) (Team, error)
@@ -95,7 +100,10 @@ type Querier interface {
 	// row of their own.
 	PersonVisibleInOrg(ctx context.Context, arg PersonVisibleInOrgParams) (bool, error)
 	RevokeRefreshToken(ctx context.Context, id uuid.UUID) error
-	RevokeRefreshTokenByToken(ctx context.Context, token string) error
+	// Revoke every live token for one account. Used when a already-rotated token is
+	// presented again: that is a replay, and the only safe reading is that the chain has
+	// leaked, so the whole family goes rather than just the one token.
+	RevokeRefreshTokensForAccount(ctx context.Context, userAccountID uuid.UUID) error
 	// Athletes (Persons) whose ONLY organizational linkage is via the org(s) being
 	// deleted. Deleting those orgs strips their membership/roster rows but leaves the
 	// Person itself — name, birthdate, medical notes: minors' PII we are legally

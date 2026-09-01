@@ -61,18 +61,29 @@ SELECT EXISTS (
 );
 
 -- name: CreateRefreshToken :one
-INSERT INTO refresh_tokens (token, user_account_id, expires_at)
+INSERT INTO refresh_tokens (token_hash, user_account_id, expires_at)
 VALUES ($1, $2, $3)
 RETURNING *;
 
 -- name: GetRefreshToken :one
-SELECT * FROM refresh_tokens WHERE token = $1;
+SELECT * FROM refresh_tokens WHERE token_hash = $1;
 
 -- name: RevokeRefreshToken :exec
 UPDATE refresh_tokens SET revoked_at = now() WHERE id = $1;
 
--- name: RevokeRefreshTokenByToken :exec
-UPDATE refresh_tokens SET revoked_at = now() WHERE token = $1 AND revoked_at IS NULL;
+-- name: DeleteRefreshTokenByToken :exec
+-- Logout removes the row outright rather than revoking it. A revoked row is the signal
+-- that a token was rotated away, and presenting one again is treated as a replay; a
+-- logged-out token must not look like that, or signing out on one device would cascade
+-- every other device off too.
+DELETE FROM refresh_tokens WHERE token_hash = $1;
+
+-- name: RevokeRefreshTokensForAccount :exec
+-- Revoke every live token for one account. Used when a already-rotated token is
+-- presented again: that is a replay, and the only safe reading is that the chain has
+-- leaked, so the whole family goes rather than just the one token.
+UPDATE refresh_tokens SET revoked_at = now()
+WHERE user_account_id = $1 AND revoked_at IS NULL;
 
 -- name: CreateGuardianship :one
 INSERT INTO guardianships (guardian_person_id, child_person_id)
