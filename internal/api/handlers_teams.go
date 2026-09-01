@@ -1,9 +1,11 @@
 package api
 
 import (
+	"context"
 	"errors"
 	"net/http"
 
+	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
 
 	"github.com/monsoudz/soccerkit-api/internal/store"
@@ -115,10 +117,10 @@ func (s *Server) handleAddRoster(w http.ResponseWriter, r *http.Request) {
 		writeError(w, err)
 		return
 	}
-	if _, err := s.store.GetPerson(r.Context(), personID); errors.Is(err, pgx.ErrNoRows) {
-		writeError(w, errBadRequest("personId does not reference an existing person"))
-		return
-	} else if err != nil {
+	// Existence is not authorization: without this the roster was a way to attach any
+	// Person id in the database to your own team and then read their name, email and
+	// birthdate straight back out of GET /teams/{id}.
+	if err := s.personVisibleTo(r.Context(), oc, personID); err != nil {
 		writeError(w, err)
 		return
 	}
@@ -220,7 +222,13 @@ func (s *Server) teamInOrg(r *http.Request, oc orgContext) (store.Team, error) {
 	if err != nil {
 		return store.Team{}, err
 	}
-	team, err := s.store.GetTeam(r.Context(), id)
+	return s.teamByIDInOrg(r.Context(), oc, id)
+}
+
+// teamByIDInOrg is teamInOrg for a team id that came from somewhere other than the
+// path — a request body, or a form instance's subject.
+func (s *Server) teamByIDInOrg(ctx context.Context, oc orgContext, id uuid.UUID) (store.Team, error) {
+	team, err := s.store.GetTeam(ctx, id)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return store.Team{}, errNotFound("team not found")
 	} else if err != nil {
@@ -230,4 +238,27 @@ func (s *Server) teamInOrg(r *http.Request, oc orgContext) (store.Team, error) {
 		return store.Team{}, errForbidden("that team is not in your organization")
 	}
 	return team, nil
+}
+
+// personVisibleTo reports whether the caller's organization may see a Person, and is
+// the check the person, roster and evaluation endpoints share.
+//
+// A Person is visible when they hold a membership in the caller's org, are rostered on
+// one of its teams, or are the caller themselves. Everything else is a 404 rather than
+// a 403: these ids are not enumerable, and answering "forbidden" would confirm that a
+// given id exists, which is itself a disclosure about someone in another club.
+func (s *Server) personVisibleTo(ctx context.Context, oc orgContext, personID uuid.UUID) error {
+	if personID == personIDFrom(ctx) {
+		return nil
+	}
+	visible, err := s.store.PersonVisibleInOrg(ctx, store.PersonVisibleInOrgParams{
+		PersonID: personID, OrganizationID: oc.orgID,
+	})
+	if err != nil {
+		return err
+	}
+	if !visible {
+		return errNotFound("person not found")
+	}
+	return nil
 }

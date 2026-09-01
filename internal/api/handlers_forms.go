@@ -92,11 +92,13 @@ func (s *Server) handleGetTemplate(w http.ResponseWriter, r *http.Request) {
 		writeError(w, err)
 		return
 	}
-	tpl, err := s.store.GetFormTemplate(r.Context(), id)
-	if errors.Is(err, pgx.ErrNoRows) {
-		writeError(w, errNotFound("template not found"))
+	oc, err := s.resolveOrg(r)
+	if err != nil {
+		writeError(w, err)
 		return
-	} else if err != nil {
+	}
+	tpl, err := s.templateFor(r, oc, id)
+	if err != nil {
 		writeError(w, err)
 		return
 	}
@@ -272,13 +274,25 @@ func (s *Server) handleSubmitInstance(w http.ResponseWriter, r *http.Request) {
 		ctxRefID = &id
 	}
 
-	template, err := s.store.GetFormTemplate(r.Context(), templateID)
-	if errors.Is(err, pgx.ErrNoRows) {
-		writeError(w, errBadRequest("templateId does not reference a template"))
-		return
-	} else if err != nil {
+	template, err := s.templateFor(r, oc, templateID)
+	if err != nil {
 		writeError(w, err)
 		return
+	}
+	// The subject must be someone this organization can evaluate. Without this, an
+	// instance could be filed against another club's athlete, and the scores would land
+	// in that athlete's aggregate.
+	if subjectPerson != nil {
+		if err := s.personVisibleTo(r.Context(), oc, *subjectPerson); err != nil {
+			writeError(w, err)
+			return
+		}
+	}
+	if subjectTeam != nil {
+		if _, err := s.teamByIDInOrg(r.Context(), oc, *subjectTeam); err != nil {
+			writeError(w, err)
+			return
+		}
 	}
 	fields, err := s.store.ListFormFields(r.Context(), templateID)
 	if err != nil {
@@ -345,6 +359,11 @@ func (s *Server) handleGetInstance(w http.ResponseWriter, r *http.Request) {
 		writeError(w, err)
 		return
 	}
+	oc, err := s.resolveOrg(r)
+	if err != nil {
+		writeError(w, err)
+		return
+	}
 	instance, err := s.store.GetFormInstance(r.Context(), id)
 	if errors.Is(err, pgx.ErrNoRows) {
 		writeError(w, errNotFound("instance not found"))
@@ -352,6 +371,21 @@ func (s *Server) handleGetInstance(w http.ResponseWriter, r *http.Request) {
 	} else if err != nil {
 		writeError(w, err)
 		return
+	}
+	// An instance is as sensitive as its subject: it carries that athlete's scored
+	// answers. Gate on the subject rather than the template, because a template can be
+	// shared while the answers about a given child are not.
+	if instance.SubjectPersonID != nil {
+		if err := s.personVisibleTo(r.Context(), oc, *instance.SubjectPersonID); err != nil {
+			writeError(w, errNotFound("instance not found"))
+			return
+		}
+	}
+	if instance.SubjectTeamID != nil {
+		if _, err := s.teamByIDInOrg(r.Context(), oc, *instance.SubjectTeamID); err != nil {
+			writeError(w, errNotFound("instance not found"))
+			return
+		}
 	}
 	template, err := s.store.GetFormTemplate(r.Context(), instance.TemplateID)
 	if err != nil {
@@ -373,4 +407,24 @@ func (s *Server) handleGetInstance(w http.ResponseWriter, r *http.Request) {
 		ContextRefType: instance.ContextRefType, ContextRefID: instance.ContextRefID,
 		SubmittedAt: rfc3339(instance.SubmittedAt), Answers: answerDTOs,
 	})
+}
+
+// templateFor loads a form template and verifies the caller may use it: it belongs to
+// their organization, or they authored it (organization_id is NULL for the personal
+// templates a coach carries between clubs). Both columns are nullable, so both are
+// nil-checked before comparing.
+func (s *Server) templateFor(r *http.Request, oc orgContext, id uuid.UUID) (store.FormTemplate, error) {
+	tpl, err := s.store.GetFormTemplate(r.Context(), id)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return store.FormTemplate{}, errNotFound("template not found")
+	} else if err != nil {
+		return store.FormTemplate{}, err
+	}
+	callerID := personIDFrom(r.Context())
+	inOrg := tpl.OrganizationID != nil && *tpl.OrganizationID == oc.orgID
+	mine := tpl.AuthorPersonID != nil && *tpl.AuthorPersonID == callerID
+	if !inOrg && !mine {
+		return store.FormTemplate{}, errNotFound("template not found")
+	}
+	return tpl, nil
 }

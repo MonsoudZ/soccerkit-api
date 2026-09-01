@@ -124,11 +124,21 @@ func TestDeleteMeSparesSharedAthlete(t *testing.T) {
 
 	// Athlete belongs to coach A's org (membership) but is also rostered on a
 	// team in coach B's org.
+	//
+	// The roster row is written directly rather than through POST /teams/{id}/roster:
+	// that endpoint now refuses a Person outside the caller's organization, because
+	// accepting one let any coach attach an arbitrary Person id to their own team and
+	// read the athlete's PII back out. Sharing an athlete across clubs is a real future
+	// case that needs its own consented flow; until then the state is only reachable
+	// here, and what this test is actually about is the deletion cascade's behaviour
+	// once it exists.
 	shared := createAthlete(t, coachA, "Shared Kid")
 	teamB := do(t, http.MethodPost, "/api/v1/teams", coachB, map[string]any{"name": "B Team"})
 	teamBID := teamB.body["id"].(string)
-	if add := do(t, http.MethodPost, "/api/v1/teams/"+teamBID+"/roster", coachB, map[string]any{"personId": shared}); add.status != http.StatusCreated {
-		t.Fatalf("coach B roster shared athlete: %d %s", add.status, add.raw)
+	if _, err := testPool.Exec(context.Background(),
+		`INSERT INTO roster_memberships (person_id, team_id) VALUES ($1, $2)`,
+		shared, teamBID); err != nil {
+		t.Fatalf("link shared athlete to coach B's team: %v", err)
 	}
 
 	if del := do(t, http.MethodDelete, "/api/v1/me", coachA, nil); del.status != http.StatusNoContent {

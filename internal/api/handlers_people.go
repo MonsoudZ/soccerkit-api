@@ -4,6 +4,7 @@ import (
 	"errors"
 	"net/http"
 
+	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
 
 	"github.com/monsoudz/soccerkit-api/internal/store"
@@ -33,9 +34,15 @@ type createPersonRequest struct {
 	EmergencyContactName  *string `json:"emergencyContactName"`
 	EmergencyContactPhone *string `json:"emergencyContactPhone"`
 	MedicalNotes          *string `json:"medicalNotes"`
-	// When true (default), the new person is enrolled as a player in the org.
-	AsPlayer *bool `json:"asPlayer"`
+	// Role the new person holds in the caller's organization. Defaults to "player".
+	// Always produces a membership: a Person with no org linkage would be visible to
+	// nobody, not even the coach who just created them.
+	Role *string `json:"role"`
 }
+
+// personRoles are the roles POST /persons may grant. The endpoint creates Persons with
+// no login, so it deliberately cannot mint the privileged admin/director/coach roles.
+var personRoles = map[string]bool{"player": true, "parent": true}
 
 // handleCreatePerson creates an athlete (a Person, usually with no login) in the
 // coach's organization.
@@ -63,6 +70,14 @@ func (s *Server) handleCreatePerson(w http.ResponseWriter, r *http.Request) {
 		writeError(w, err)
 		return
 	}
+	role := "player"
+	if req.Role != nil {
+		role = *req.Role
+	}
+	if !personRoles[role] {
+		writeError(w, errValidation("role must be player or parent"))
+		return
+	}
 
 	tx, err := s.pool.Begin(r.Context())
 	if err != nil {
@@ -82,13 +97,11 @@ func (s *Server) handleCreatePerson(w http.ResponseWriter, r *http.Request) {
 		writeError(w, err)
 		return
 	}
-	if req.AsPlayer == nil || *req.AsPlayer {
-		if _, err := q.CreateMembership(r.Context(), store.CreateMembershipParams{
-			PersonID: person.ID, OrganizationID: oc.orgID, Role: "player",
-		}); err != nil {
-			writeError(w, err)
-			return
-		}
+	if _, err := q.CreateMembership(r.Context(), store.CreateMembershipParams{
+		PersonID: person.ID, OrganizationID: oc.orgID, Role: role,
+	}); err != nil {
+		writeError(w, err)
+		return
 	}
 	if err := tx.Commit(r.Context()); err != nil {
 		writeError(w, err)
@@ -98,7 +111,7 @@ func (s *Server) handleCreatePerson(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleGetPerson(w http.ResponseWriter, r *http.Request) {
-	id, err := pathUUID(r, "id")
+	id, _, err := s.visiblePersonFromPath(r)
 	if err != nil {
 		writeError(w, err)
 		return
@@ -115,7 +128,7 @@ func (s *Server) handleGetPerson(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleListPersonInstances(w http.ResponseWriter, r *http.Request) {
-	id, err := pathUUID(r, "id")
+	id, _, err := s.visiblePersonFromPath(r)
 	if err != nil {
 		writeError(w, err)
 		return
@@ -140,7 +153,7 @@ func (s *Server) handleListPersonInstances(w http.ResponseWriter, r *http.Reques
 // handlePersonAggregate returns cross-instance score averages for an athlete —
 // the readiness-mean / effort-trend query that is the product's analytical core.
 func (s *Server) handlePersonAggregate(w http.ResponseWriter, r *http.Request) {
-	id, err := pathUUID(r, "id")
+	id, _, err := s.visiblePersonFromPath(r)
 	if err != nil {
 		writeError(w, err)
 		return
@@ -158,4 +171,23 @@ func (s *Server) handlePersonAggregate(w http.ResponseWriter, r *http.Request) {
 		out[i] = aggregateDTO(row)
 	}
 	writeJSON(w, http.StatusOK, out)
+}
+
+// visiblePersonFromPath resolves the {id} path parameter to a Person the caller's
+// organization is allowed to see. Every read keyed on a person id goes through here —
+// these endpoints return birthdate, contact details and medical notes, so an
+// unauthenticated-by-org read is a disclosure of a minor's PII.
+func (s *Server) visiblePersonFromPath(r *http.Request) (uuid.UUID, orgContext, error) {
+	id, err := pathUUID(r, "id")
+	if err != nil {
+		return uuid.Nil, orgContext{}, err
+	}
+	oc, err := s.resolveOrg(r)
+	if err != nil {
+		return uuid.Nil, orgContext{}, err
+	}
+	if err := s.personVisibleTo(r.Context(), oc, id); err != nil {
+		return uuid.Nil, orgContext{}, err
+	}
+	return id, oc, nil
 }

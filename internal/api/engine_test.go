@@ -110,3 +110,47 @@ func TestCreateCustomTemplate(t *testing.T) {
 		t.Errorf("expected 2 fields, got %d", len(fields))
 	}
 }
+
+// TestEvaluationIsScopedToTheOrg — templates and instances were readable, and
+// instances writable, by any authenticated account that knew an id.
+func TestEvaluationIsScopedToTheOrg(t *testing.T) {
+	resetDB(t)
+	coachA, _ := registerUser(t, "evalA@e.com")
+	coachB, _ := registerUser(t, "evalB@e.com")
+	athleteA := createAthlete(t, coachA, "A's Athlete")
+	templateA := templateID(t, coachA, "pre_game")
+
+	// Coach B cannot read coach A's template.
+	if r := do(t, http.MethodGet, "/api/v1/templates/"+templateA, coachB, nil); r.status != http.StatusNotFound {
+		t.Errorf("cross-org template read: got %d %s, want 404", r.status, r.raw)
+	}
+
+	// Nor submit against it, nor against A's athlete.
+	if r := do(t, http.MethodPost, "/api/v1/form-instances", coachB, map[string]any{
+		"templateId": templateA, "subjectPersonId": athleteA,
+		"answers": []map[string]any{{"key": "sleep", "numericValue": 999999}},
+	}); r.status != http.StatusNotFound {
+		t.Errorf("cross-org submit: got %d %s, want 404", r.status, r.raw)
+	}
+
+	// A's aggregate is untouched by the attempt.
+	if agg := do(t, http.MethodGet, "/api/v1/persons/"+athleteA+"/aggregate", coachA, nil).arr(); len(agg) != 0 {
+		t.Errorf("aggregate should be empty, got %v", agg)
+	}
+
+	// And an instance A legitimately records is not readable by B.
+	inst := do(t, http.MethodPost, "/api/v1/form-instances", coachA, map[string]any{
+		"templateId": templateA, "subjectPersonId": athleteA,
+		"answers": []map[string]any{{"key": "sleep", "numericValue": 4}},
+	})
+	if inst.status != http.StatusCreated {
+		t.Fatalf("owner submit: %d %s", inst.status, inst.raw)
+	}
+	instID, _ := inst.body["id"].(string)
+	if r := do(t, http.MethodGet, "/api/v1/form-instances/"+instID, coachB, nil); r.status != http.StatusNotFound {
+		t.Errorf("cross-org instance read: got %d %s, want 404", r.status, r.raw)
+	}
+	if r := do(t, http.MethodGet, "/api/v1/form-instances/"+instID, coachA, nil); r.status != http.StatusOK {
+		t.Errorf("owner instance read: got %d %s, want 200", r.status, r.raw)
+	}
+}

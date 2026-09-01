@@ -85,6 +85,10 @@ type Querier interface {
 	ListSyncChangesSince(ctx context.Context, arg ListSyncChangesSinceParams) ([]ListSyncChangesSinceRow, error)
 	ListTeamsForPerson(ctx context.Context, personID uuid.UUID) ([]ListTeamsForPersonRow, error)
 	ListTeamsInOrg(ctx context.Context, organizationID uuid.UUID) ([]ListTeamsInOrgRow, error)
+	// Whether an organization may see a Person at all: they hold a membership in it, or
+	// they are rostered on one of its teams. The roster arm matters because an athlete
+	// can be added to a team without a membership row of their own.
+	PersonVisibleInOrg(ctx context.Context, arg PersonVisibleInOrgParams) (bool, error)
 	RevokeRefreshToken(ctx context.Context, id uuid.UUID) error
 	RevokeRefreshTokenByToken(ctx context.Context, token string) error
 	// Athletes (Persons) whose ONLY organizational linkage is via the org(s) being

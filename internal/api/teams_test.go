@@ -69,3 +69,86 @@ func TestTeamIsolatedByOrg(t *testing.T) {
 		t.Errorf("cross-org team delete should be 403, got %d", r.status)
 	}
 }
+
+// TestPersonReadsAreScopedToTheOrg covers the read side of the org boundary. These
+// endpoints return birthdate, contact details and medical notes, and none of them used
+// to check anything beyond "is the caller authenticated".
+func TestPersonReadsAreScopedToTheOrg(t *testing.T) {
+	resetDB(t)
+	coachA, _ := registerUser(t, "readA@e.com")
+	coachB, _ := registerUser(t, "readB@e.com")
+
+	create := do(t, http.MethodPost, "/api/v1/persons", coachA, map[string]any{
+		"displayName": "Kid Athlete", "birthdate": "2015-04-01",
+		"medicalNotes": "severe peanut allergy", "emergencyContactPhone": "+15550001111",
+	})
+	if create.status != http.StatusCreated {
+		t.Fatalf("create person: %d %s", create.status, create.raw)
+	}
+	athlete, _ := create.body["id"].(string)
+
+	for _, path := range []string{
+		"/api/v1/persons/" + athlete,
+		"/api/v1/persons/" + athlete + "/instances",
+		"/api/v1/persons/" + athlete + "/aggregate",
+	} {
+		if r := do(t, http.MethodGet, path, coachB, nil); r.status != http.StatusNotFound {
+			t.Errorf("GET %s as another org: got %d %s, want 404", path, r.status, r.raw)
+		}
+		// The owning coach still gets through.
+		if r := do(t, http.MethodGet, path, coachA, nil); r.status != http.StatusOK {
+			t.Errorf("GET %s as the owner: got %d %s, want 200", path, r.status, r.raw)
+		}
+	}
+}
+
+// TestRosterRejectsPersonOutsideTheOrg — existence is not authorization. Attaching an
+// arbitrary Person id to your own team used to expose their name, email and birthdate
+// through GET /teams/{id}, and left a roster link that made the athlete survive their
+// own coach's account deletion.
+func TestRosterRejectsPersonOutsideTheOrg(t *testing.T) {
+	resetDB(t)
+	coachA, _ := registerUser(t, "rosterA@e.com")
+	coachB, _ := registerUser(t, "rosterB@e.com")
+
+	athlete := createAthlete(t, coachA, "Minor Athlete")
+	teamB := do(t, http.MethodPost, "/api/v1/teams", coachB, map[string]any{"name": "B Team"})
+	teamBID, _ := teamB.body["id"].(string)
+
+	add := do(t, http.MethodPost, "/api/v1/teams/"+teamBID+"/roster", coachB, map[string]any{"personId": athlete})
+	if add.status != http.StatusNotFound {
+		t.Fatalf("cross-org roster attach: got %d %s, want 404", add.status, add.raw)
+	}
+	team := do(t, http.MethodGet, "/api/v1/teams/"+teamBID, coachB, nil)
+	if roster, _ := team.body["roster"].([]any); len(roster) != 0 {
+		t.Errorf("attacker's roster should be empty, got %v", roster)
+	}
+}
+
+// TestCreatePersonAlwaysLinksToTheOrg — a Person with no org linkage would be visible
+// to nobody, including the coach who created them, so every created Person gets a
+// membership and the endpoint refuses to mint privileged roles.
+func TestCreatePersonAlwaysLinksToTheOrg(t *testing.T) {
+	resetDB(t)
+	coach, _ := registerUser(t, "roles@e.com")
+
+	parent := do(t, http.MethodPost, "/api/v1/persons", coach, map[string]any{
+		"displayName": "A Parent", "role": "parent",
+	})
+	if parent.status != http.StatusCreated {
+		t.Fatalf("create parent: %d %s", parent.status, parent.raw)
+	}
+	parentID, _ := parent.body["id"].(string)
+	if r := do(t, http.MethodGet, "/api/v1/persons/"+parentID, coach, nil); r.status != http.StatusOK {
+		t.Errorf("a person created with role=parent must stay readable, got %d %s", r.status, r.raw)
+	}
+
+	for _, role := range []string{"admin", "director", "coach", "wizard"} {
+		r := do(t, http.MethodPost, "/api/v1/persons", coach, map[string]any{
+			"displayName": "Nope", "role": role,
+		})
+		if r.status != http.StatusBadRequest {
+			t.Errorf("role=%q should be rejected, got %d %s", role, r.status, r.raw)
+		}
+	}
+}

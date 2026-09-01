@@ -588,7 +588,15 @@ components:
         emergencyContactName: { type: string }
         emergencyContactPhone: { type: string }
         medicalNotes: { type: string }
-        asPlayer: { type: boolean, default: true, description: Enroll as a player in the org }
+        role:
+          type: string
+          enum: [player, parent]
+          default: player
+          description: >
+            Role the new person holds in your organization. Every person created here is
+            enrolled in it — a person with no organizational linkage would be visible to
+            nobody, including you. Only the unprivileged roles can be granted this way,
+            because the person has no login.
     Team:
       type: object
       properties:

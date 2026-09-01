@@ -149,3 +149,16 @@ INSERT INTO persons (id, display_name, email)
 VALUES ($1, $2, $3)
 ON CONFLICT (id) DO UPDATE SET display_name = EXCLUDED.display_name, updated_at = now()
 RETURNING *;
+
+-- name: PersonVisibleInOrg :one
+-- Whether an organization may see a Person at all: they hold a membership in it, or
+-- they are rostered on one of its teams. The roster arm matters because an athlete
+-- can be added to a team without a membership row of their own.
+SELECT EXISTS (
+    SELECT 1 FROM memberships m
+     WHERE m.person_id = $1 AND m.organization_id = $2
+    UNION ALL
+    SELECT 1 FROM roster_memberships rm
+      JOIN teams t ON t.id = rm.team_id
+     WHERE rm.person_id = $1 AND t.organization_id = $2
+);
