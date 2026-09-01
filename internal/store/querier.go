@@ -28,6 +28,8 @@ type Querier interface {
 	CreateGame(ctx context.Context, arg CreateGameParams) (Game, error)
 	CreateGuardianship(ctx context.Context, arg CreateGuardianshipParams) (Guardianship, error)
 	CreateMembership(ctx context.Context, arg CreateMembershipParams) (Membership, error)
+	// owner_person_id is not optional in practice: it is what account deletion selects on,
+	// and an org created without one can never be deleted by the person who made it.
 	CreateOrganization(ctx context.Context, arg CreateOrganizationParams) (Organization, error)
 	CreatePerson(ctx context.Context, arg CreatePersonParams) (Person, error)
 	// Create a Person at an explicit id — the coach's deterministic account Person, so it
@@ -97,11 +99,19 @@ type Querier interface {
 	// resolveOrg takes the first row as the caller's default org when no X-Organization-ID
 	// is sent. Without the tie-break that default is whatever Postgres happens to return.
 	ListMembershipsForPerson(ctx context.Context, personID uuid.UUID) ([]ListMembershipsForPersonRow, error)
-	// The personal org(s) this person owns. A personal org is created with its owner
-	// as sole member (see handleRegister), so "member of a personal org" == "owns
-	// it". Club orgs the caller merely belongs to are intentionally excluded: account
-	// deletion removes the caller from the club (via their membership), not the club.
-	ListPersonalOrgIDsForPerson(ctx context.Context, personID uuid.UUID) ([]uuid.UUID, error)
+	// The personal org(s) this person owns, selected on organizations.owner_person_id.
+	//
+	// This used to select on membership and argue that the two were the same thing —
+	// "a personal org is created with its owner as sole member, so member == owner". That
+	// held only because nothing could add a second member to an org. Once something can, a
+	// plain member deleting their own account deletes the org out from under its owner. The
+	// name said "ForPerson" and meant "belonging to"; it now means "owned by", which is why
+	// it is renamed rather than quietly reworded.
+	//
+	// Club orgs stay excluded even when the caller owns one: whether deleting a club
+	// owner's account should destroy the club is a product decision that has not been made,
+	// and the conservative answer — orphan it, leave the data — matches today's behaviour.
+	ListOwnedPersonalOrgIDsForPerson(ctx context.Context, ownerPersonID *uuid.UUID) ([]uuid.UUID, error)
 	ListRolesInOrg(ctx context.Context, arg ListRolesInOrgParams) ([]string, error)
 	ListSessionBlocks(ctx context.Context, sessionID uuid.UUID) ([]ListSessionBlocksRow, error)
 	ListSessionsInOrg(ctx context.Context, arg ListSessionsInOrgParams) ([]Session, error)

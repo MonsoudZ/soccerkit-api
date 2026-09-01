@@ -73,6 +73,13 @@ func seed(ctx context.Context, pool *pgxpool.Pool, hash string) error {
 			return err
 		}
 	}
+	// Set after the coach exists, since the org row is inserted first: an org with no
+	// owner is one DELETE /me can never clean up.
+	if _, err := pool.Exec(ctx, `
+		UPDATE organizations SET owner_person_id = $2 WHERE id = $1 AND owner_person_id IS NULL`,
+		orgID, coachID); err != nil {
+		return err
+	}
 
 	// A team and three athletes on its roster.
 	if _, err := pool.Exec(ctx, `

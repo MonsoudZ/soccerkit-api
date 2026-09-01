@@ -14,7 +14,7 @@ import (
 // delete of an already-gone account — returns 204, never 500. The access token
 // (a JWT) outlives the row it points at, so a call whose Person is already gone
 // must succeed too; every DELETE below is a no-op on rows that are already
-// absent, and ListPersonalOrgIDsForPerson simply returns nothing.
+// absent, and ListOwnedPersonalOrgIDsForPerson simply returns nothing.
 //
 // The cascade has three moving parts, run in order:
 //
@@ -24,8 +24,11 @@ import (
 //     required to erase). ON DELETE CASCADE will not reach them, so they are
 //     deleted explicitly. See SelectOrphanedAthletePersonIDs for the multi-org
 //     guard that spares a shared athlete still rostered under another coach.
-//  2. The caller's personal org(s) — cascades teams, drills, sessions,
-//     templates, games, roster memberships and share-grants.
+//  2. The caller's personal org(s) — the ones they *own*, per
+//     organizations.owner_person_id — cascading teams, drills, sessions, templates,
+//     games, roster memberships and share-grants. Ownership is the load-bearing word:
+//     this used to select every personal org the caller was a member of, which is the
+//     same set only for as long as nothing can add a second member to an org.
 //  3. The caller's own Person — cascades their user_account, refresh tokens,
 //     memberships, guardianships, submitted form instances, and every
 //     sync-owned row (players/events/diagrams/sync_documents and any
@@ -42,7 +45,7 @@ func (s *Server) handleDeleteMe(w http.ResponseWriter, r *http.Request) {
 	defer tx.Rollback(ctx)
 	q := s.store.WithTx(tx)
 
-	orgIDs, err := q.ListPersonalOrgIDsForPerson(ctx, callerID)
+	orgIDs, err := q.ListOwnedPersonalOrgIDsForPerson(ctx, &callerID)
 	if err != nil {
 		writeError(w, err)
 		return

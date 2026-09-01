@@ -121,11 +121,12 @@ type Membership struct {
 }
 
 type Organization struct {
-	ID        uuid.UUID          `json:"id"`
-	Name      string             `json:"name"`
-	Kind      string             `json:"kind"`
-	CreatedAt pgtype.Timestamptz `json:"created_at"`
-	UpdatedAt pgtype.Timestamptz `json:"updated_at"`
+	ID            uuid.UUID          `json:"id"`
+	Name          string             `json:"name"`
+	Kind          string             `json:"kind"`
+	CreatedAt     pgtype.Timestamptz `json:"created_at"`
+	UpdatedAt     pgtype.Timestamptz `json:"updated_at"`
+	OwnerPersonID *uuid.UUID         `json:"owner_person_id"`
 }
 
 type Person struct {

@@ -91,7 +91,9 @@ func (s *Server) handleRegister(w http.ResponseWriter, r *http.Request) {
 		writeError(w, err)
 		return
 	}
-	org, err := q.CreateOrganization(ctx, store.CreateOrganizationParams{Name: orgName, Kind: "personal"})
+	org, err := q.CreateOrganization(ctx, store.CreateOrganizationParams{
+		Name: orgName, Kind: "personal", OwnerPersonID: &person.ID,
+	})
 	if err != nil {
 		writeError(w, err)
 		return

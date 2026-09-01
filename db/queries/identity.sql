@@ -1,5 +1,7 @@
 -- name: CreateOrganization :one
-INSERT INTO organizations (name, kind) VALUES ($1, $2) RETURNING *;
+-- owner_person_id is not optional in practice: it is what account deletion selects on,
+-- and an org created without one can never be deleted by the person who made it.
+INSERT INTO organizations (name, kind, owner_person_id) VALUES ($1, $2, $3) RETURNING *;
 
 -- name: GetOrganization :one
 SELECT * FROM organizations WHERE id = $1;
@@ -100,15 +102,22 @@ JOIN persons p ON p.id = g.child_person_id
 WHERE g.guardian_person_id = $1
 ORDER BY p.display_name ASC;
 
--- name: ListPersonalOrgIDsForPerson :many
--- The personal org(s) this person owns. A personal org is created with its owner
--- as sole member (see handleRegister), so "member of a personal org" == "owns
--- it". Club orgs the caller merely belongs to are intentionally excluded: account
--- deletion removes the caller from the club (via their membership), not the club.
-SELECT DISTINCT o.id
-FROM memberships m
-JOIN organizations o ON o.id = m.organization_id
-WHERE m.person_id = $1 AND o.kind = 'personal';
+-- name: ListOwnedPersonalOrgIDsForPerson :many
+-- The personal org(s) this person owns, selected on organizations.owner_person_id.
+--
+-- This used to select on membership and argue that the two were the same thing —
+-- "a personal org is created with its owner as sole member, so member == owner". That
+-- held only because nothing could add a second member to an org. Once something can, a
+-- plain member deleting their own account deletes the org out from under its owner. The
+-- name said "ForPerson" and meant "belonging to"; it now means "owned by", which is why
+-- it is renamed rather than quietly reworded.
+--
+-- Club orgs stay excluded even when the caller owns one: whether deleting a club
+-- owner's account should destroy the club is a product decision that has not been made,
+-- and the conservative answer — orphan it, leave the data — matches today's behaviour.
+SELECT o.id
+FROM organizations o
+WHERE o.owner_person_id = $1 AND o.kind = 'personal';
 
 -- name: SelectOrphanedAthletePersonIDs :many
 -- Athletes (Persons) whose ONLY organizational linkage is via the org(s) being

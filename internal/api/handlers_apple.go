@@ -187,7 +187,7 @@ func (s *Server) provisionAppleIdentity(
 		return store.Person{}, store.UserAccount{}, err
 	}
 	org, err := q.CreateOrganization(ctx, store.CreateOrganizationParams{
-		Name: displayName + "'s Club", Kind: "personal",
+		Name: displayName + "'s Club", Kind: "personal", OwnerPersonID: &person.ID,
 	})
 	if err != nil {
 		return store.Person{}, store.UserAccount{}, err

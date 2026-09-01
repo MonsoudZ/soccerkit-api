@@ -63,16 +63,19 @@ func (q *Queries) CreateMembership(ctx context.Context, arg CreateMembershipPara
 }
 
 const createOrganization = `-- name: CreateOrganization :one
-INSERT INTO organizations (name, kind) VALUES ($1, $2) RETURNING id, name, kind, created_at, updated_at
+INSERT INTO organizations (name, kind, owner_person_id) VALUES ($1, $2, $3) RETURNING id, name, kind, created_at, updated_at, owner_person_id
 `
 
 type CreateOrganizationParams struct {
-	Name string `json:"name"`
-	Kind string `json:"kind"`
+	Name          string     `json:"name"`
+	Kind          string     `json:"kind"`
+	OwnerPersonID *uuid.UUID `json:"owner_person_id"`
 }
 
+// owner_person_id is not optional in practice: it is what account deletion selects on,
+// and an org created without one can never be deleted by the person who made it.
 func (q *Queries) CreateOrganization(ctx context.Context, arg CreateOrganizationParams) (Organization, error) {
-	row := q.db.QueryRow(ctx, createOrganization, arg.Name, arg.Kind)
+	row := q.db.QueryRow(ctx, createOrganization, arg.Name, arg.Kind, arg.OwnerPersonID)
 	var i Organization
 	err := row.Scan(
 		&i.ID,
@@ -80,6 +83,7 @@ func (q *Queries) CreateOrganization(ctx context.Context, arg CreateOrganization
 		&i.Kind,
 		&i.CreatedAt,
 		&i.UpdatedAt,
+		&i.OwnerPersonID,
 	)
 	return i, err
 }
@@ -290,7 +294,7 @@ func (q *Queries) DeleteRefreshTokenByToken(ctx context.Context, tokenHash strin
 }
 
 const getOrganization = `-- name: GetOrganization :one
-SELECT id, name, kind, created_at, updated_at FROM organizations WHERE id = $1
+SELECT id, name, kind, created_at, updated_at, owner_person_id FROM organizations WHERE id = $1
 `
 
 func (q *Queries) GetOrganization(ctx context.Context, id uuid.UUID) (Organization, error) {
@@ -302,6 +306,7 @@ func (q *Queries) GetOrganization(ctx context.Context, id uuid.UUID) (Organizati
 		&i.Kind,
 		&i.CreatedAt,
 		&i.UpdatedAt,
+		&i.OwnerPersonID,
 	)
 	return i, err
 }
@@ -530,19 +535,26 @@ func (q *Queries) ListMembershipsForPerson(ctx context.Context, personID uuid.UU
 	return items, nil
 }
 
-const listPersonalOrgIDsForPerson = `-- name: ListPersonalOrgIDsForPerson :many
-SELECT DISTINCT o.id
-FROM memberships m
-JOIN organizations o ON o.id = m.organization_id
-WHERE m.person_id = $1 AND o.kind = 'personal'
+const listOwnedPersonalOrgIDsForPerson = `-- name: ListOwnedPersonalOrgIDsForPerson :many
+SELECT o.id
+FROM organizations o
+WHERE o.owner_person_id = $1 AND o.kind = 'personal'
 `
 
-// The personal org(s) this person owns. A personal org is created with its owner
-// as sole member (see handleRegister), so "member of a personal org" == "owns
-// it". Club orgs the caller merely belongs to are intentionally excluded: account
-// deletion removes the caller from the club (via their membership), not the club.
-func (q *Queries) ListPersonalOrgIDsForPerson(ctx context.Context, personID uuid.UUID) ([]uuid.UUID, error) {
-	rows, err := q.db.Query(ctx, listPersonalOrgIDsForPerson, personID)
+// The personal org(s) this person owns, selected on organizations.owner_person_id.
+//
+// This used to select on membership and argue that the two were the same thing —
+// "a personal org is created with its owner as sole member, so member == owner". That
+// held only because nothing could add a second member to an org. Once something can, a
+// plain member deleting their own account deletes the org out from under its owner. The
+// name said "ForPerson" and meant "belonging to"; it now means "owned by", which is why
+// it is renamed rather than quietly reworded.
+//
+// Club orgs stay excluded even when the caller owns one: whether deleting a club
+// owner's account should destroy the club is a product decision that has not been made,
+// and the conservative answer — orphan it, leave the data — matches today's behaviour.
+func (q *Queries) ListOwnedPersonalOrgIDsForPerson(ctx context.Context, ownerPersonID *uuid.UUID) ([]uuid.UUID, error) {
+	rows, err := q.db.Query(ctx, listOwnedPersonalOrgIDsForPerson, ownerPersonID)
 	if err != nil {
 		return nil, err
 	}

@@ -206,3 +206,75 @@ func TestDeleteMeAfterSelfEvaluation(t *testing.T) {
 		t.Errorf("the org's templates should be gone, found %d", n)
 	}
 }
+
+// TestDeleteMeSparesAnOrgTheCallerOnlyBelongsTo is the ownership half of the cascade.
+//
+// Account deletion used to select the orgs to delete by membership — every personal org
+// the caller belonged to — on the reasoning that a personal org has exactly one member,
+// which is true of the code that creates orgs and enforced nowhere. So a second member
+// of someone else's org deleted that org, and everything in it, by deleting their own
+// account. Nothing in today's API can add that second member, which is the only reason
+// this was not a live bug; the membership below is written directly, standing in for the
+// invite endpoint that clubs will need.
+func TestDeleteMeSparesAnOrgTheCallerOnlyBelongsTo(t *testing.T) {
+	resetDB(t)
+	ctx := context.Background()
+	owner, ownerPerson := registerUser(t, "owner@e.com")
+	joiner, joinerPerson := registerUser(t, "joiner@e.com")
+
+	// Every org gets an owner at creation; deletion selects on that column, so an org
+	// without one would be undeletable by the person who made it.
+	var ownerOrg string
+	if err := testPool.QueryRow(ctx,
+		`SELECT id::text FROM organizations WHERE owner_person_id = $1`, ownerPerson).
+		Scan(&ownerOrg); err != nil {
+		t.Fatalf("the registering coach should own exactly one org: %v", err)
+	}
+
+	team := do(t, http.MethodPost, "/api/v1/teams", owner, map[string]any{"name": "Owner's U12"})
+	if team.status != http.StatusCreated {
+		t.Fatalf("create team: %d %s", team.status, team.raw)
+	}
+	athlete := createAthlete(t, owner, "Owner's Athlete")
+
+	// The joiner belongs to the owner's org without owning it.
+	if _, err := testPool.Exec(ctx,
+		`INSERT INTO memberships (person_id, organization_id, role) VALUES ($1, $2, 'player')`,
+		joinerPerson, ownerOrg); err != nil {
+		t.Fatalf("add joiner to the owner's org: %v", err)
+	}
+
+	if del := do(t, http.MethodDelete, "/api/v1/me", joiner, nil); del.status != http.StatusNoContent {
+		t.Fatalf("joiner delete: expected 204, got %d %s", del.status, del.raw)
+	}
+
+	// The joiner's own account and org are gone.
+	if n := countRows(t, `SELECT count(*) FROM persons WHERE id = $1`, joinerPerson); n != 0 {
+		t.Errorf("joiner Person should be deleted, found %d", n)
+	}
+	if n := countRows(t, `SELECT count(*) FROM organizations WHERE owner_person_id = $1`, joinerPerson); n != 0 {
+		t.Errorf("joiner's own org should be deleted, found %d", n)
+	}
+	// Their membership in the owner's org goes with them, but nothing else does.
+	if n := countRows(t, `SELECT count(*) FROM memberships WHERE organization_id = $1`, ownerOrg); n == 0 {
+		t.Errorf("the owner's own memberships should survive, found %d", n)
+	}
+
+	// The owner's organization is intact, in the database and through the API.
+	if n := countRows(t, `SELECT count(*) FROM organizations WHERE id = $1`, ownerOrg); n != 1 {
+		t.Fatalf("the owner's org must survive a member's account deletion, found %d", n)
+	}
+	if n := countRows(t, `SELECT count(*) FROM persons WHERE id = $1`, ownerPerson); n != 1 {
+		t.Errorf("the owner's Person must survive, found %d", n)
+	}
+	if n := countRows(t, `SELECT count(*) FROM persons WHERE id = $1`, athlete); n != 1 {
+		t.Errorf("the owner's athlete must survive, found %d", n)
+	}
+	teams := do(t, http.MethodGet, "/api/v1/teams", owner, nil)
+	if teams.status != http.StatusOK {
+		t.Fatalf("owner GET /teams: expected 200, got %d %s", teams.status, teams.raw)
+	}
+	if len(teams.arr()) != 1 {
+		t.Errorf("owner should still see their team, got %s", teams.raw)
+	}
+}
