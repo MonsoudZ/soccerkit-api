@@ -90,9 +90,13 @@ func (q *Queries) CreateTeam(ctx context.Context, arg CreateTeamParams) (Team, e
 }
 
 const deleteTeam = `-- name: DeleteTeam :exec
-DELETE FROM teams WHERE id = $1
+UPDATE teams SET deleted = true, seq = nextval('sync_seq'), updated_at = now()
+WHERE id = $1
 `
 
+// A REST delete tombstones rather than dropping the row, so the deletion reaches sync
+// clients. A hard DELETE produced no row for ListSyncChangesSince to return, so a device
+// holding the team was never told it was gone and re-created it on its next push.
 func (q *Queries) DeleteTeam(ctx context.Context, id uuid.UUID) error {
 	_, err := q.db.Exec(ctx, deleteTeam, id)
 	return err
@@ -179,7 +183,7 @@ func (q *Queries) GetRosterMembership(ctx context.Context, id uuid.UUID) (Roster
 }
 
 const getTeam = `-- name: GetTeam :one
-SELECT id, organization_id, name, age_group, season, created_at, updated_at, sync_account_id, payload, deleted, seq FROM teams WHERE id = $1
+SELECT id, organization_id, name, age_group, season, created_at, updated_at, sync_account_id, payload, deleted, seq FROM teams WHERE id = $1 AND deleted = false
 `
 
 func (q *Queries) GetTeam(ctx context.Context, id uuid.UUID) (Team, error) {
@@ -206,7 +210,7 @@ SELECT r.id, r.jersey_number, r.position, r.joined_on, r.status,
     p.id AS person_id, p.display_name, p.email, p.birthdate
 FROM roster_memberships r
 JOIN persons p ON p.id = r.person_id
-WHERE r.team_id = $1 AND r.left_on IS NULL
+WHERE r.team_id = $1 AND r.left_on IS NULL AND p.deleted = false
 ORDER BY r.jersey_number NULLS LAST, p.display_name ASC
 `
 
@@ -300,7 +304,7 @@ const listTeamsInOrg = `-- name: ListTeamsInOrg :many
 SELECT t.id, t.organization_id, t.name, t.age_group, t.season, t.created_at, t.updated_at, t.sync_account_id, t.payload, t.deleted, t.seq,
     (SELECT count(*) FROM roster_memberships r WHERE r.team_id = t.id AND r.left_on IS NULL)::bigint AS active_roster_count
 FROM teams t
-WHERE t.organization_id = $1
+WHERE t.organization_id = $1 AND t.deleted = false
 ORDER BY t.name ASC
 `
 

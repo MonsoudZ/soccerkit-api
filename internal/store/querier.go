@@ -42,7 +42,11 @@ type Querier interface {
 	DeleteOrganizationsByIDs(ctx context.Context, ids []uuid.UUID) error
 	DeletePersonByID(ctx context.Context, id uuid.UUID) error
 	DeletePersonsByIDs(ctx context.Context, ids []uuid.UUID) error
+	// Tombstoned, not dropped — see DeleteTeam.
 	DeleteSession(ctx context.Context, id uuid.UUID) error
+	// A REST delete tombstones rather than dropping the row, so the deletion reaches sync
+	// clients. A hard DELETE produced no row for ListSyncChangesSince to return, so a device
+	// holding the team was never told it was gone and re-created it on its next push.
 	DeleteTeam(ctx context.Context, id uuid.UUID) error
 	EndRosterMembership(ctx context.Context, arg EndRosterMembershipParams) (RosterMembership, error)
 	GetActiveRosterMembership(ctx context.Context, arg GetActiveRosterMembershipParams) (RosterMembership, error)
@@ -85,9 +89,10 @@ type Querier interface {
 	ListSyncChangesSince(ctx context.Context, arg ListSyncChangesSinceParams) ([]ListSyncChangesSinceRow, error)
 	ListTeamsForPerson(ctx context.Context, personID uuid.UUID) ([]ListTeamsForPersonRow, error)
 	ListTeamsInOrg(ctx context.Context, organizationID uuid.UUID) ([]ListTeamsInOrgRow, error)
-	// Whether an organization may see a Person at all: they hold a membership in it, or
-	// they are rostered on one of its teams. The roster arm matters because an athlete
-	// can be added to a team without a membership row of their own.
+	// Whether an organization may see a Person at all: they are not tombstoned, and they
+	// either hold a membership in the org or are rostered on one of its live teams. The
+	// roster arm matters because an athlete can be added to a team without a membership
+	// row of their own.
 	PersonVisibleInOrg(ctx context.Context, arg PersonVisibleInOrgParams) (bool, error)
 	RevokeRefreshToken(ctx context.Context, id uuid.UUID) error
 	RevokeRefreshTokenByToken(ctx context.Context, token string) error

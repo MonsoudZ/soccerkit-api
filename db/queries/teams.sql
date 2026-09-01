@@ -4,13 +4,13 @@ VALUES ($1, $2, $3, $4)
 RETURNING *;
 
 -- name: GetTeam :one
-SELECT * FROM teams WHERE id = $1;
+SELECT * FROM teams WHERE id = $1 AND deleted = false;
 
 -- name: ListTeamsInOrg :many
 SELECT t.*,
     (SELECT count(*) FROM roster_memberships r WHERE r.team_id = t.id AND r.left_on IS NULL)::bigint AS active_roster_count
 FROM teams t
-WHERE t.organization_id = $1
+WHERE t.organization_id = $1 AND t.deleted = false
 ORDER BY t.name ASC;
 
 -- name: UpdateTeam :one
@@ -23,7 +23,11 @@ WHERE id = sqlc.arg('id')
 RETURNING *;
 
 -- name: DeleteTeam :exec
-DELETE FROM teams WHERE id = $1;
+-- A REST delete tombstones rather than dropping the row, so the deletion reaches sync
+-- clients. A hard DELETE produced no row for ListSyncChangesSince to return, so a device
+-- holding the team was never told it was gone and re-created it on its next push.
+UPDATE teams SET deleted = true, seq = nextval('sync_seq'), updated_at = now()
+WHERE id = $1;
 
 -- Roster (time-bounded memberships) ----------------------------------------
 
@@ -44,7 +48,7 @@ SELECT r.id, r.jersey_number, r.position, r.joined_on, r.status,
     p.id AS person_id, p.display_name, p.email, p.birthdate
 FROM roster_memberships r
 JOIN persons p ON p.id = r.person_id
-WHERE r.team_id = $1 AND r.left_on IS NULL
+WHERE r.team_id = $1 AND r.left_on IS NULL AND p.deleted = false
 ORDER BY r.jersey_number NULLS LAST, p.display_name ASC;
 
 -- name: EndRosterMembership :one

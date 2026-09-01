@@ -290,3 +290,69 @@ func TestSyncCannotAdoptRESTCreatedRow(t *testing.T) {
 		t.Errorf("REST row changed: name=%q owner=%v", name, owner)
 	}
 }
+
+// TestTombstonesHideRowsFromREST — the sync spine's `deleted` flag was written by the
+// sync path and read by nobody else, so a row deleted in the app went on being served
+// by every REST list and get.
+func TestTombstonesHideRowsFromREST(t *testing.T) {
+	resetDB(t)
+	coach, _ := registerUser(t, "tombstone-rest@e.com")
+
+	teamID := "7d000000-0000-4000-8000-00000000dd01"
+	drillID := "7d000000-0000-4000-8000-00000000dd02"
+	do(t, http.MethodPost, "/api/v1/sync", coach, map[string]any{
+		"upserts": []map[string]any{
+			{"type": "Team", "id": teamID, "payload": map[string]any{"name": "Synced Team"}},
+			{"type": "Drill", "id": drillID, "payload": map[string]any{"title": "Synced Drill"}},
+		},
+	})
+	if teams := do(t, http.MethodGet, "/api/v1/teams", coach, nil).arr(); len(teams) != 1 {
+		t.Fatalf("expected the synced team to be listed, got %v", teams)
+	}
+
+	del := do(t, http.MethodPost, "/api/v1/sync", coach, map[string]any{
+		"deletes": []map[string]any{
+			{"type": "Team", "id": teamID},
+			{"type": "Drill", "id": drillID},
+		},
+	})
+	if conflicts, _ := del.body["conflicts"].([]any); len(conflicts) != 0 {
+		t.Fatalf("owner's own deletes should apply, got conflicts %v", conflicts)
+	}
+
+	if teams := do(t, http.MethodGet, "/api/v1/teams", coach, nil).arr(); len(teams) != 0 {
+		t.Errorf("tombstoned team still listed: %v", teams)
+	}
+	if r := do(t, http.MethodGet, "/api/v1/teams/"+teamID, coach, nil); r.status != http.StatusNotFound {
+		t.Errorf("GET tombstoned team: got %d, want 404", r.status)
+	}
+	if drills := do(t, http.MethodGet, "/api/v1/drills", coach, nil).arr(); len(drills) != 0 {
+		t.Errorf("tombstoned drill still listed: %v", drills)
+	}
+}
+
+// TestRESTDeleteReachesSyncClients — the other direction. DELETE /teams/{id} used to
+// drop the row outright, which produced no delta, so a device holding the team never
+// learned it was gone and re-created it on its next push.
+func TestRESTDeleteReachesSyncClients(t *testing.T) {
+	resetDB(t)
+	coach, _ := registerUser(t, "rest-delete-sync@e.com")
+
+	teamID := "7d000000-0000-4000-8000-00000000dd03"
+	do(t, http.MethodPost, "/api/v1/sync", coach, map[string]any{
+		"upserts": []map[string]any{{"type": "Team", "id": teamID, "payload": map[string]any{"name": "Doomed"}}},
+	})
+	cursor := pullSync(t, coach, "").Cursor
+
+	if r := do(t, http.MethodDelete, "/api/v1/teams/"+teamID, coach, nil); r.status != http.StatusOK {
+		t.Fatalf("delete team: %d %s", r.status, r.raw)
+	}
+
+	delta := pullSync(t, coach, cursor)
+	if len(delta.Deletes) != 1 || delta.Deletes[0].ID != teamID {
+		t.Fatalf("REST delete should reach the client as a tombstone, got %+v", delta)
+	}
+	if len(delta.Records) != 0 {
+		t.Errorf("expected no live records in the delta, got %+v", delta.Records)
+	}
+}

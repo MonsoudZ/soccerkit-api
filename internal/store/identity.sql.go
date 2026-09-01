@@ -562,12 +562,17 @@ func (q *Queries) ListRolesInOrg(ctx context.Context, arg ListRolesInOrgParams) 
 
 const personVisibleInOrg = `-- name: PersonVisibleInOrg :one
 SELECT EXISTS (
-    SELECT 1 FROM memberships m
-     WHERE m.person_id = $1 AND m.organization_id = $2
-    UNION ALL
-    SELECT 1 FROM roster_memberships rm
-      JOIN teams t ON t.id = rm.team_id
-     WHERE rm.person_id = $1 AND t.organization_id = $2
+    SELECT 1 FROM persons p
+     WHERE p.id = $1
+       AND p.deleted = false
+       AND (EXISTS (SELECT 1 FROM memberships m
+                     WHERE m.person_id = p.id
+                       AND m.organization_id = $2)
+         OR EXISTS (SELECT 1 FROM roster_memberships rm
+                      JOIN teams t ON t.id = rm.team_id
+                     WHERE rm.person_id = p.id
+                       AND t.organization_id = $2
+                       AND t.deleted = false))
 )
 `
 
@@ -576,9 +581,10 @@ type PersonVisibleInOrgParams struct {
 	OrganizationID uuid.UUID `json:"organization_id"`
 }
 
-// Whether an organization may see a Person at all: they hold a membership in it, or
-// they are rostered on one of its teams. The roster arm matters because an athlete
-// can be added to a team without a membership row of their own.
+// Whether an organization may see a Person at all: they are not tombstoned, and they
+// either hold a membership in the org or are rostered on one of its live teams. The
+// roster arm matters because an athlete can be added to a team without a membership
+// row of their own.
 func (q *Queries) PersonVisibleInOrg(ctx context.Context, arg PersonVisibleInOrgParams) (bool, error) {
 	row := q.db.QueryRow(ctx, personVisibleInOrg, arg.PersonID, arg.OrganizationID)
 	var exists bool

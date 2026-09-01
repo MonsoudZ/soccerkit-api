@@ -6,10 +6,10 @@ VALUES ($1, $2, $3, $4)
 RETURNING *;
 
 -- name: GetDrill :one
-SELECT * FROM drills WHERE id = $1;
+SELECT * FROM drills WHERE id = $1 AND deleted = false;
 
 -- name: ListDrillsInOrg :many
-SELECT * FROM drills WHERE organization_id = $1 ORDER BY name ASC;
+SELECT * FROM drills WHERE organization_id = $1 AND deleted = false ORDER BY name ASC;
 
 -- Sessions ------------------------------------------------------------------
 
@@ -19,16 +19,19 @@ VALUES ($1, $2, $3, $4, $5, $6)
 RETURNING *;
 
 -- name: GetSession :one
-SELECT * FROM sessions WHERE id = $1;
+SELECT * FROM sessions WHERE id = $1 AND deleted = false;
 
 -- name: ListSessionsInOrg :many
 SELECT * FROM sessions
 WHERE organization_id = $1
+  AND deleted = false
   AND (sqlc.narg('team_id')::uuid IS NULL OR team_id = sqlc.narg('team_id'))
 ORDER BY scheduled_at DESC NULLS LAST, created_at DESC;
 
 -- name: DeleteSession :exec
-DELETE FROM sessions WHERE id = $1;
+-- Tombstoned, not dropped — see DeleteTeam.
+UPDATE sessions SET deleted = true, seq = nextval('sync_seq'), updated_at = now()
+WHERE id = $1;
 
 -- name: CreateSessionBlock :one
 INSERT INTO session_blocks (session_id, drill_id, title, duration_min, position, notes)
