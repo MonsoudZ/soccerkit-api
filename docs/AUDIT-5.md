@@ -1,0 +1,312 @@
+# SoccerKit API — fifth audit
+
+Audit of `monsoudz/soccerkit-api` at `1c7be59`: the three fixes from
+[`docs/AUDIT-4.md`](AUDIT-4.md), the two-release split of the `password_hash` drop, the
+sync pull page limit that closed AUDIT-2's M1, and the iOS contract tests.
+
+Narrow again, and pointed at the same place the work was. Six of the seven commits since
+AUDIT-4 touch sync or the deploy sequence, so this looks hardest at the new paging code
+and at what a cursor now means, rather than sweeping the codebase a fifth time. Three
+findings, all reproduced against a live server. None is in the class the first three
+reports were about — nobody's data is reachable by anyone who should not have it — but
+two of them lose or re-read a coach's data, which is the class this one is about.
+
+Baseline health: `go vet`, `go build` and `go test ./...` pass clean, `sqlc generate`
+produces no drift, and the repro tests were run and then removed; the tree is unmodified.
+
+> **Note on the baseline.** The test database refused to migrate on the first run:
+> `0008_require_apple_identity.sql` raised its exception over one leftover `roles@e.com`
+> row from a pre-removal test fixture. That is the guard doing exactly what it was written
+> to do, on the first database it ever met that had a stranded account in it. Recorded
+> because it is the only unprompted evidence in these five reports of a guard firing in
+> anger, and because it means the check has now been exercised rather than merely
+> reasoned about.
+
+---
+
+## Round four: everything holds
+
+All three AUDIT-4 findings are fixed, each with a regression test that names the defect
+it pins, and all pass:
+
+| Fix | Still true |
+|---|---|
+| M1 irreversible `0008` | Split into `0008` (check-only) and `0009` (the drop), shipped a release apart. The rollback story is written into both files |
+| L1 `/health` says nothing | `/ready` pings the pool under its own 2s timeout; the spec now says which probe answers which question |
+| L2 racing address collision 500s | `isUniqueViolation` → 409 `EMAIL_ALREADY_REGISTERED`, and `TestConcurrentSignInsAtOneAddressStayATypedConflict` holds it there |
+
+AUDIT-2's **M1** (`GET /sync` has no page limit) is closed — that is what `2187a62` did,
+and the paging is correct: `TestSyncPullIsPagedAndLosesNothing` drains 1200 records and
+gets each exactly once, which is the property that matters. **M1 below is not a
+reopening of it.** The delta is bounded now. What is not bounded is the read that
+produces it.
+
+Still open and unchanged from AUDIT-2: **L1** (`/docs` loads `swagger-ui-dist@5` from
+unpkg — a floating major, no SRI), **L2** (`select` answers unchecked against options),
+**L3** (`PATCH /games/{id}` cannot clear `kickoffAt` — `kickoff_at = COALESCE(narg, kickoff_at)`
+overloads NULL as "leave alone", so there is no value that means "clear it"; verified
+still true, and verified it does *not* also wipe the field on an unrelated PATCH),
+**L4** (refresh tokens never reaped), **L5** (the `conflicts` existence oracle), **L6**
+(`sync_documents.type` unbounded), and **P2–P4**, which still wait on the club/invite
+feature. `CreateMembership` still has three call sites and none puts a second
+account-holding person in an existing organization, so the precondition still holds.
+
+AUDIT-4 flagged L4 as worth more than its severity now that a refresh token is the only
+credential this service stores. `0009` has since dropped `password_hash`, so that is now
+literally true: after this release the only secret in the database is a refresh token
+hash.
+
+---
+
+## Summary of new findings
+
+| # | Severity | Finding |
+|---|----------|---------|
+| M1 | Medium | A sync pull reads up to 500 full payloads to return 2 MiB, and above ~4.2 KiB per record a full drain becomes quadratic |
+| M2 | Medium | A cursor this server never issued is treated as authoritative, so a database restore silently drops a window of records per device |
+| L1 | Low | Tombstoned rows in the seven projected tables keep their payload and their PII forever |
+
+---
+
+## Medium
+
+### M1 — the page bounds the response, not the read (confirmed)
+
+`ListSyncChangesSince` takes `LIMIT 500` (`maxSyncPage`). `handleSyncPull` then walks the
+returned rows and stops at 2 MiB (`maxSyncPageBytes`). Both limits are deliberate and the
+comment explains why both are needed. The gap is *where* the second one is applied: the
+byte cut happens in Go, after all 500 rows have been read off the wire and materialized.
+
+The two caps are only in balance at one payload size — `maxSyncPageBytes / maxSyncPage`
+= 2 MiB / 500 = **~4.2 KiB per record**. Below it the row cap binds and everything is
+fine. Above it the byte cap binds first, and every page reads 500 rows to deliver fewer
+than 500 — the rest is decoded, allocated, and dropped.
+
+**Reproduction.** 500 records planted for one account, pulled with `since=0`, measuring
+what the process allocated against what the client received, then drained to the end:
+
+```
+payload    4 KiB | delivered 500 rec/page | response 1.98 MiB | allocated  20.1 MiB | drain   2 pages,    ~500 rows read
+payload   64 KiB | delivered  31 rec/page | response 1.94 MiB | allocated  52.1 MiB | drain  18 pages,  ~4,284 rows read
+payload  256 KiB | delivered   7 rec/page | response 1.75 MiB | allocated 145.4 MiB | drain  73 pages, ~18,108 rows read
+payload    1 MiB | delivered   1 rec/page | response 1.00 MiB | allocated 513.3 MiB | drain 500 pages, ~125,000 rows read
+```
+
+At 1 MiB payloads a single pull allocates **513 MiB to return one record** — 513× more
+than it sends. Nothing caps a record's size except `maxBodyBytes`, so a payload may be
+just under 4 MiB; 500 × 4 MiB is the worst case a single `GET /sync` can ask the process
+to hold.
+
+The drain cost is the other half. Delivering *r* records per page out of *N* means *N/r*
+pages, each scanning up to 500 rows of the remaining tail — so total rows read grows as
+*N²/2r*. For the 1 MiB account that is ~125,000 row reads, ~125 GiB moved, to deliver
+500 MiB. Before `2187a62` the same delta was one unbounded read of 500 MiB. So for this
+shape of data the change traded a bounded response for an unbounded *number* of reads,
+and total work went up rather than down. That is worth stating plainly because it is the
+opposite of what the commit set out to do, and it is invisible at the payload sizes the
+tests use.
+
+Two things make this reachable rather than theoretical. Nothing rejects a large record at
+push time. And a tombstone in a projected table still carries its payload (L1 below), so
+a page of deletes spends the whole byte budget on payloads that are never sent — the
+response for one deleted 256 KiB Team is 100 bytes, and the query read 262,171 of them to
+build it.
+
+**Fix.** No single change closes both halves; they want different things.
+
+1. **Stop shipping payloads that will not be sent.** Free, and it fixes the delete case
+   outright — select `NULL` for tombstoned rows, since the response only ever carries
+   `{type, id}` for them.
+2. **Make the byte cut in SQL**, so the discarded rows never cross the wire:
+
+   ```sql
+   WITH page AS (
+       SELECT delta.*,
+              row_number() OVER (ORDER BY delta.seq)                            AS rn,
+              sum(pg_column_size(delta.payload)) OVER (ORDER BY delta.seq)      AS running
+         FROM ( ...the existing union... ) delta
+        ORDER BY delta.seq
+        LIMIT sqlc.arg('lim')
+   )
+   SELECT type, id, CASE WHEN deleted THEN NULL ELSE payload END, deleted, seq
+     FROM page
+    WHERE rn = 1 OR running <= sqlc.arg('max_bytes');
+   ```
+
+   `rn = 1` keeps the existing and correct rule that an oversized first record is
+   returned alone rather than stalling the cursor. This kills the allocation blowup. It
+   does not fix the quadratic drain: Postgres still reads 500 rows per page.
+3. **Cap a record's payload at push time** — the piece that actually bounds the worst
+   case. With a cap of *c*, the row limit and the byte budget stay in the same
+   neighbourhood, pages come back full, and the drain stays linear. This is the only one
+   of the three that is a wire change, so it needs the app to agree and it needs a chosen
+   number; 256 KiB would keep the worst-case read at 128 MiB and still be far above any
+   record the app writes today. Worth measuring the real distribution of
+   `pg_column_size(payload)` before picking it.
+
+(1) and (2) are local to this query and safe to ship now. (3) is the one to decide
+deliberately, and the number should come from data rather than from this report.
+
+---
+
+### M2 — a cursor this server never issued is taken at its word (confirmed)
+
+`handleSyncPull` seeds its high-water mark with the cursor the client sent
+(`high := since`) and raises it only over rows it actually delivered. That rule is right,
+and AUDIT-4 and the paging work both lean on it. What is missing is any check that the
+cursor was one this server could have issued.
+
+Two consequences, both silent:
+
+```
+since=abc            -> 200, 3 records, cursor "3"           # unparseable: full resync, no error
+since=1e3            -> 200, 3 records, cursor "3"           # same
+since=-1             -> 200, 3 records, cursor "3"           # same
+since=99999999999    -> 200, 0 records, cursor "99999999999" # past the sequence: echoed back
+```
+
+An unparseable cursor becomes 0 and triggers a full resync — which, after M1, is not the
+cheap accident it used to be. A cursor past the end of `sync_seq` comes back *unchanged*
+alongside an empty page, and that pair is precisely the client's drain-stop condition: a
+cursor that did not move means there is nothing more. The client concludes it is up to
+date.
+
+**How a device gets a cursor ahead of the sequence: the recovery path `0009` documents in
+its own header — "the way back is a database restore."** A restore rewinds `sync_seq` to
+the backup's position while every device in the field still holds a cursor from after it.
+
+**Reproduction.** One account, one device, a restore to `seq 3`:
+
+```
+device syncs a,b,c,d,e,f and stores cursor "6"
+
+restore: rows above seq 3 are gone, sync_seq restarts at 4, the device is untouched
+
+coach keeps working    -> g,h,i take seq 4,5,6
+pull(since=6)          -> 200, 0 records, cursor "6"    # "you are up to date"
+coach keeps working    -> j,k take seq 7,8
+pull(since=6)          -> 200, 2 records, cursor "8"    # resumes as if nothing happened
+
+exists on the server (a device installing today): a,b,c,g,h,i,j,k   (8 records)
+this device ever received:                        a,b,c,d,e,f,j,k   (8 records)
+never delivered to this device:                   g,h,i
+```
+
+The device is not stuck — it recovers the moment the sequence passes its cursor, which is
+what makes this bad. It steps over the window silently and then syncs normally forever
+after, so nothing will ever surface the gap. It is simultaneously **missing g,h,i**,
+which exist, and **still holding d,e,f**, which the restore removed. Every pull returned
+200. Every device in the fleet loses a *different* window, because each holds a different
+cursor, and the divergence is permanent short of a reinstall.
+
+This is not exotic. `0009` is a one-way door whose documented remedy is a restore, and
+AUDIT-4 accepted that trade knowingly. The trade is still the right one — but the cost
+was recorded as "restore the database", and the actual cost is "restore the database, and
+every device that had synced past the backup point silently loses whatever was written
+into the seqs it had already passed".
+
+**Fix.** The cheap, correct half is to stop confirming a cursor the sequence cannot
+account for. `last_value` of `sync_seq` is one cheap query:
+
+```go
+// A cursor past the end of the sequence is not a position this server ever issued.
+// Answering "you are up to date" to it is how a restored database silently strands
+// every device that had synced past the restore point.
+if since > s.currentSyncSeq(ctx) {
+    writeError(w, errValidation(
+        "cursor is ahead of this server's sync sequence; resync from 0"))
+    return
+}
+```
+
+A 400 that names the remedy turns a silent per-device gap into one visible error the
+client can act on, and the app already has the from-zero path. The same guard makes the
+unparseable case honest: reject it rather than quietly resyncing.
+
+The thorough half, if sync is ever load-bearing enough to want it, is an epoch — a value
+stamped alongside the cursor that changes when the database is restored, so a stale
+cursor is rejected by construction rather than by comparison. That is a wire change and a
+bigger decision; the bounds check is most of the value for none of the cost.
+
+Worth writing down for whoever runs the restore: **after any restore, every client cursor
+above the restored `last_value` is invalid.** With the guard above they are told. Without
+it, they are not.
+
+---
+
+## Low
+
+**L1 — a tombstone keeps everything it was.** `SyncTombstoneDocument` nulls the payload
+when it tombstones a row. The seven projected tables do not: `SyncTombstoneTeam`,
+`SyncTombstonePerson` and their siblings set `deleted = true` and a fresh `seq`, and leave
+every column alone.
+
+```
+Team tombstoned via POST /sync:
+  teams row     -> deleted=true, payload still 262,171 bytes
+  pull response -> 100 bytes    (a delete carries only {type, id})
+
+Note tombstoned via POST /sync:
+  sync_documents row -> payload 0 bytes   (SyncTombstoneDocument sets it NULL)
+```
+
+Two costs. The one M1 cares about is that those bytes are read and charged against the
+page's byte budget to produce a 100-byte answer. The one that outlives this report is
+`persons`: `SyncTombstonePerson` retains `display_name`, `emergency_contact_name`,
+`emergency_contact_phone`, `medical_notes` and the full payload, indefinitely, with
+nothing that ever removes them. A coach who deletes an athlete from the app has not
+deleted that athlete's medical notes or their emergency contact's phone number — those
+sit in the database for as long as the row does, and no code path revisits them.
+
+Reachability is *not* the problem, and it is worth saying so: `visiblePersonFromPath`
+goes through `PersonVisibleInOrg`, which checks `p.deleted = false`, so a tombstoned
+Person is correctly a 404 over REST. `GetPerson` is the one persons query with no
+`deleted` filter and that is right — `handleGetMe` needs your own row regardless. This is
+retention, not exposure.
+
+**Fix.** Null the payload and the PII columns when tombstoning, the way
+`SyncTombstoneDocument` already does. A tombstone needs `id`, `deleted` and `seq` to do
+its job; it does not need the medical notes. `sync_documents` is the precedent and the
+seven projected tables should match it.
+
+---
+
+## What is done well
+
+- **The contract tests are the most valuable thing in this round.** They pin the one
+  boundary nothing else could see — two repos with no linkage, kept in step by hand —
+  and they are written against the *app's* types rather than this package's, which is the
+  detail that makes them work. Pinning that Swift writes `Date` as a Double, and that the
+  prefs id is the literal string `"prefs"` rather than a UUID, are both the kind of thing
+  that is obvious once broken and invisible before.
+- **`1c7be59` reasons about the option it did not take.** The commit spends most of its
+  length on why *advancing* the cursor on push loses data silently and cross-device, which
+  is the fix a reader would reach for first. Writing down the rejected option is what
+  stops it being re-proposed in six months.
+- **The two-release split shipped as described.** `0008` became a check, `0009` carries
+  one statement, and both files explain the rollback story rather than assuming the next
+  reader reconstructs it. The `IF EXISTS` in `0009` covering databases that ran the
+  earlier build of the set is the kind of detail usually discovered in production.
+- **The paging correctness tests test the right property.** Not the page size — the
+  invariant that draining yields every record exactly once, which is what a page boundary
+  can actually break. `TestSyncPullAlwaysMakesProgress` covers the oversized-record stall
+  that a byte cap invites.
+- **`0008`'s guard has now fired in anger**, on this audit's own test database, and the
+  error said what was wrong and how to fix it.
+
+---
+
+## Suggested order of work
+
+1. **M2's bounds check** — a few lines, and it converts a silent fleet-wide data gap into
+   one visible error. Worth doing before `0009` ships, because `0009` is the change whose
+   documented recovery path walks into it.
+2. **M1 (1) and (2)** — not selecting tombstone payloads, and cutting bytes in SQL. Local
+   to one query, no wire change, and together they remove the allocation blowup.
+3. **L1** — null the payload and PII on tombstone. Small, and it is the right answer to
+   "we deleted that athlete" independent of anything else here.
+4. **M1 (3), the per-record payload cap** — decide deliberately, with the real payload
+   size distribution in hand, since it is the one piece that needs the app to agree.
+5. Unchanged from AUDIT-3 and AUDIT-4: the AUDIT-2 leftovers (**L1–L6**) as ordinary
+   hardening, with **L4**'s token reaping now the only credential material left in the
+   database, and **P2–P4** alongside the club feature.
