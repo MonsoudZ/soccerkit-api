@@ -11,6 +11,15 @@ import (
 )
 
 type Querier interface {
+	// The write is the arbiter of whether this invitation was still redeemable.
+	//
+	// Reading the row, deciding it is live, and then updating it is a check-then-act with
+	// nothing between the two statements: two devices opening the same link — the ordinary
+	// case, not an attack, since people forward these — would both read "pending" and both
+	// redeem. Every condition that makes an invitation usable is therefore in the predicate,
+	// and zero rows affected means somebody (possibly the same person twice) got there first.
+	AcceptInvitation(ctx context.Context, arg AcceptInvitationParams) (int64, error)
+	AddInvitationChild(ctx context.Context, arg AddInvitationChildParams) error
 	// Roster (time-bounded memberships) ----------------------------------------
 	AddRosterMembership(ctx context.Context, arg AddRosterMembershipParams) (RosterMembership, error)
 	// The moat query: cross-instance aggregation of scored fields for one athlete,
@@ -40,6 +49,7 @@ type Querier interface {
 	// Games (game day) ----------------------------------------------------------
 	CreateGame(ctx context.Context, arg CreateGameParams) (Game, error)
 	CreateGuardianship(ctx context.Context, arg CreateGuardianshipParams) (Guardianship, error)
+	CreateInvitation(ctx context.Context, arg CreateInvitationParams) (Invitation, error)
 	CreateMembership(ctx context.Context, arg CreateMembershipParams) (Membership, error)
 	// owner_person_id is not optional in practice: it is what account deletion selects on,
 	// and an org created without one can never be deleted by the person who made it.
@@ -94,6 +104,10 @@ type Querier interface {
 	GetFormInstance(ctx context.Context, id uuid.UUID) (FormInstance, error)
 	GetFormTemplate(ctx context.Context, id uuid.UUID) (FormTemplate, error)
 	GetGame(ctx context.Context, id uuid.UUID) (Game, error)
+	GetInvitation(ctx context.Context, id uuid.UUID) (Invitation, error)
+	// Redemption looks an invitation up by the hash of the token presented, never by id: the
+	// token is the only thing that proves the caller was invited to anything.
+	GetInvitationByTokenHash(ctx context.Context, tokenHash string) (Invitation, error)
 	GetOrganization(ctx context.Context, id uuid.UUID) (Organization, error)
 	GetPerson(ctx context.Context, id uuid.UUID) (Person, error)
 	GetRefreshToken(ctx context.Context, tokenHash string) (RefreshToken, error)
@@ -103,6 +117,9 @@ type Querier interface {
 	GetUserAccountByAppleSub(ctx context.Context, appleSub *string) (UserAccount, error)
 	GetUserAccountByEmail(ctx context.Context, email string) (UserAccount, error)
 	GetUserAccountByID(ctx context.Context, id uuid.UUID) (UserAccount, error)
+	// The account behind a Person, for the one question redemption asks of it: is the
+	// address Apple vouched for the address this invitation was bound to?
+	GetUserAccountByPersonID(ctx context.Context, personID uuid.UUID) (UserAccount, error)
 	HasMembership(ctx context.Context, arg HasMembershipParams) (bool, error)
 	ListActiveRoster(ctx context.Context, teamID uuid.UUID) ([]ListActiveRosterRow, error)
 	ListAnswersForInstance(ctx context.Context, instanceID uuid.UUID) ([]ListAnswersForInstanceRow, error)
@@ -115,9 +132,24 @@ type Querier interface {
 	ListFormTemplates(ctx context.Context, arg ListFormTemplatesParams) ([]FormTemplate, error)
 	ListGamesForTeam(ctx context.Context, teamID uuid.UUID) ([]Game, error)
 	ListInstancesForPerson(ctx context.Context, arg ListInstancesForPersonParams) ([]ListInstancesForPersonRow, error)
+	// The children named on one or more invitations, id and name only — enough for "join
+	// Riverside FC as a parent of Sam Smith", and no more of a minor's record than that
+	// sentence needs. Takes an array so listing a page of invitations is one query rather
+	// than one per row.
+	ListInvitationChildRefs(ctx context.Context, invitationIds []uuid.UUID) ([]ListInvitationChildRefsRow, error)
+	// Newest first. Accepted and revoked rows are kept and returned: "who did we invite, and
+	// what came of it" is the question this list answers, and dropping the answer as soon as
+	// it arrives is how a club invites the same parent four times.
+	ListInvitationsInOrg(ctx context.Context, arg ListInvitationsInOrgParams) ([]Invitation, error)
 	// Tie-broken on id: orgs created inside one transaction share a now() timestamp, and
-	// resolveOrg takes the first row as the caller's default org when no X-Organization-ID
+	// resolveOrg walks this list to pick the caller's default org when no X-Organization-ID
 	// is sent. Without the tie-break that default is whatever Postgres happens to return.
+	//
+	// `owned` is what resolveOrg actually keys the default on. Ordering alone was enough
+	// while nobody could belong to a second organization; the invitation flow made that
+	// reachable, and a club founded before the joiner signed up sorts ahead of their own
+	// personal org — so accepting an invitation silently moved every unheadered request
+	// into somebody else'''s club.
 	ListMembershipsForPerson(ctx context.Context, personID uuid.UUID) ([]ListMembershipsForPersonRow, error)
 	// Everyone who holds a role in one organization, one row per person with their roles
 	// collected. A person holding three roles (the solo coach) is one member with three
@@ -197,6 +229,9 @@ type Querier interface {
 	// details and medical notes, so a parent passing the org-wide check would read every
 	// other family's minor's PII.
 	PersonVisibleToGuardian(ctx context.Context, arg PersonVisibleToGuardianParams) (bool, error)
+	// Revoking an invitation that was already accepted must not un-accept it, so the
+	// predicate excludes those rather than the handler reading first and hoping.
+	RevokeInvitation(ctx context.Context, arg RevokeInvitationParams) (int64, error)
 	// Rotation's single-use guard, not a follow-up to one. handleRefresh used to read the
 	// row, decide it was live, and then revoke it unconditionally — a check-then-act with
 	// nothing between the two statements, so concurrent presentations of one token all read

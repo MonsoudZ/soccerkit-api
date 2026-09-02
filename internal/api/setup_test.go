@@ -62,6 +62,7 @@ func resetDB(t *testing.T) {
 	t.Helper()
 	_, err := testPool.Exec(context.Background(), `
 		TRUNCATE TABLE
+			invitation_children, invitations,
 			sync_documents, players, events, diagrams,
 			form_answers, form_instances, form_fields, form_templates,
 			share_grants, session_blocks, sessions, drills, games,

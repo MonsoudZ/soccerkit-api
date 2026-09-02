@@ -427,6 +427,26 @@ func (q *Queries) GetUserAccountByID(ctx context.Context, id uuid.UUID) (UserAcc
 	return i, err
 }
 
+const getUserAccountByPersonID = `-- name: GetUserAccountByPersonID :one
+SELECT id, person_id, email, apple_sub, created_at, updated_at FROM user_accounts WHERE person_id = $1
+`
+
+// The account behind a Person, for the one question redemption asks of it: is the
+// address Apple vouched for the address this invitation was bound to?
+func (q *Queries) GetUserAccountByPersonID(ctx context.Context, personID uuid.UUID) (UserAccount, error) {
+	row := q.db.QueryRow(ctx, getUserAccountByPersonID, personID)
+	var i UserAccount
+	err := row.Scan(
+		&i.ID,
+		&i.PersonID,
+		&i.Email,
+		&i.AppleSub,
+		&i.CreatedAt,
+		&i.UpdatedAt,
+	)
+	return i, err
+}
+
 const hasMembership = `-- name: HasMembership :one
 SELECT EXISTS (
     SELECT 1 FROM memberships WHERE person_id = $1 AND organization_id = $2
@@ -516,7 +536,8 @@ func (q *Queries) ListChildren(ctx context.Context, guardianPersonID uuid.UUID) 
 }
 
 const listMembershipsForPerson = `-- name: ListMembershipsForPerson :many
-SELECT m.id, m.role, m.organization_id, o.name AS organization_name, o.kind AS organization_kind
+SELECT m.id, m.role, m.organization_id, o.name AS organization_name, o.kind AS organization_kind,
+       (o.owner_person_id = m.person_id) AS owned
 FROM memberships m
 JOIN organizations o ON o.id = m.organization_id
 WHERE m.person_id = $1
@@ -529,11 +550,18 @@ type ListMembershipsForPersonRow struct {
 	OrganizationID   uuid.UUID `json:"organization_id"`
 	OrganizationName string    `json:"organization_name"`
 	OrganizationKind string    `json:"organization_kind"`
+	Owned            bool      `json:"owned"`
 }
 
 // Tie-broken on id: orgs created inside one transaction share a now() timestamp, and
-// resolveOrg takes the first row as the caller's default org when no X-Organization-ID
+// resolveOrg walks this list to pick the caller's default org when no X-Organization-ID
 // is sent. Without the tie-break that default is whatever Postgres happens to return.
+//
+// `owned` is what resolveOrg actually keys the default on. Ordering alone was enough
+// while nobody could belong to a second organization; the invitation flow made that
+// reachable, and a club founded before the joiner signed up sorts ahead of their own
+// personal org — so accepting an invitation silently moved every unheadered request
+// into somebody else”'s club.
 func (q *Queries) ListMembershipsForPerson(ctx context.Context, personID uuid.UUID) ([]ListMembershipsForPersonRow, error) {
 	rows, err := q.db.Query(ctx, listMembershipsForPerson, personID)
 	if err != nil {
@@ -549,6 +577,7 @@ func (q *Queries) ListMembershipsForPerson(ctx context.Context, personID uuid.UU
 			&i.OrganizationID,
 			&i.OrganizationName,
 			&i.OrganizationKind,
+			&i.Owned,
 		); err != nil {
 			return nil, err
 		}

@@ -87,6 +87,7 @@ type Access struct {
 	Capabilities   []string  `json:"capabilities"`
 	Scope          string    `json:"scope"`
 	GrantableRoles []string  `json:"grantableRoles"`
+	InvitableRoles []string  `json:"invitableRoles"`
 }
 
 func accessDTO(oc orgContext) Access {
@@ -96,6 +97,7 @@ func accessDTO(oc orgContext) Access {
 		Capabilities:   capabilityNames(oc.roles.Capabilities()),
 		Scope:          string(oc.scope()),
 		GrantableRoles: roleNames(oc.roles.GrantableRoles()),
+		InvitableRoles: roleNames(oc.roles.InvitableRoles()),
 	}
 }
 
@@ -142,6 +144,90 @@ func capabilityNames(caps []authz.Capability) []string {
 		out = append(out, string(c))
 	}
 	return out
+}
+
+// ---- invitations ---------------------------------------------------------
+
+// Invitation statuses. Derived from timestamps rather than stored as a column: an
+// invitation does not become expired by anybody writing a row, and a status column would
+// only be a second, occasionally-wrong copy of expires_at.
+const (
+	invitationPending  = "pending"
+	invitationAccepted = "accepted"
+	invitationRevoked  = "revoked"
+	invitationExpired  = "expired"
+)
+
+func invitationStatus(inv store.Invitation) string {
+	switch {
+	case inv.RevokedAt.Valid:
+		return invitationRevoked
+	case inv.AcceptedAt.Valid:
+		return invitationAccepted
+	case inv.ExpiresAt.Valid && !inv.ExpiresAt.Time.After(time.Now()):
+		return invitationExpired
+	default:
+		return invitationPending
+	}
+}
+
+// PersonRef is a person named inside somebody else's payload: enough to say who they
+// are, and no more of a minor's record than that sentence needs. An invitation preview
+// is read by whoever holds the link, so it carries these rather than full Person rows.
+type PersonRef struct {
+	ID          uuid.UUID `json:"id"`
+	DisplayName string    `json:"displayName"`
+}
+
+type Invitation struct {
+	ID                uuid.UUID   `json:"id"`
+	OrganizationID    uuid.UUID   `json:"organizationId"`
+	OrganizationName  string      `json:"organizationName"`
+	Role              string      `json:"role"`
+	Status            string      `json:"status"`
+	Email             *string     `json:"email"`
+	Note              *string     `json:"note"`
+	InvitedByPersonID *uuid.UUID  `json:"invitedByPersonId"`
+	Children          []PersonRef `json:"children"`
+	ExpiresAt         string      `json:"expiresAt"`
+	CreatedAt         string      `json:"createdAt"`
+	AcceptedAt        *string     `json:"acceptedAt"`
+}
+
+func invitationDTO(inv store.Invitation, orgName string, children []PersonRef) Invitation {
+	var accepted *string
+	if inv.AcceptedAt.Valid {
+		v := rfc3339(inv.AcceptedAt)
+		accepted = &v
+	}
+	if children == nil {
+		children = []PersonRef{}
+	}
+	return Invitation{
+		ID: inv.ID, OrganizationID: inv.OrganizationID, OrganizationName: orgName,
+		Role: inv.Role, Status: invitationStatus(inv), Email: inv.Email, Note: inv.Note,
+		InvitedByPersonID: inv.InvitedByPersonID, Children: children,
+		ExpiresAt: rfc3339(inv.ExpiresAt), CreatedAt: rfc3339(inv.CreatedAt),
+		AcceptedAt: accepted,
+	}
+}
+
+// CreatedInvitation is the one and only time the token crosses the wire. It is not
+// recoverable afterwards — the database holds a hash — so a lost invitation is reissued,
+// never looked up.
+type CreatedInvitation struct {
+	Invitation
+	Token string `json:"token"`
+}
+
+// InvitationAccepted tells the app what just happened and what the person can now do,
+// so the screen after "Join" does not need a second round trip to find out.
+type InvitationAccepted struct {
+	OrganizationID   uuid.UUID   `json:"organizationId"`
+	OrganizationName string      `json:"organizationName"`
+	Role             string      `json:"role"`
+	LinkedChildren   []PersonRef `json:"linkedChildren"`
+	Access           Access      `json:"access"`
 }
 
 // Me bundles the authenticated person with their memberships (orgs + roles).

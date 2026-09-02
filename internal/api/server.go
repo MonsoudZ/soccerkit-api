@@ -105,6 +105,20 @@ func (s *Server) Router() http.Handler {
 			// client gates its UI on it instead of on a second copy that drifts.
 			r.Get("/roles", s.handleListRoles)
 
+			// Invitations: how somebody who already has an account joins an
+			// organization that is not their own. Accepting is open to any
+			// authenticated caller — the token is what proves they were invited, and
+			// the membership goes to the account that redeemed it.
+			r.Route("/invitations", func(r chi.Router) {
+				r.Get("/", s.handleListInvitations)
+				r.Post("/", s.handleCreateInvitation)
+				// POST, not GET: the token is a credential and the request logger
+				// writes the URI. See handlePreviewInvitation.
+				r.Post("/preview", s.handlePreviewInvitation)
+				r.Post("/accept", s.handleAcceptInvitation)
+				r.Delete("/{id}", s.handleRevokeInvitation)
+			})
+
 			// Who belongs to the organization, and who may do what in it.
 			r.Route("/members", func(r chi.Router) {
 				r.Get("/", s.handleListMembers)

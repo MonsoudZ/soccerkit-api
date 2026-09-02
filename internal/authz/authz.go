@@ -126,6 +126,7 @@ const (
 	CapMemberRead   Capability = "member.read"   // see who belongs to the org and as what
 	CapMemberGrant  Capability = "member.grant"  // give someone a role (bounded by Rank)
 	CapMemberRevoke Capability = "member.revoke" // take a role away (bounded by Rank)
+	CapInviteSend   Capability = "invite.send"   // invite someone into the org (bounded by CanInvite)
 
 	// People
 	CapPersonCreate Capability = "person.create"       // add an athlete/parent record
@@ -175,7 +176,7 @@ var capabilities = map[Role][]Capability{
 	// organization or change who runs it.
 	RoleAdmin: {
 		CapOrgRead, CapOrgUpdate, CapOrgDelete,
-		CapMemberRead, CapMemberGrant, CapMemberRevoke,
+		CapMemberRead, CapMemberGrant, CapMemberRevoke, CapInviteSend,
 		CapPersonCreate, CapPersonRead, CapPersonUpdate, CapPersonDelete, CapMedicalRead, CapGuardianLink,
 		CapTeamRead, CapTeamCreate, CapTeamUpdate, CapTeamDelete, CapRosterManage,
 		CapDrillRead, CapDrillWrite, CapSessionRead, CapSessionWrite,
@@ -188,7 +189,7 @@ var capabilities = map[Role][]Capability{
 	// it: no org.delete, and Rank keeps them from minting an admin.
 	RoleDirector: {
 		CapOrgRead, CapOrgUpdate,
-		CapMemberRead, CapMemberGrant, CapMemberRevoke,
+		CapMemberRead, CapMemberGrant, CapMemberRevoke, CapInviteSend,
 		CapPersonCreate, CapPersonRead, CapPersonUpdate, CapPersonDelete, CapMedicalRead, CapGuardianLink,
 		CapTeamRead, CapTeamCreate, CapTeamUpdate, CapTeamDelete, CapRosterManage,
 		CapDrillRead, CapDrillWrite, CapSessionRead, CapSessionWrite,
@@ -201,7 +202,10 @@ var capabilities = map[Role][]Capability{
 	// teams; nothing about staffing, and no reviewing of other coaches.
 	RoleCoach: {
 		CapOrgRead,
-		CapMemberRead,
+		// A coach invites, but does not staff: CanInvite caps them at roles below their
+		// own, which is the parents and players of their own athletes — the invitations
+		// they are the only person in a position to send.
+		CapMemberRead, CapInviteSend,
 		CapPersonCreate, CapPersonRead, CapPersonUpdate, CapMedicalRead, CapGuardianLink,
 		CapTeamRead, CapTeamCreate, CapTeamUpdate, CapTeamDelete, CapRosterManage,
 		CapDrillRead, CapDrillWrite, CapSessionRead, CapSessionWrite,
@@ -393,6 +397,37 @@ func (s Set) GrantableRoles() []Role {
 	out := []Role{}
 	for _, r := range All {
 		if s.CanGrant(r) {
+			out = append(out, r)
+		}
+	}
+	return out
+}
+
+// CanInvite reports whether this caller may invite somebody into the organization as
+// the role target.
+//
+// The ceiling is deliberately not the same for everyone who may send an invitation.
+// Staff who can already grant a role directly (admin, director) can invite at exactly
+// the same reach — an invitation must never be a way around the grant ceiling, or
+// "invite yourself as admin, then accept" is a one-step takeover. A coach holds no
+// member.grant at all and is capped strictly below their own rank: the parents and
+// players of their own athletes, which are the invitations only they are in a position
+// to send, and not a peer coach or a director, which is the club's decision to make.
+func (s Set) CanInvite(target Role) bool {
+	if !target.Valid() || !s.Can(CapInviteSend) {
+		return false
+	}
+	if s.Can(CapMemberGrant) {
+		return s.CanAssign(target)
+	}
+	return target.Rank() < s.MaxRank()
+}
+
+// InvitableRoles is what this caller may invite somebody as, most privileged first.
+func (s Set) InvitableRoles() []Role {
+	out := []Role{}
+	for _, r := range All {
+		if s.CanInvite(r) {
 			out = append(out, r)
 		}
 	}

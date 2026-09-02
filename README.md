@@ -48,8 +48,8 @@ exist in the schema now:
 | **iOS sync** | `GET/POST /sync` — opaque `{type,id,payload}` delta-sync for the offline-first app. A **projection over the domain tables**: projected types (`Team`, `Drill`, `Session`) land in their real table (columns projected from the payload, full payload retained); other types round-trip losslessly via a generic `sync_documents` store until they graduate. A shared `seq` sequence is the cursor; rows are scoped per account (Person) |
 
 **Next up (schema already present):** `ShareGrant` scopes (coach-to-coach +
-club library), an invitation flow so a signed-in account can join someone else's
-club, and the per-role surfaces the roles below now have a place to hang from.
+club library), and the per-role surfaces that roles and invitations now give a
+place to hang from.
 
 ### The moat, concretely
 
@@ -112,11 +112,64 @@ GET /api/v1/me/children → your own household
 Guards worth knowing: a director cannot grant or revoke `admin` (the rank
 ceiling — otherwise `member.grant` is a ladder to the top of the org), an
 organization cannot lose its last admin (nobody left could grant one back), and
-`POST /members` only changes what someone **already in the org** may do. Bringing
-an account that signed in on its own into somebody else's club is an
-**invitation flow, and there is not one yet** — it has to be tied to Sign in with
-Apple rather than to an address someone typed. That is the next piece of the
-parent tier.
+`POST /members` only changes what someone **already in the org** may do.
+
+## Invitations
+
+Getting *into* somebody else's organization is the invitation flow. It has to
+exist, because every other route in is wrong: `POST /persons` makes a Person with
+no login, `POST /members` refuses an id it has no consent for, and Sign in with
+Apple always lands a person in their **own** personal org — nowhere near the club
+their child plays for.
+
+```
+POST /api/v1/invitations   { role, email?, note?, childPersonIds? }
+  → 201 { …invitation, token: "skinv_…" }     ← the only time the token is returned
+
+# the invitee signs in with Apple on their own, then:
+POST /api/v1/invitations/preview { token }    → the club, the role, the children
+POST /api/v1/invitations/accept  { token }    → membership + guardianships + their access
+GET  /api/v1/invitations                      → what we sent and what came of it
+DELETE /api/v1/invitations/{id}               → kill an outstanding link
+```
+
+The token is a credential and is treated like one: 32 bytes of entropy, stored
+only as a SHA-256 (like refresh tokens), never returned again, `skinv_`-prefixed
+so a scanner or a bug report can spot one, and carried in a request **body** —
+preview is a POST because a token in a URL ends up in the request log. It expires in 14 days and is
+**single-use by the write** — acceptance is a conditional `UPDATE`, so two
+devices opening the same forwarded link produce one membership and one 409,
+rather than two of everything.
+
+The membership goes to **the account that redeemed it**, never to an id in the
+request. That is the whole security model: the club says who it is inviting, the
+invitee proves it is them by holding a token only they were sent and signing in
+themselves.
+
+- **Ceiling.** An invitation may never reach further than a direct grant, or
+  "invite yourself as admin, then accept" is a one-step takeover. Admin and
+  director invite exactly as far as they may grant; a **coach** — who staffs
+  nobody — is capped strictly below their own rank, which is the parents and
+  players of their own athletes, the invitations only they are positioned to send.
+- **Children.** `childPersonIds` on a parent invitation is what makes the parent
+  tier work: a parent membership with no guardianship sees nothing. The coach who
+  knows which child this is names them; redemption writes the link.
+- **Email binding** is optional on purpose. It turns a leaked link into a dead
+  one — but Apple's Hide My Email means an invitee who hides their address signs
+  in with a relay that will never match what the club typed, and a bound
+  invitation would lock out exactly the person it was for.
+
+One consequence worth knowing: your **default organization** (the one used when
+you send no `X-Organization-ID`) is the org you *own*, not the oldest one you
+belong to. Ordering was fine while nobody could be in two orgs; once you can
+accept an invitation, a club founded before you signed up would otherwise become
+the org every unheadered request silently acted in.
+
+**Still open:** an invitation links an account to a club, it does not merge it
+with a Person record the club already created. A teenager whose athlete record
+already holds their evaluations gets a `player` membership on their *own* Person,
+not that one — closing that needs either a Person merge or an identity alias, and
+both are bigger decisions than this flow.
 
 ## Quick start
 
@@ -151,7 +204,7 @@ internal/
     server.go              # chi router, middleware, route mounting
     auth.go                # JWT, auth middleware, org/role resolution, capability checks
     dto.go                 # API response types + mapping from store models
-    handlers_*.go          # auth · people · teams · forms (the engine) · members (roles)
+    handlers_*.go          # auth · people · teams · forms (the engine) · members · invitations
     openapi.yaml           # served at /openapi.yaml, embedded in the binary
     *_test.go              # httptest integration tests
 db/queries/*.sql           # sqlc query definitions

@@ -195,6 +195,39 @@ func TestGrantableRolesIsWhatTheRankAllows(t *testing.T) {
 	}
 }
 
+func TestInvitingCannotOutrunGranting(t *testing.T) {
+	admin := authz.NewSet("admin")
+	director := authz.NewSet("director")
+	coach := authz.NewSet("coach")
+	parent := authz.NewSet("parent")
+
+	// An invitation must never reach further than a direct grant would, or "invite
+	// yourself as admin, then accept it" is a one-step takeover of the club.
+	if director.CanInvite(authz.RoleAdmin) {
+		t.Error("a director must not be able to invite an admin")
+	}
+	if !admin.CanInvite(authz.RoleAdmin) || !director.CanInvite(authz.RoleCoach) {
+		t.Error("staff invite exactly as far as they may grant")
+	}
+
+	// A coach can bring in the parents and players of their own athletes — the
+	// invitations nobody else is in a position to send — and nobody at their own level.
+	if !coach.CanInvite(authz.RoleParent) || !coach.CanInvite(authz.RolePlayer) {
+		t.Error("a coach must be able to invite a parent or a player")
+	}
+	for _, r := range []authz.Role{authz.RoleCoach, authz.RoleDirector, authz.RoleAdmin} {
+		if coach.CanInvite(r) {
+			t.Errorf("a coach must not be able to invite %s: staffing is the club's call", r)
+		}
+	}
+	if got := coach.InvitableRoles(); len(got) != 2 {
+		t.Errorf("a coach invites parents and players, got %v", got)
+	}
+	if parent.CanInvite(authz.RolePlayer) {
+		t.Error("a parent invites nobody")
+	}
+}
+
 func TestRevokingHasTheSameCeilingAsGranting(t *testing.T) {
 	// Otherwise the ceiling is decorative: a director who cannot appoint an admin but
 	// can remove one still decides who owns the club.

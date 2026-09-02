@@ -50,13 +50,20 @@ ON CONFLICT (person_id, organization_id, role) DO NOTHING
 RETURNING *;
 
 -- name: ListMembershipsForPerson :many
-SELECT m.id, m.role, m.organization_id, o.name AS organization_name, o.kind AS organization_kind
+SELECT m.id, m.role, m.organization_id, o.name AS organization_name, o.kind AS organization_kind,
+       (o.owner_person_id = m.person_id) AS owned
 FROM memberships m
 JOIN organizations o ON o.id = m.organization_id
 WHERE m.person_id = $1
 -- Tie-broken on id: orgs created inside one transaction share a now() timestamp, and
--- resolveOrg takes the first row as the caller's default org when no X-Organization-ID
+-- resolveOrg walks this list to pick the caller's default org when no X-Organization-ID
 -- is sent. Without the tie-break that default is whatever Postgres happens to return.
+--
+-- `owned` is what resolveOrg actually keys the default on. Ordering alone was enough
+-- while nobody could belong to a second organization; the invitation flow made that
+-- reachable, and a club founded before the joiner signed up sorts ahead of their own
+-- personal org — so accepting an invitation silently moved every unheadered request
+-- into somebody else'''s club.
 ORDER BY o.created_at ASC, o.id ASC;
 
 -- name: ListRolesInOrg :many
@@ -281,3 +288,8 @@ SELECT child_person_id FROM guardianships WHERE guardian_person_id = $1;
 SELECT id FROM memberships
 WHERE organization_id = $1 AND role = 'admin'
 FOR UPDATE;
+
+-- name: GetUserAccountByPersonID :one
+-- The account behind a Person, for the one question redemption asks of it: is the
+-- address Apple vouched for the address this invitation was bound to?
+SELECT * FROM user_accounts WHERE person_id = $1;

@@ -112,6 +112,26 @@ type Guardianship struct {
 	CreatedAt        pgtype.Timestamptz `json:"created_at"`
 }
 
+type Invitation struct {
+	ID                 uuid.UUID          `json:"id"`
+	OrganizationID     uuid.UUID          `json:"organization_id"`
+	TokenHash          string             `json:"token_hash"`
+	Role               string             `json:"role"`
+	Email              *string            `json:"email"`
+	Note               *string            `json:"note"`
+	InvitedByPersonID  *uuid.UUID         `json:"invited_by_person_id"`
+	ExpiresAt          pgtype.Timestamptz `json:"expires_at"`
+	AcceptedAt         pgtype.Timestamptz `json:"accepted_at"`
+	AcceptedByPersonID *uuid.UUID         `json:"accepted_by_person_id"`
+	RevokedAt          pgtype.Timestamptz `json:"revoked_at"`
+	CreatedAt          pgtype.Timestamptz `json:"created_at"`
+}
+
+type InvitationChild struct {
+	InvitationID  uuid.UUID `json:"invitation_id"`
+	ChildPersonID uuid.UUID `json:"child_person_id"`
+}
+
 type Membership struct {
 	ID             uuid.UUID          `json:"id"`
 	PersonID       uuid.UUID          `json:"person_id"`

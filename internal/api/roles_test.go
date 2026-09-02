@@ -58,11 +58,11 @@ func orgOwnedBy(t *testing.T, personID string) string {
 // joinOrgAs puts an existing account into somebody else's organization with the given
 // roles, by writing the memberships directly.
 //
-// It is written this way on purpose. POST /members deliberately refuses to enroll a
-// person who has no linkage to the org yet — an id is not consent, and accepting one
-// would make "grant a role" a way to read a stranger's record. Connecting an account
-// that signed in on its own to a club it was invited to is an invitation flow, and
-// there isn't one yet; when there is, this helper becomes a call to it.
+// The real route in is POST /invitations plus POST /invitations/accept, and that flow is
+// exercised end to end in invitations_test.go. This is setup, not the thing under test:
+// these tests are about what a director or a parent may do once they are in a club, and
+// staging that through two HTTP calls and a token would put the invitation flow in the
+// failure path of every role test.
 func joinOrgAs(t *testing.T, personID, orgID string, roles ...string) {
 	t.Helper()
 	for _, role := range roles {

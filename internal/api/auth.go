@@ -13,6 +13,7 @@ import (
 	"github.com/google/uuid"
 
 	"github.com/monsoudz/soccerkit-api/internal/authz"
+	"github.com/monsoudz/soccerkit-api/internal/store"
 )
 
 type ctxKey string
@@ -69,8 +70,35 @@ func newRefreshToken() (string, error) {
 }
 
 // hashRefreshToken maps a token to the value stored in refresh_tokens.token_hash.
-func hashRefreshToken(token string) string {
-	sum := sha256.Sum256([]byte(token))
+func hashRefreshToken(token string) string { return sha256b64(token) }
+
+// --- invitation tokens ----------------------------------------------------
+// An invitation token is the same kind of secret as a refresh token — 32 bytes of
+// entropy that a stranger's possession of turns into standing in an organization — so it
+// is handled the same way: shown to the issuer once, stored only as a hash, never logged.
+//
+// The prefix is there for the humans and the scanners. A string that announces what it
+// is gets recognized in a bug report, a log line or a public repository, and can be
+// matched by a secret scanner before somebody redeems it.
+
+const inviteTokenPrefix = "skinv_"
+
+func newInviteToken() (string, error) {
+	b := make([]byte, 32)
+	if _, err := rand.Read(b); err != nil {
+		return "", err
+	}
+	return inviteTokenPrefix + base64.RawURLEncoding.EncodeToString(b), nil
+}
+
+// hashInviteToken maps an invitation token to invitations.token_hash.
+func hashInviteToken(token string) string { return sha256b64(token) }
+
+// sha256b64 is the storage form for both token kinds. A plain hash is the right tool
+// rather than a KDF: there is no low-entropy secret to grind, and a KDF would be paid on
+// every refresh and every redemption for nothing.
+func sha256b64(s string) string {
+	sum := sha256.Sum256([]byte(s))
 	return base64.RawURLEncoding.EncodeToString(sum[:])
 }
 
@@ -138,7 +166,7 @@ func (s *Server) resolveOrg(r *http.Request) (orgContext, error) {
 		}
 		chosen = id
 	} else {
-		chosen = memberships[0].OrganizationID
+		chosen = defaultOrgID(memberships)
 	}
 
 	var names []string
@@ -151,6 +179,26 @@ func (s *Server) resolveOrg(r *http.Request) (orgContext, error) {
 		return orgContext{}, errForbidden("you are not a member of that organization")
 	}
 	return orgContext{orgID: chosen, roles: authz.NewSet(names...)}, nil
+}
+
+// defaultOrgID picks which organization a request without X-Organization-ID acts in:
+// the one the caller OWNS — their personal org, the solo-coach case — and only failing
+// that the oldest one they belong to.
+//
+// Ownership, not order. Order alone was correct for exactly as long as nobody could
+// belong to a second organization; once a person can accept an invitation, a club
+// founded before they signed up sorts ahead of their own personal org, and every request
+// the app makes without the header silently starts acting in somebody else'"'"'s club — their
+// own teams gone from the list, their next team created in a club they just joined.
+// Nothing the user did says they wanted that, and nothing in the response says it
+// happened.
+func defaultOrgID(memberships []store.ListMembershipsForPersonRow) uuid.UUID {
+	for _, m := range memberships {
+		if m.Owned {
+			return m.OrganizationID
+		}
+	}
+	return memberships[0].OrganizationID
 }
 
 // requireCapability is resolveOrg plus one permission check — the opening two lines of

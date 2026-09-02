@@ -15,6 +15,7 @@ tags:
   - name: auth
   - name: me
   - name: roles
+  - name: invitations
   - name: persons
   - name: teams
   - name: evaluation
@@ -390,6 +391,150 @@ paths:
         "400": { $ref: "#/components/responses/Error" }
         "403": { $ref: "#/components/responses/Error" }
         "404": { $ref: "#/components/responses/Error" }
+
+  /api/v1/invitations:
+    get:
+      tags: [invitations]
+      summary: What this organization has invited, and what came of it
+      description: >
+        Newest first, including accepted and revoked rows. Requires invite.send. Tokens
+        are never included: an invitation token crosses the wire exactly once, in the
+        response that created it.
+      security: [{ bearerAuth: [] }]
+      parameters:
+        - { $ref: "#/components/parameters/OrgHeader" }
+        - { name: limit, in: query, schema: { type: integer, default: 50, maximum: 200 } }
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema: { type: array, items: { $ref: "#/components/schemas/Invitation" } }
+        "403": { $ref: "#/components/responses/Error" }
+    post:
+      tags: [invitations]
+      summary: Invite somebody into this organization
+      description: >
+        The only way an account that signed in on its own joins an organization that is
+        not its own. Returns a one-time `token` — put it in the link you send, and do not
+        expect to read it again; the database holds only its hash, so a lost invitation is
+        reissued rather than recovered.
+
+
+        Requires invite.send, under the same ceiling a direct grant is under: an
+        invitation must never reach further than POST /members would, or "invite yourself
+        as admin, then accept" is a one-step takeover. A coach (who holds no member.grant)
+        is capped strictly below their own rank — the parents and players of their own
+        athletes.
+
+
+        For role=parent, `childPersonIds` names the athletes the redeemer becomes the
+        guardian of. That link is the whole parent tier: a parent membership with no
+        guardianship can see nothing.
+      security: [{ bearerAuth: [] }]
+      parameters: [{ $ref: "#/components/parameters/OrgHeader" }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/CreateInvitationRequest" }
+      responses:
+        "201":
+          description: Created — the only response that carries the token
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/CreatedInvitation" }
+        "400": { $ref: "#/components/responses/Error" }
+        "403": { $ref: "#/components/responses/Error" }
+        "404": { description: A named child is not visible in this organization }
+
+  /api/v1/invitations/preview:
+    post:
+      tags: [invitations]
+      summary: What am I being asked to join?
+      description: >
+        Resolves a token to the club, the role and the children it is about, without
+        redeeming it, so the app can show the person what they are agreeing to. Needs an
+        authenticated caller (sign in with Apple first) and the token.
+
+
+        A POST with the token in the body, not a GET with it in the query: the token is a
+        credential, and a URL ends up in request logs and proxy access logs. /auth/refresh
+        takes its token in a body for the same reason.
+      security: [{ bearerAuth: [] }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/AcceptInvitationRequest" }
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Invitation" }
+        "404": { description: That token matches no invitation }
+
+  /api/v1/invitations/accept:
+    post:
+      tags: [invitations]
+      summary: Redeem an invitation for the authenticated account
+      description: >
+        Creates the membership — and, for a parent invitation, the guardianships — for
+        the account that presented the token. Never for an id in the request: that is the
+        whole security model, and why an invitation cannot be redeemed on somebody else's
+        behalf.
+
+
+        Single use. Two devices opening the same forwarded link produce one membership and
+        one 409. An invitation bound to an email address may only be redeemed by an
+        account whose Apple-verified address matches.
+
+
+        Answers with the caller's new access in that organization, so the next screen does
+        not need another round trip.
+      security: [{ bearerAuth: [] }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/AcceptInvitationRequest" }
+      responses:
+        "200":
+          description: Joined
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/InvitationAccepted" }
+        "403": { description: Issued to a different email address }
+        "404": { description: That token matches no invitation }
+        "409": { description: Already used, revoked, or expired }
+
+  /api/v1/invitations/{id}:
+    delete:
+      tags: [invitations]
+      summary: Revoke an outstanding invitation
+      description: >
+        Kills the link. An invitation that was already accepted is not revoked here — what
+        to remove then is the membership it created, at
+        DELETE /members/{personId}/roles/{role}. You may revoke what you sent; revoking
+        somebody else's takes member.grant.
+      security: [{ bearerAuth: [] }]
+      parameters:
+        - { $ref: "#/components/parameters/OrgHeader" }
+        - { $ref: "#/components/parameters/Id" }
+      responses:
+        "200":
+          description: Revoked
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  id: { type: string, format: uuid }
+                  status: { type: string, enum: [revoked] }
+        "403": { $ref: "#/components/responses/Error" }
+        "404": { $ref: "#/components/responses/Error" }
+        "409": { description: Already accepted or already revoked }
 
   /api/v1/persons:
     post:
@@ -912,6 +1057,13 @@ components:
           type: array
           description: The roles this caller may hand out — populate a role picker from this.
           items: { $ref: "#/components/schemas/Role" }
+        invitableRoles:
+          type: array
+          description: >
+            The roles this caller may invite somebody as. Usually the same as
+            grantableRoles; for a coach, who may invite but not staff, it is strictly the
+            roles below their own.
+          items: { $ref: "#/components/schemas/Role" }
     OrgMember:
       type: object
       properties:
@@ -932,6 +1084,82 @@ components:
       properties:
         personId: { type: string, format: uuid }
         role: { $ref: "#/components/schemas/Role" }
+    PersonRef:
+      type: object
+      description: A person named inside another payload — who they are, and no more.
+      properties:
+        id: { type: string, format: uuid }
+        displayName: { type: string }
+    Invitation:
+      type: object
+      properties:
+        id: { type: string, format: uuid }
+        organizationId: { type: string, format: uuid }
+        organizationName: { type: string }
+        role: { $ref: "#/components/schemas/Role" }
+        status:
+          type: string
+          enum: [pending, accepted, revoked, expired]
+          description: Derived from the timestamps; an invitation expires without anyone writing a row.
+        email:
+          type: string
+          nullable: true
+          description: The address this invitation is bound to, if any.
+        note: { type: string, nullable: true }
+        invitedByPersonId: { type: string, format: uuid, nullable: true }
+        children:
+          type: array
+          description: The athletes a parent invitation makes its redeemer the guardian of.
+          items: { $ref: "#/components/schemas/PersonRef" }
+        expiresAt: { type: string, format: date-time }
+        createdAt: { type: string, format: date-time }
+        acceptedAt: { type: string, format: date-time, nullable: true }
+    CreatedInvitation:
+      allOf:
+        - $ref: "#/components/schemas/Invitation"
+        - type: object
+          properties:
+            token:
+              type: string
+              description: >
+                The invitation token, returned exactly once. Put it in the link you send.
+                It is stored only as a hash, so it cannot be read back — reissue instead.
+              example: skinv_8fQ2...
+    CreateInvitationRequest:
+      type: object
+      required: [role]
+      properties:
+        role: { $ref: "#/components/schemas/Role" }
+        note: { type: string }
+        email:
+          type: string
+          description: >
+            Optional. Binds the invitation to one address: only an account whose
+            Apple-verified address matches may redeem it, which makes a forwarded link
+            useless. Leave it unset for anyone who might use Hide My Email — they sign in
+            with a private relay that will never match what you typed, and a bound
+            invitation would lock out the person it was for.
+        childPersonIds:
+          type: array
+          description: >
+            For role=parent only: the athletes the redeemer becomes the guardian of. Each
+            must already be visible in this organization.
+          items: { type: string, format: uuid }
+    AcceptInvitationRequest:
+      type: object
+      required: [token]
+      properties:
+        token: { type: string }
+    InvitationAccepted:
+      type: object
+      properties:
+        organizationId: { type: string, format: uuid }
+        organizationName: { type: string }
+        role: { $ref: "#/components/schemas/Role" }
+        linkedChildren:
+          type: array
+          items: { $ref: "#/components/schemas/PersonRef" }
+        access: { $ref: "#/components/schemas/Access" }
     LinkGuardianRequest:
       type: object
       required: [guardianPersonId]
