@@ -588,3 +588,194 @@ func TestSyncPullAlwaysMakesProgress(t *testing.T) {
 		t.Fatalf("the next page should carry the rest, got %d records", len(second.Records))
 	}
 }
+
+// TestSyncRejectsACursorItCouldNotHaveIssued — a cursor is a sequence position, so the
+// only shapes it takes are "absent" and "a non-negative integer". Anything else is a
+// client bug, and answering it with a silent resync from the beginning (which is what
+// this did) hides that bug behind the most expensive pull the API offers.
+func TestSyncRejectsACursorItCouldNotHaveIssued(t *testing.T) {
+	resetDB(t)
+	coach, _ := signInCoach(t, "badcursor@e.com")
+
+	for _, since := range []string{"abc", "-1", "1e3", "3.5", "0x10"} {
+		r := do(t, http.MethodGet, "/api/v1/sync?since="+since, coach, nil)
+		if r.status != http.StatusBadRequest {
+			t.Errorf("since=%q: status %d, want 400 — body %s", since, r.status, r.raw)
+		}
+	}
+
+	// An absent cursor still means "I have never synced", which is not an error.
+	if r := do(t, http.MethodGet, "/api/v1/sync", coach, nil); r.status != http.StatusOK {
+		t.Errorf("an absent cursor must still sync from the beginning: %d %s", r.status, r.raw)
+	}
+	if r := do(t, http.MethodGet, "/api/v1/sync?since=0", coach, nil); r.status != http.StatusOK {
+		t.Errorf("since=0 must still sync from the beginning: %d %s", r.status, r.raw)
+	}
+}
+
+// TestSyncResyncsADeviceStrandedByARestore — the AUDIT-5 M2 defect, from the device's
+// side. A pull used to seed its high-water mark with whatever cursor it was handed and
+// raise it only over rows it delivered, so a cursor past the end of the sequence came
+// back unchanged with an empty page — which is exactly the client's "you are up to
+// date" condition. Every device that had synced past a restore point silently stepped
+// over the records written into the seqs it had already passed, then resumed normally,
+// so nothing ever surfaced the gap.
+//
+// The way in is the recovery path 0009 documents in its own header: "the way back is a
+// database restore."
+func TestSyncResyncsADeviceStrandedByARestore(t *testing.T) {
+	resetDB(t)
+	coach, _ := signInCoach(t, "restored@e.com")
+	ctx := context.Background()
+
+	push := func(ids ...string) {
+		t.Helper()
+		ups := []map[string]any{}
+		for _, id := range ids {
+			ups = append(ups, map[string]any{
+				"type": "Note", "id": id, "payload": map[string]any{"v": id}})
+		}
+		if r := do(t, http.MethodPost, "/api/v1/sync", coach, map[string]any{
+			"upserts": ups,
+		}); r.status != http.StatusOK {
+			t.Fatalf("push: %d %s", r.status, r.raw)
+		}
+	}
+	// drain is the client loop: ask again from the cursor until it stops moving.
+	drain := func(from string, seen map[string]bool) string {
+		t.Helper()
+		cursor := from
+		for i := 0; i < 50; i++ {
+			r := do(t, http.MethodGet, "/api/v1/sync?since="+cursor, coach, nil)
+			if r.status != http.StatusOK {
+				t.Fatalf("pull(since=%s): %d %s", cursor, r.status, r.raw)
+			}
+			var p syncPull
+			if err := json.Unmarshal(r.raw, &p); err != nil {
+				t.Fatalf("decode: %v", err)
+			}
+			for _, rec := range p.Records {
+				seen[rec.ID] = true
+			}
+			if p.Cursor == cursor {
+				return cursor
+			}
+			cursor = p.Cursor
+		}
+		t.Fatal("drain did not terminate")
+		return ""
+	}
+
+	device := map[string]bool{}
+	push("a", "b", "c", "d", "e", "f")
+	cursor := drain("0", device)
+
+	// The restore: rows above seq 3 are gone and sync_seq resumes there. The device is
+	// untouched and still holds a cursor from after that point.
+	if _, err := testPool.Exec(ctx, `DELETE FROM sync_documents WHERE seq > 3`); err != nil {
+		t.Fatalf("restore (rows): %v", err)
+	}
+	// setval with is_called=true is the shape pg_dump and PITR restore a sequence in:
+	// last_value reads back as 3 and the next nextval returns 4. ALTER SEQUENCE RESTART
+	// would leave last_value NULL, which is a state no real restore produces.
+	if _, err := testPool.Exec(ctx, `SELECT setval('sync_seq', 3, true)`); err != nil {
+		t.Fatalf("restore (sequence): %v", err)
+	}
+
+	// The device reconnects. Its cursor is above the sequence, so it is rewound and
+	// resynced rather than told it is up to date.
+	cursor = drain(cursor, device)
+	if cursor != "3" {
+		t.Fatalf("a stranded device should have been resynced to the restored high-water "+
+			"mark, cursor is %q", cursor)
+	}
+
+	// The coach carries on. These take the seqs the device had already passed, and are
+	// exactly what it used to skip.
+	push("g", "h", "i")
+	cursor = drain(cursor, device)
+	push("j", "k")
+	drain(cursor, device)
+
+	// Everything a device installing today would see.
+	fresh := map[string]bool{}
+	drain("0", fresh)
+
+	for id := range fresh {
+		if !device[id] {
+			t.Errorf("%s exists on the server but was never delivered to a device that "+
+				"held a cursor from before the restore", id)
+		}
+	}
+}
+
+// TestSyncCannotSeeAStaleCursorOnceTheSequenceCatchesUp pins the edge of what the
+// bounds check can do, so the next reader does not mistake it for a closed hole.
+//
+// The check compares the cursor against sync_seq. That only identifies a stale cursor
+// while the sequence is still below it. If enough writes land after the restore to
+// carry the sequence back past the cursor *before* the device reconnects, the cursor is
+// indistinguishable from a legitimate one and the device silently skips the rows
+// written into that window — the original M2 defect, in the narrower window the check
+// leaves behind.
+//
+// Closing it needs something the server cannot derive from restored state alone, since
+// a restore rewinds every record of what was issued along with the data. The two real
+// answers are operational or a wire change, and both are written up in docs/AUDIT-5.md
+// M2: bump sync_seq past the pre-restore high-water mark as part of the restore, or
+// carry an epoch alongside the cursor.
+//
+// This test asserts the limitation rather than the fix. If it ever starts failing,
+// something closed the window and this should become a fix test.
+func TestSyncCannotSeeAStaleCursorOnceTheSequenceCatchesUp(t *testing.T) {
+	resetDB(t)
+	coach, _ := signInCoach(t, "caughtup@e.com")
+	ctx := context.Background()
+
+	push := func(ids ...string) {
+		t.Helper()
+		ups := []map[string]any{}
+		for _, id := range ids {
+			ups = append(ups, map[string]any{
+				"type": "Note", "id": id, "payload": map[string]any{"v": id}})
+		}
+		if r := do(t, http.MethodPost, "/api/v1/sync", coach, map[string]any{
+			"upserts": ups,
+		}); r.status != http.StatusOK {
+			t.Fatalf("push: %d %s", r.status, r.raw)
+		}
+	}
+
+	push("a", "b", "c", "d", "e", "f")
+	r := do(t, http.MethodGet, "/api/v1/sync?since=0", coach, nil)
+	var first syncPull
+	if err := json.Unmarshal(r.raw, &first); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	stale := first.Cursor // "6"
+
+	if _, err := testPool.Exec(ctx, `DELETE FROM sync_documents WHERE seq > 3`); err != nil {
+		t.Fatalf("restore (rows): %v", err)
+	}
+	// setval with is_called=true is the shape pg_dump and PITR restore a sequence in:
+	// last_value reads back as 3 and the next nextval returns 4. ALTER SEQUENCE RESTART
+	// would leave last_value NULL, which is a state no real restore produces.
+	if _, err := testPool.Exec(ctx, `SELECT setval('sync_seq', 3, true)`); err != nil {
+		t.Fatalf("restore (sequence): %v", err)
+	}
+
+	// Writes land before the device reconnects, carrying sync_seq back up to 6.
+	push("g", "h", "i")
+
+	r = do(t, http.MethodGet, "/api/v1/sync?since="+stale, coach, nil)
+	var after syncPull
+	if err := json.Unmarshal(r.raw, &after); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if len(after.Records) != 0 {
+		t.Fatalf("the window is closed — this test is now obsolete and should become a "+
+			"fix test; got %d records", len(after.Records))
+	}
+	t.Logf("known gap: cursor %q survives because sync_seq caught back up to it; "+
+		"g,h,i are skipped silently (docs/AUDIT-5.md M2)", stale)
+}

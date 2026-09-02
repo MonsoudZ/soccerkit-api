@@ -11,6 +11,44 @@ import (
 	"github.com/google/uuid"
 )
 
+const currentSyncSeq = `-- name: CurrentSyncSeq :one
+WITH s AS (SELECT pg_sequence_last_value('sync_seq'::regclass) AS v)
+SELECT (v IS NOT NULL)::boolean AS known, coalesce(v, 0)::bigint AS seq FROM s
+`
+
+type CurrentSyncSeqRow struct {
+	Known bool  `json:"known"`
+	Seq   int64 `json:"seq"`
+}
+
+// The highest cursor this server could have issued.
+//
+// A pull uses it to bounds-check the cursor it was handed. Every cursor the server
+// returns is the seq of a row it actually delivered, so a legitimate cursor is never
+// above this; a cursor that is can only have come from a sequence that moved backwards
+// under a client that had already passed it -- which is what a database restore does,
+// and a restore is the documented way back from 0009. Without the check, such a cursor
+// is answered with an empty page and echoed back unchanged, which is exactly the
+// client's "you are up to date" condition. See docs/AUDIT-5.md M2.
+//
+// pg_sequence_last_value reads the sequence's own page rather than consuming a value,
+// so this costs no cursor and no write.
+//
+// It is NULL when the sequence has not been called since it was created or reset, and
+// that is deliberately left as NULL rather than folded to 0. A restore taken by pg_dump
+// or PITR brings last_value back with is_called set, so the real case this guards has a
+// number. NULL means something reset the sequence without writing through it, and then
+// 0 is not the highest cursor the server could have issued -- the rows still carry
+// higher seqs, and folding to 0 would make a pull reject the cursor it had itself just
+// returned, resyncing that device from the beginning on every single pull. The caller
+// reads `known = false` as "no bound available" and lets the cursor stand.
+func (q *Queries) CurrentSyncSeq(ctx context.Context) (CurrentSyncSeqRow, error) {
+	row := q.db.QueryRow(ctx, currentSyncSeq)
+	var i CurrentSyncSeqRow
+	err := row.Scan(&i.Known, &i.Seq)
+	return i, err
+}
+
 const listSyncChangesSince = `-- name: ListSyncChangesSince :many
 SELECT delta.type, delta.id, delta.payload, delta.deleted, delta.seq FROM (
     SELECT 'Team'::text    AS type, t.id::text AS id, t.payload AS payload, t.deleted AS deleted, t.seq AS seq

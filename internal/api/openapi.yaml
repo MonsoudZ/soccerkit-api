@@ -173,14 +173,27 @@ paths:
           name: since
           schema: { type: string }
           description: >
-            The cursor from a previous response. Omit for a full sync. An unparseable
-            value is treated as the beginning rather than an error.
+            The cursor from a previous response. Omit for a full sync.
+
+
+            It must be a non-negative integer this server issued. Anything else — a
+            negative or unparseable value — is a 400: it can only be a client bug, and
+            answering it with a silent full sync hid that bug behind an expensive pull.
+
+
+            A cursor *above* the server's sequence is not an error and not the client's
+            fault. It means the sequence moved backwards under a device that had already
+            passed it, which is what restoring the database does. Such a cursor is
+            answered with a full sync from the beginning and logged server-side; the
+            device converges on its own. Note that rows the restore removed left no
+            tombstone, so a device may still hold those locally.
       responses:
         "200":
           description: OK
           content:
             application/json:
               schema: { $ref: "#/components/schemas/SyncPullResponse" }
+        "400": { $ref: "#/components/responses/Error" }
         "401": { $ref: "#/components/responses/Error" }
     post:
       tags: [sync]

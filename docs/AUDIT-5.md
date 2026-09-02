@@ -151,6 +151,33 @@ deliberately, and the number should come from data rather than from this report.
 
 ### M2 — a cursor this server never issued is taken at its word (confirmed)
 
+> **Status.** Fixed in the commit following this one, and the reproduction was re-run
+> against the fixed code. Left in the present tense as a record of what was wrong.
+>
+> **What shipped differs from what this section recommends, in one deliberate way.** The
+> fix below proposes a 400 for any cursor the server could not have issued. That is right
+> for an unparseable or negative cursor — only a client bug produces one — and that is
+> what ships. It is wrong for a cursor *ahead of the sequence*, which is not the client's
+> fault at all: it is the fingerprint of a restore, and answering it with an error would
+> stop sync dead on every device in the field until the iOS app learned to handle a new
+> error. Those cursors are instead rewound to 0 and resynced, and logged server-side with
+> the remedy in the message. Devices converge on their own, with no app change.
+>
+> **And the check is narrower than this section claims.** It compares the cursor against
+> `sync_seq`, so it can only recognise a stale cursor *while the sequence is still below
+> it*. Once post-restore writes carry the sequence back over a device's cursor, that
+> cursor is indistinguishable from a legitimate one and a device reconnecting after that
+> point still skips the window silently. The server cannot do better unaided — a restore
+> rewinds every record of what was issued along with the data, leaving nothing to compare
+> against. `TestSyncCannotSeeAStaleCursorOnceTheSequenceCatchesUp` pins that edge so it is
+> not mistaken for a closed hole.
+>
+> **So the restore runbook now carries the other half, and it is the cheaper half:**
+> after restoring, set `sync_seq` above the pre-restore high-water mark. Every cursor in
+> the field is then below the sequence again, new writes land above all of them, and no
+> device skips anything — no code and no wire change. The bounds check is what catches
+> the restore where nobody did that.
+
 `handleSyncPull` seeds its high-water mark with the cursor the client sent
 (`high := since`) and raises it only over rows it actually delivered. That rule is right,
 and AUDIT-4 and the paging work both lean on it. What is missing is any check that the
@@ -298,9 +325,12 @@ seven projected tables should match it.
 
 ## Suggested order of work
 
-1. **M2's bounds check** — a few lines, and it converts a silent fleet-wide data gap into
-   one visible error. Worth doing before `0009` ships, because `0009` is the change whose
-   documented recovery path walks into it.
+1. ~~**M2's bounds check**~~ — done, with the two deliberate departures recorded in the
+   status note under M2: an ahead-of-sequence cursor resyncs rather than erroring, and
+   the check only catches a stranded device while the sequence is still below its cursor.
+   **The remaining half is a runbook line, not code: after any restore, bump `sync_seq`
+   past the pre-restore high-water mark.** That is what makes every cursor in the field
+   valid again, and it should be written into the restore procedure `0009` points at.
 2. **M1 (1) and (2)** — not selecting tombstone payloads, and cutting bytes in SQL. Local
    to one query, no wire change, and together they remove the allocation blowup.
 3. **L1** — null the payload and PII on tombstone. Small, and it is the right answer to

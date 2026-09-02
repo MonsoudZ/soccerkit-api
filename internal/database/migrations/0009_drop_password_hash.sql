@@ -8,6 +8,18 @@
 -- so rolling the app back does not roll the schema back with it. The way back is a
 -- database restore.
 --
+-- If it ever comes to that, the restore has one extra step, and skipping it loses coach
+-- data silently. Restoring rewinds sync_seq while every device in the field still holds
+-- a cursor from after the restore point, and a pull only recognises such a cursor while
+-- the sequence is still below it -- once new writes carry it back over, the device skips
+-- whatever landed in the seqs it had already passed and then syncs normally, so nothing
+-- surfaces the gap. So, immediately after restoring and before letting clients back in:
+--
+--   SELECT setval('sync_seq', <the pre-restore high-water mark> + 1000000);
+--
+-- Every cursor in the field is then below the sequence again and new writes land above
+-- all of them, so no device skips anything. See docs/AUDIT-5.md M2.
+--
 -- That is why this is not in the release that removed password authentication. That
 -- release carries all the behaviour and all the risk, and keeping the schema untouched is
 -- what lets it be rolled back (verified: deploy it, roll the binary back one release

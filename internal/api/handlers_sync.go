@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"log"
 	"net/http"
 	"strconv"
 
@@ -56,7 +57,15 @@ type syncPullResponse struct {
 // means there was nothing more to advance it with.
 func (s *Server) handleSyncPull(w http.ResponseWriter, r *http.Request) {
 	account := personIDFrom(r.Context())
-	since := parseCursor(r.URL.Query().Get("since"))
+	since, err := parseCursor(r.URL.Query().Get("since"))
+	if err != nil {
+		writeError(w, err)
+		return
+	}
+	if since, err = s.cursorWithinSequence(r.Context(), account, since); err != nil {
+		writeError(w, err)
+		return
+	}
 
 	rows, err := s.store.ListSyncChangesSince(r.Context(), store.ListSyncChangesSinceParams{
 		SyncAccountID: &account, Seq: &since, Lim: maxSyncPage,
@@ -92,6 +101,64 @@ func (s *Server) handleSyncPull(w http.ResponseWriter, r *http.Request) {
 	}
 	resp.Cursor = cursorString(high)
 	writeJSON(w, http.StatusOK, resp)
+}
+
+// cursorWithinSequence keeps a pull from confirming a read position this server could
+// never have issued, and resyncs the device from the beginning when it finds one.
+//
+// Every cursor a pull returns is the seq of a row it actually delivered, so a
+// legitimate cursor is never above sync_seq. A cursor that is above it means the
+// sequence moved backwards underneath a device that had already passed it, and the
+// way that happens is a database restore — which is the documented way back from
+// `0009`. The device is not at fault and there is nothing for it to fix, so this is
+// not an error: it is answered by rewinding it to 0 and letting the ordinary drain
+// deliver the whole delta again.
+//
+// What it must not do is what it used to. `high` starts at the cursor the client sent
+// and only rises over rows actually delivered, so an impossible cursor came back
+// unchanged alongside an empty page — and an unmoved cursor is precisely the client's
+// "you are up to date" condition. Every device that had synced past the restore point
+// silently skipped whatever was written into the seqs it had already passed, then
+// resumed normally, so nothing ever surfaced the gap. See docs/AUDIT-5.md M2.
+//
+// What this does not close, and it matters: the comparison can only identify a stale
+// cursor while the sequence is still below it. Once enough writes land to carry
+// sync_seq back over a device's cursor, that cursor is indistinguishable from a
+// legitimate one, and a device reconnecting after that point still skips the window
+// silently. The server cannot do better on its own — a restore rewinds every record of
+// what was issued along with the data, so there is nothing left to compare against.
+// The two answers that do close it are a restore-time step (bump sync_seq past the
+// pre-restore high-water mark, which makes every cursor in the field valid again and
+// costs nothing) and an epoch carried alongside the cursor (a wire change). Both are
+// written up in docs/AUDIT-5.md M2, and the log line above names the first because it
+// is the one someone can act on while reading it.
+// TestSyncCannotSeeAStaleCursorOnceTheSequenceCatchesUp pins this edge.
+//
+// One caveat neither answer fixes, and the log line exists partly to prompt it: a
+// resync from 0 delivers everything that exists, but rows the restore removed left no
+// tombstone behind, so a device still holds those locally. Converging on that needs a
+// reinstall or a client-side reconciliation; the server has nothing left to send.
+//
+// Costs one cheap read of the sequence page — no value is consumed — and only when the
+// caller actually sent a cursor, so the reinstall path (since=0) does not pay for it.
+func (s *Server) cursorWithinSequence(ctx context.Context, account uuid.UUID, since int64) (int64, error) {
+	if since == 0 {
+		return 0, nil
+	}
+	current, err := s.store.CurrentSyncSeq(ctx)
+	if err != nil {
+		return 0, err
+	}
+	if !current.Known || since <= current.Seq {
+		return since, nil
+	}
+	log.Printf("sync: account %s presented cursor %d, ahead of sync_seq %d; "+
+		"resyncing it from 0. A cursor above the sequence means the sequence moved "+
+		"backwards under a device that had passed it — check whether this database "+
+		"was restored, and if it was, bump sync_seq past the pre-restore high-water "+
+		"mark, because this check stops finding stranded devices once writes carry "+
+		"the sequence back over their cursors.", account, since, current.Seq)
+	return 0, nil
 }
 
 // handleSyncPush applies the client's local changes. Each record is routed by
@@ -388,16 +455,28 @@ func applied(rows int64, err error) (bool, error) {
 	return rows > 0, nil
 }
 
-// parseCursor turns the opaque cursor string into a seq, defaulting to 0.
-func parseCursor(s string) int64 {
+// parseCursor turns the opaque cursor string into a seq.
+//
+// An absent cursor is 0: a device that has never synced. Anything else has to be a
+// value this server could have issued, and a cursor is a sequence position, so that
+// means a non-negative integer and nothing else. This used to answer garbage with a
+// silent 0 — a full resync, which after the paging change is hundreds of round trips —
+// so a client bug that corrupted its stored cursor showed up as an expensive pull
+// rather than as an error. It is the client's own bug either way; saying so is the
+// only way it gets fixed.
+//
+// The message deliberately does not echo the value back: it is caller-controlled and
+// there is nothing in it the caller does not already know.
+func parseCursor(s string) (int64, error) {
 	if s == "" {
-		return 0
+		return 0, nil
 	}
 	n, err := strconv.ParseInt(s, 10, 64)
-	if err != nil {
-		return 0
+	if err != nil || n < 0 {
+		return 0, errValidation("since must be a non-negative integer cursor issued by " +
+			"this server, or absent to sync from the beginning")
 	}
-	return n
+	return n, nil
 }
 
 func cursorString(seq int64) *string {

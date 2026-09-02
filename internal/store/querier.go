@@ -70,6 +70,28 @@ type Querier interface {
 	// Sign in with Apple is the only path that creates an account, so an account is born
 	// with its Apple subject and there is no credential of ours to store alongside it.
 	CreateUserAccount(ctx context.Context, arg CreateUserAccountParams) (UserAccount, error)
+	// The highest cursor this server could have issued.
+	//
+	// A pull uses it to bounds-check the cursor it was handed. Every cursor the server
+	// returns is the seq of a row it actually delivered, so a legitimate cursor is never
+	// above this; a cursor that is can only have come from a sequence that moved backwards
+	// under a client that had already passed it -- which is what a database restore does,
+	// and a restore is the documented way back from 0009. Without the check, such a cursor
+	// is answered with an empty page and echoed back unchanged, which is exactly the
+	// client's "you are up to date" condition. See docs/AUDIT-5.md M2.
+	//
+	// pg_sequence_last_value reads the sequence's own page rather than consuming a value,
+	// so this costs no cursor and no write.
+	//
+	// It is NULL when the sequence has not been called since it was created or reset, and
+	// that is deliberately left as NULL rather than folded to 0. A restore taken by pg_dump
+	// or PITR brings last_value back with is_called set, so the real case this guards has a
+	// number. NULL means something reset the sequence without writing through it, and then
+	// 0 is not the highest cursor the server could have issued -- the rows still carry
+	// higher seqs, and folding to 0 would make a pull reject the cursor it had itself just
+	// returned, resyncing that device from the beginning on every single pull. The caller
+	// reads `known = false` as "no bound available" and lets the cursor stand.
+	CurrentSyncSeq(ctx context.Context) (CurrentSyncSeqRow, error)
 	DeleteOrganizationsByIDs(ctx context.Context, ids []uuid.UUID) error
 	DeletePersonByID(ctx context.Context, id uuid.UUID) error
 	DeletePersonsByIDs(ctx context.Context, ids []uuid.UUID) error
