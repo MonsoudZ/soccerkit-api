@@ -90,13 +90,16 @@ func (q *Queries) CreateTeam(ctx context.Context, arg CreateTeamParams) (Team, e
 }
 
 const deleteTeam = `-- name: DeleteTeam :exec
-UPDATE teams SET deleted = true, seq = nextval('sync_seq'), updated_at = now()
+UPDATE teams SET deleted = true, seq = nextval('sync_seq'), updated_at = now(),
+    name = '', age_group = NULL, season = NULL, payload = NULL
 WHERE id = $1
 `
 
 // A REST delete tombstones rather than dropping the row, so the deletion reaches sync
 // clients. A hard DELETE produced no row for ListSyncChangesSince to return, so a device
 // holding the team was never told it was gone and re-created it on its next push.
+// Clears the row's content for the same reason SyncTombstoneTeam does: a tombstone
+// needs the id, the flag and a seq, and nothing else. See docs/AUDIT-5.md L1.
 func (q *Queries) DeleteTeam(ctx context.Context, id uuid.UUID) error {
 	_, err := q.db.Exec(ctx, deleteTeam, id)
 	return err

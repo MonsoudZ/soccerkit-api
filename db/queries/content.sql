@@ -30,7 +30,8 @@ ORDER BY scheduled_at DESC NULLS LAST, created_at DESC;
 
 -- name: DeleteSession :exec
 -- Tombstoned, not dropped — see DeleteTeam.
-UPDATE sessions SET deleted = true, seq = nextval('sync_seq'), updated_at = now()
+UPDATE sessions SET deleted = true, seq = nextval('sync_seq'), updated_at = now(),
+    title = '', notes = NULL, payload = NULL
 WHERE id = $1;
 
 -- name: CreateSessionBlock :one

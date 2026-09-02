@@ -828,3 +828,135 @@ func TestSyncPullDoesNotSpendTheByteBudgetOnTombstones(t *testing.T) {
 			"leaking back into the response", tombstones, len(r.raw))
 	}
 }
+
+// TestSyncTombstoneClearsWhatItHeld — a tombstoned row used to keep everything it had,
+// for as long as it existed, with nothing to ever revisit it. For persons that meant a
+// deleted athlete's medical notes and emergency contact stayed in the database
+// indefinitely: a coach who deleted an athlete had not deleted the athlete's data.
+// sync_documents already cleared its payload on write; the seven projected tables did
+// not. See docs/AUDIT-5.md L1.
+func TestSyncTombstoneClearsWhatItHeld(t *testing.T) {
+	resetDB(t)
+	coach, _ := signInCoach(t, "tombclear@e.com")
+	ctx := context.Background()
+
+	personID := "7e5a0000-0000-4000-8000-0000000000a1"
+	push := func(body map[string]any) {
+		t.Helper()
+		if r := do(t, http.MethodPost, "/api/v1/sync", coach, body); r.status != http.StatusOK {
+			t.Fatalf("push: %d %s", r.status, r.raw)
+		}
+	}
+	push(map[string]any{"upserts": []map[string]any{{
+		"type": "Person", "id": personID,
+		"payload": map[string]any{
+			"name":                  "Sam Athlete",
+			"emergencyContactName":  "Pat Guardian",
+			"emergencyContactPhone": "+1-555-0100",
+			"medicalNotes":          "carries an epinephrine auto-injector",
+		},
+	}}})
+
+	// Everything is stored while the row is live.
+	var name string
+	var contact, phone, notes, payload *string
+	row := func() {
+		t.Helper()
+		if err := testPool.QueryRow(ctx, `
+			SELECT display_name, emergency_contact_name, emergency_contact_phone,
+			       medical_notes, payload::text
+			FROM persons WHERE id = $1`, personID,
+		).Scan(&name, &contact, &phone, &notes, &payload); err != nil {
+			t.Fatalf("read persons row: %v", err)
+		}
+	}
+	row()
+	if name != "Sam Athlete" || contact == nil || notes == nil || payload == nil {
+		t.Fatalf("precondition: the live row should hold everything, got %q %v %v %v",
+			name, contact, notes, payload)
+	}
+
+	push(map[string]any{"deletes": []map[string]any{{"type": "Person", "id": personID}}})
+
+	row()
+	if name != "" {
+		t.Errorf("display_name survived the tombstone: %q", name)
+	}
+	for label, got := range map[string]*string{
+		"emergency_contact_name":  contact,
+		"emergency_contact_phone": phone,
+		"medical_notes":           notes,
+		"payload":                 payload,
+	} {
+		if got != nil {
+			t.Errorf("%s survived the tombstone: %q", label, *got)
+		}
+	}
+
+	// The tombstone still does its job: the delete reaches a syncing client.
+	var p syncPull
+	r := do(t, http.MethodGet, "/api/v1/sync?since=0", coach, nil)
+	if err := json.Unmarshal(r.raw, &p); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	var sawDelete bool
+	for _, d := range p.Deletes {
+		if d.ID == personID && d.Type == "Person" {
+			sawDelete = true
+		}
+	}
+	if !sawDelete {
+		t.Errorf("the tombstone must still be delivered as a delete: %s", r.raw)
+	}
+
+	// And clearing is reversible, because a tombstone clears exactly the columns its
+	// upsert sets: pushing the record again restores every one of them.
+	push(map[string]any{"upserts": []map[string]any{{
+		"type": "Person", "id": personID,
+		"payload": map[string]any{
+			"name": "Sam Athlete", "medicalNotes": "carries an epinephrine auto-injector",
+		},
+	}}})
+	row()
+	if name != "Sam Athlete" || notes == nil || *notes != "carries an epinephrine auto-injector" {
+		t.Errorf("re-pushing the record should restore what the tombstone cleared, got %q %v",
+			name, notes)
+	}
+}
+
+// TestRESTDeleteAlsoClearsWhatItHeld — DeleteTeam tombstones rather than dropping, so
+// the deletion reaches sync clients. It has to clear the row for the same reason the
+// sync path does, or which endpoint the coach happened to delete through decides whether
+// the data stays behind.
+func TestRESTDeleteAlsoClearsWhatItHeld(t *testing.T) {
+	resetDB(t)
+	coach, _ := signInCoach(t, "restclear@e.com")
+	ctx := context.Background()
+
+	create := do(t, http.MethodPost, "/api/v1/teams", coach, map[string]any{
+		"name": "U12 Rovers", "ageGroup": "U12", "season": "2026",
+	})
+	if create.status != http.StatusCreated && create.status != http.StatusOK {
+		t.Fatalf("create team: %d %s", create.status, create.raw)
+	}
+	teamID, _ := create.body["id"].(string)
+	if teamID == "" {
+		t.Fatalf("no team id: %s", create.raw)
+	}
+
+	if r := do(t, http.MethodDelete, "/api/v1/teams/"+teamID, coach, nil); r.status/100 != 2 {
+		t.Fatalf("delete team: %d %s", r.status, r.raw)
+	}
+
+	var name string
+	var ageGroup, season, payload *string
+	if err := testPool.QueryRow(ctx, `
+		SELECT name, age_group, season, payload::text FROM teams WHERE id = $1`, teamID,
+	).Scan(&name, &ageGroup, &season, &payload); err != nil {
+		t.Fatalf("read teams row: %v", err)
+	}
+	if name != "" || ageGroup != nil || season != nil || payload != nil {
+		t.Errorf("a REST delete left the row's content behind: name=%q ageGroup=%v season=%v payload=%v",
+			name, ageGroup, season, payload)
+	}
+}

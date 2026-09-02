@@ -131,17 +131,39 @@ WHERE sessions.sync_account_id = EXCLUDED.sync_account_id;
 
 -- Tombstones are per-table: a delete can only affect a row this account owns,
 -- so REST-created rows (sync_account_id IS NULL) are never tombstoned.
+--
+-- A tombstone clears exactly what its upsert sets, and keeps only what a tombstone needs
+-- to do its job: the id, the deleted flag and a fresh seq. It went on holding everything
+-- -- names, medical notes, emergency contacts, the whole payload -- for as long as the
+-- row existed, and nothing ever revisited them. A coach who deleted an athlete had not
+-- deleted that athlete's medical notes. sync_documents already cleared its payload on
+-- write; these seven did not (see docs/AUDIT-5.md L1).
+--
+-- Clearing precisely the upsert's own columns is what keeps this reversible: pushing the
+-- record again restores every field that was cleared, because they are the same fields.
+-- Columns the sync upsert never writes are left alone for the same reason -- REST owns
+-- them, a sync delete has no business dropping them, and nothing would put them back.
+-- The NOT NULL display columns take '' rather than NULL; no read reaches a tombstoned
+-- row, so the value is unobservable either way, and '' keeps the constraint honest.
+--
+-- The trade, stated once: the server can no longer reconstruct a record from a delete it
+-- has applied. There is no undelete endpoint and no read path that returns a tombstoned
+-- row, so nothing loses a capability it had -- but a mistaken delete is now the client's
+-- to recover from, not ours.
 
 -- name: SyncTombstoneTeam :execrows
-UPDATE teams SET deleted = true, seq = nextval('sync_seq'), updated_at = now()
+UPDATE teams SET deleted = true, seq = nextval('sync_seq'), updated_at = now(),
+    name = '', age_group = NULL, season = NULL, payload = NULL
 WHERE id = $1 AND sync_account_id = $2;
 
 -- name: SyncTombstoneDrill :execrows
-UPDATE drills SET deleted = true, seq = nextval('sync_seq'), updated_at = now()
+UPDATE drills SET deleted = true, seq = nextval('sync_seq'), updated_at = now(),
+    name = '', description = NULL, payload = NULL
 WHERE id = $1 AND sync_account_id = $2;
 
 -- name: SyncTombstoneSession :execrows
-UPDATE sessions SET deleted = true, seq = nextval('sync_seq'), updated_at = now()
+UPDATE sessions SET deleted = true, seq = nextval('sync_seq'), updated_at = now(),
+    title = '', notes = NULL, payload = NULL
 WHERE id = $1 AND sync_account_id = $2;
 
 -- name: SyncUpsertDocument :execrows
@@ -176,7 +198,14 @@ WHERE persons.sync_account_id = EXCLUDED.sync_account_id
    OR (persons.sync_account_id IS NULL AND persons.id = EXCLUDED.sync_account_id);
 
 -- name: SyncTombstonePerson :execrows
-UPDATE persons SET deleted = true, seq = nextval('sync_seq'), updated_at = now()
+-- The one that motivated the rule. medical_notes and the emergency contact of a deleted
+-- athlete are the most sensitive fields this service stores, and they were kept forever.
+-- email, phone, birthdate and the given/family names are deliberately not touched:
+-- SyncUpsertPerson does not write them, REST does, and clearing what cannot be restored
+-- would turn a sync delete into permanent loss of data it does not own.
+UPDATE persons SET deleted = true, seq = nextval('sync_seq'), updated_at = now(),
+    display_name = '', emergency_contact_name = NULL, emergency_contact_phone = NULL,
+    medical_notes = NULL, payload = NULL
 WHERE id = $1 AND sync_account_id = $2;
 
 -- name: SyncUpsertPlayer :execrows
@@ -189,7 +218,8 @@ SET person_id = EXCLUDED.person_id, name = EXCLUDED.name, number = EXCLUDED.numb
 WHERE players.sync_account_id = EXCLUDED.sync_account_id;
 
 -- name: SyncTombstonePlayer :execrows
-UPDATE players SET deleted = true, seq = nextval('sync_seq'), updated_at = now()
+UPDATE players SET deleted = true, seq = nextval('sync_seq'), updated_at = now(),
+    name = NULL, number = NULL, position = NULL, payload = NULL
 WHERE id = $1 AND sync_account_id = $2;
 
 -- name: SyncUpsertEvent :execrows
@@ -202,7 +232,8 @@ SET team_id = EXCLUDED.team_id, title = EXCLUDED.title, kind = EXCLUDED.kind,
 WHERE events.sync_account_id = EXCLUDED.sync_account_id;
 
 -- name: SyncTombstoneEvent :execrows
-UPDATE events SET deleted = true, seq = nextval('sync_seq'), updated_at = now()
+UPDATE events SET deleted = true, seq = nextval('sync_seq'), updated_at = now(),
+    title = NULL, kind = NULL, payload = NULL
 WHERE id = $1 AND sync_account_id = $2;
 
 -- name: SyncUpsertDiagram :execrows
@@ -215,7 +246,8 @@ SET team_id = EXCLUDED.team_id, title = EXCLUDED.title,
 WHERE diagrams.sync_account_id = EXCLUDED.sync_account_id;
 
 -- name: SyncTombstoneDiagram :execrows
-UPDATE diagrams SET deleted = true, seq = nextval('sync_seq'), updated_at = now()
+UPDATE diagrams SET deleted = true, seq = nextval('sync_seq'), updated_at = now(),
+    title = NULL, payload = NULL
 WHERE id = $1 AND sync_account_id = $2;
 
 -- name: CurrentSyncSeq :one

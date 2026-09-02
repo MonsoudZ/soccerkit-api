@@ -427,10 +427,14 @@ func (q *Queries) HasMembership(ctx context.Context, arg HasMembershipParams) (b
 const listChildren = `-- name: ListChildren :many
 SELECT p.id, p.display_name, p.given_name, p.family_name, p.birthdate, p.email, p.phone, p.emergency_contact_name, p.emergency_contact_phone, p.medical_notes, p.created_at, p.updated_at, p.sync_account_id, p.payload, p.deleted, p.seq FROM guardianships g
 JOIN persons p ON p.id = g.child_person_id
-WHERE g.guardian_person_id = $1
+WHERE g.guardian_person_id = $1 AND p.deleted = false
 ORDER BY p.display_name ASC
 `
 
+// p.deleted = false for the same reason every other person read has it: a tombstoned
+// Person is gone, and since a tombstone now clears its display columns it would list as
+// a blank row rather than a name. Nothing calls this yet -- guardianships are not
+// exposed -- which is exactly why it is worth fixing before something does.
 func (q *Queries) ListChildren(ctx context.Context, guardianPersonID uuid.UUID) ([]Person, error) {
 	rows, err := q.db.Query(ctx, listChildren, guardianPersonID)
 	if err != nil {

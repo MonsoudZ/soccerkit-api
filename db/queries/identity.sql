@@ -110,9 +110,13 @@ ON CONFLICT (guardian_person_id, child_person_id) DO NOTHING
 RETURNING *;
 
 -- name: ListChildren :many
+-- p.deleted = false for the same reason every other person read has it: a tombstoned
+-- Person is gone, and since a tombstone now clears its display columns it would list as
+-- a blank row rather than a name. Nothing calls this yet -- guardianships are not
+-- exposed -- which is exactly why it is worth fixing before something does.
 SELECT p.* FROM guardianships g
 JOIN persons p ON p.id = g.child_person_id
-WHERE g.guardian_person_id = $1
+WHERE g.guardian_person_id = $1 AND p.deleted = false
 ORDER BY p.display_name ASC;
 
 -- name: ListOwnedPersonalOrgIDsForPerson :many

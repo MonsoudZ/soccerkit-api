@@ -297,6 +297,30 @@ it, they are not.
 
 ## Low
 
+> **Status.** Fixed in the commit following this one, on both halves: the tombstone
+> statements now clear, and `0010_scrub_tombstoned_rows.sql` backfills the rows already
+> tombstoned — which is the half that actually removes data somebody has already asked to
+> be rid of. The REST tombstone paths (`DeleteTeam`, `DeleteSession`) clear too, so which
+> endpoint a coach deleted through does not decide whether the data stays.
+>
+> The rule it settled on is **a tombstone clears exactly what its upsert sets**. That is
+> what keeps it reversible — re-pushing the record restores every cleared field, because
+> they are the same fields — and it is why `persons.email`, `phone`, `birthdate` and the
+> given/family names are left alone: REST owns those, `SyncUpsertPerson` never writes
+> them, and clearing what nothing would put back turns a sync delete into permanent loss
+> of data it does not own. The four `NOT NULL` display columns take `''` rather than NULL.
+>
+> The backfill deliberately does not touch `seq`. Every one of those rows has already
+> been delivered to every device as a tombstone; bumping `seq` would re-deliver all of
+> them at once, which for a long-lived account is the largest pull it has ever made, for
+> no change any client can observe. Verified against a planted legacy row: content
+> cleared, `seq` unchanged.
+>
+> One thing this trades, stated where it will be found: the server can no longer
+> reconstruct a record from a delete it has applied. No read path returned a tombstoned
+> row and there is no undelete endpoint, so nothing loses a capability it had — but a
+> mistaken delete is now the client's to recover from.
+
 **L1 — a tombstone keeps everything it was.** `SyncTombstoneDocument` nulls the payload
 when it tombstones a row. The seven projected tables do not: `SyncTombstoneTeam`,
 `SyncTombstonePerson` and their siblings set `deleted = true` and a fresh `seq`, and leave
@@ -367,12 +391,13 @@ seven projected tables should match it.
    valid again, and it should be written into the restore procedure `0009` points at.
 2. ~~**M1 (1) and (2)**~~ — done; see the status note under M1. Allocation is flat in the
    payload size now, and a page of deletes costs what a delete weighs.
-3. **L1** — null the payload and PII on tombstone. The pull query no longer *reads* a
-   tombstone's payload, which was L1's cost to M1, but the data is still sitting in the
-   row: this is the half that answers "we deleted that athlete", and it is unchanged.
+3. ~~**L1**~~ — done, including the backfill for rows already tombstoned; see the status
+   note under L1.
 4. **M1 (3), the per-record payload cap** — the remaining half of M1, and the only thing
    that makes a drain linear again. Decide deliberately, with the real payload size
-   distribution in hand, since it is the one piece that needs the app to agree.
+   distribution in hand, since it is the one piece that needs the app to agree. **This is
+   the next thing to do, and the first step is a measurement, not a change:** run
+   `pg_column_size(payload)` percentiles over a real database before picking a number.
 5. Unchanged from AUDIT-3 and AUDIT-4: the AUDIT-2 leftovers (**L1–L6**) as ordinary
    hardening, with **L4**'s token reaping now the only credential material left in the
    database, and **P2–P4** alongside the club feature.

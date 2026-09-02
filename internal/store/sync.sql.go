@@ -194,7 +194,8 @@ func (q *Queries) ListSyncChangesSince(ctx context.Context, arg ListSyncChangesS
 }
 
 const syncTombstoneDiagram = `-- name: SyncTombstoneDiagram :execrows
-UPDATE diagrams SET deleted = true, seq = nextval('sync_seq'), updated_at = now()
+UPDATE diagrams SET deleted = true, seq = nextval('sync_seq'), updated_at = now(),
+    title = NULL, payload = NULL
 WHERE id = $1 AND sync_account_id = $2
 `
 
@@ -233,7 +234,8 @@ func (q *Queries) SyncTombstoneDocument(ctx context.Context, arg SyncTombstoneDo
 }
 
 const syncTombstoneDrill = `-- name: SyncTombstoneDrill :execrows
-UPDATE drills SET deleted = true, seq = nextval('sync_seq'), updated_at = now()
+UPDATE drills SET deleted = true, seq = nextval('sync_seq'), updated_at = now(),
+    name = '', description = NULL, payload = NULL
 WHERE id = $1 AND sync_account_id = $2
 `
 
@@ -251,7 +253,8 @@ func (q *Queries) SyncTombstoneDrill(ctx context.Context, arg SyncTombstoneDrill
 }
 
 const syncTombstoneEvent = `-- name: SyncTombstoneEvent :execrows
-UPDATE events SET deleted = true, seq = nextval('sync_seq'), updated_at = now()
+UPDATE events SET deleted = true, seq = nextval('sync_seq'), updated_at = now(),
+    title = NULL, kind = NULL, payload = NULL
 WHERE id = $1 AND sync_account_id = $2
 `
 
@@ -269,7 +272,9 @@ func (q *Queries) SyncTombstoneEvent(ctx context.Context, arg SyncTombstoneEvent
 }
 
 const syncTombstonePerson = `-- name: SyncTombstonePerson :execrows
-UPDATE persons SET deleted = true, seq = nextval('sync_seq'), updated_at = now()
+UPDATE persons SET deleted = true, seq = nextval('sync_seq'), updated_at = now(),
+    display_name = '', emergency_contact_name = NULL, emergency_contact_phone = NULL,
+    medical_notes = NULL, payload = NULL
 WHERE id = $1 AND sync_account_id = $2
 `
 
@@ -278,6 +283,11 @@ type SyncTombstonePersonParams struct {
 	SyncAccountID *uuid.UUID `json:"sync_account_id"`
 }
 
+// The one that motivated the rule. medical_notes and the emergency contact of a deleted
+// athlete are the most sensitive fields this service stores, and they were kept forever.
+// email, phone, birthdate and the given/family names are deliberately not touched:
+// SyncUpsertPerson does not write them, REST does, and clearing what cannot be restored
+// would turn a sync delete into permanent loss of data it does not own.
 func (q *Queries) SyncTombstonePerson(ctx context.Context, arg SyncTombstonePersonParams) (int64, error) {
 	result, err := q.db.Exec(ctx, syncTombstonePerson, arg.ID, arg.SyncAccountID)
 	if err != nil {
@@ -287,7 +297,8 @@ func (q *Queries) SyncTombstonePerson(ctx context.Context, arg SyncTombstonePers
 }
 
 const syncTombstonePlayer = `-- name: SyncTombstonePlayer :execrows
-UPDATE players SET deleted = true, seq = nextval('sync_seq'), updated_at = now()
+UPDATE players SET deleted = true, seq = nextval('sync_seq'), updated_at = now(),
+    name = NULL, number = NULL, position = NULL, payload = NULL
 WHERE id = $1 AND sync_account_id = $2
 `
 
@@ -305,7 +316,8 @@ func (q *Queries) SyncTombstonePlayer(ctx context.Context, arg SyncTombstonePlay
 }
 
 const syncTombstoneSession = `-- name: SyncTombstoneSession :execrows
-UPDATE sessions SET deleted = true, seq = nextval('sync_seq'), updated_at = now()
+UPDATE sessions SET deleted = true, seq = nextval('sync_seq'), updated_at = now(),
+    title = '', notes = NULL, payload = NULL
 WHERE id = $1 AND sync_account_id = $2
 `
 
@@ -324,7 +336,8 @@ func (q *Queries) SyncTombstoneSession(ctx context.Context, arg SyncTombstoneSes
 
 const syncTombstoneTeam = `-- name: SyncTombstoneTeam :execrows
 
-UPDATE teams SET deleted = true, seq = nextval('sync_seq'), updated_at = now()
+UPDATE teams SET deleted = true, seq = nextval('sync_seq'), updated_at = now(),
+    name = '', age_group = NULL, season = NULL, payload = NULL
 WHERE id = $1 AND sync_account_id = $2
 `
 
@@ -335,6 +348,25 @@ type SyncTombstoneTeamParams struct {
 
 // Tombstones are per-table: a delete can only affect a row this account owns,
 // so REST-created rows (sync_account_id IS NULL) are never tombstoned.
+//
+// A tombstone clears exactly what its upsert sets, and keeps only what a tombstone needs
+// to do its job: the id, the deleted flag and a fresh seq. It went on holding everything
+// -- names, medical notes, emergency contacts, the whole payload -- for as long as the
+// row existed, and nothing ever revisited them. A coach who deleted an athlete had not
+// deleted that athlete's medical notes. sync_documents already cleared its payload on
+// write; these seven did not (see docs/AUDIT-5.md L1).
+//
+// Clearing precisely the upsert's own columns is what keeps this reversible: pushing the
+// record again restores every field that was cleared, because they are the same fields.
+// Columns the sync upsert never writes are left alone for the same reason -- REST owns
+// them, a sync delete has no business dropping them, and nothing would put them back.
+// The NOT NULL display columns take ” rather than NULL; no read reaches a tombstoned
+// row, so the value is unobservable either way, and ” keeps the constraint honest.
+//
+// The trade, stated once: the server can no longer reconstruct a record from a delete it
+// has applied. There is no undelete endpoint and no read path that returns a tombstoned
+// row, so nothing loses a capability it had -- but a mistaken delete is now the client's
+// to recover from, not ours.
 func (q *Queries) SyncTombstoneTeam(ctx context.Context, arg SyncTombstoneTeamParams) (int64, error) {
 	result, err := q.db.Exec(ctx, syncTombstoneTeam, arg.ID, arg.SyncAccountID)
 	if err != nil {

@@ -26,7 +26,10 @@ RETURNING *;
 -- A REST delete tombstones rather than dropping the row, so the deletion reaches sync
 -- clients. A hard DELETE produced no row for ListSyncChangesSince to return, so a device
 -- holding the team was never told it was gone and re-created it on its next push.
-UPDATE teams SET deleted = true, seq = nextval('sync_seq'), updated_at = now()
+-- Clears the row's content for the same reason SyncTombstoneTeam does: a tombstone
+-- needs the id, the flag and a seq, and nothing else. See docs/AUDIT-5.md L1.
+UPDATE teams SET deleted = true, seq = nextval('sync_seq'), updated_at = now(),
+    name = '', age_group = NULL, season = NULL, payload = NULL
 WHERE id = $1;
 
 -- Roster (time-bounded memberships) ----------------------------------------

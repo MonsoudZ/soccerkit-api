@@ -175,7 +175,8 @@ func (q *Queries) CreateSessionBlock(ctx context.Context, arg CreateSessionBlock
 }
 
 const deleteSession = `-- name: DeleteSession :exec
-UPDATE sessions SET deleted = true, seq = nextval('sync_seq'), updated_at = now()
+UPDATE sessions SET deleted = true, seq = nextval('sync_seq'), updated_at = now(),
+    title = '', notes = NULL, payload = NULL
 WHERE id = $1
 `
 

@@ -105,6 +105,8 @@ type Querier interface {
 	// A REST delete tombstones rather than dropping the row, so the deletion reaches sync
 	// clients. A hard DELETE produced no row for ListSyncChangesSince to return, so a device
 	// holding the team was never told it was gone and re-created it on its next push.
+	// Clears the row's content for the same reason SyncTombstoneTeam does: a tombstone
+	// needs the id, the flag and a seq, and nothing else. See docs/AUDIT-5.md L1.
 	DeleteTeam(ctx context.Context, id uuid.UUID) error
 	EndRosterMembership(ctx context.Context, arg EndRosterMembershipParams) (RosterMembership, error)
 	GetActiveRosterMembership(ctx context.Context, arg GetActiveRosterMembershipParams) (RosterMembership, error)
@@ -125,6 +127,10 @@ type Querier interface {
 	HasMembership(ctx context.Context, arg HasMembershipParams) (bool, error)
 	ListActiveRoster(ctx context.Context, teamID uuid.UUID) ([]ListActiveRosterRow, error)
 	ListAnswersForInstance(ctx context.Context, instanceID uuid.UUID) ([]ListAnswersForInstanceRow, error)
+	// p.deleted = false for the same reason every other person read has it: a tombstoned
+	// Person is gone, and since a tombstone now clears its display columns it would list as
+	// a blank row rather than a name. Nothing calls this yet -- guardianships are not
+	// exposed -- which is exactly why it is worth fixing before something does.
 	ListChildren(ctx context.Context, guardianPersonID uuid.UUID) ([]Person, error)
 	ListDrillsInOrg(ctx context.Context, organizationID uuid.UUID) ([]Drill, error)
 	ListFormFields(ctx context.Context, templateID uuid.UUID) ([]FormField, error)
@@ -233,11 +239,35 @@ type Querier interface {
 	SyncTombstoneDocument(ctx context.Context, arg SyncTombstoneDocumentParams) (int64, error)
 	SyncTombstoneDrill(ctx context.Context, arg SyncTombstoneDrillParams) (int64, error)
 	SyncTombstoneEvent(ctx context.Context, arg SyncTombstoneEventParams) (int64, error)
+	// The one that motivated the rule. medical_notes and the emergency contact of a deleted
+	// athlete are the most sensitive fields this service stores, and they were kept forever.
+	// email, phone, birthdate and the given/family names are deliberately not touched:
+	// SyncUpsertPerson does not write them, REST does, and clearing what cannot be restored
+	// would turn a sync delete into permanent loss of data it does not own.
 	SyncTombstonePerson(ctx context.Context, arg SyncTombstonePersonParams) (int64, error)
 	SyncTombstonePlayer(ctx context.Context, arg SyncTombstonePlayerParams) (int64, error)
 	SyncTombstoneSession(ctx context.Context, arg SyncTombstoneSessionParams) (int64, error)
 	// Tombstones are per-table: a delete can only affect a row this account owns,
 	// so REST-created rows (sync_account_id IS NULL) are never tombstoned.
+	//
+	// A tombstone clears exactly what its upsert sets, and keeps only what a tombstone needs
+	// to do its job: the id, the deleted flag and a fresh seq. It went on holding everything
+	// -- names, medical notes, emergency contacts, the whole payload -- for as long as the
+	// row existed, and nothing ever revisited them. A coach who deleted an athlete had not
+	// deleted that athlete's medical notes. sync_documents already cleared its payload on
+	// write; these seven did not (see docs/AUDIT-5.md L1).
+	//
+	// Clearing precisely the upsert's own columns is what keeps this reversible: pushing the
+	// record again restores every field that was cleared, because they are the same fields.
+	// Columns the sync upsert never writes are left alone for the same reason -- REST owns
+	// them, a sync delete has no business dropping them, and nothing would put them back.
+	// The NOT NULL display columns take '' rather than NULL; no read reaches a tombstoned
+	// row, so the value is unobservable either way, and '' keeps the constraint honest.
+	//
+	// The trade, stated once: the server can no longer reconstruct a record from a delete it
+	// has applied. There is no undelete endpoint and no read path that returns a tombstoned
+	// row, so nothing loses a capability it had -- but a mistaken delete is now the client's
+	// to recover from, not ours.
 	SyncTombstoneTeam(ctx context.Context, arg SyncTombstoneTeamParams) (int64, error)
 	SyncUpsertDiagram(ctx context.Context, arg SyncUpsertDiagramParams) (int64, error)
 	SyncUpsertDocument(ctx context.Context, arg SyncUpsertDocumentParams) (int64, error)
