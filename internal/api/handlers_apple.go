@@ -136,6 +136,14 @@ func (s *Server) handleAppleAuth(w http.ResponseWriter, r *http.Request) {
 		if s.signedInToConcurrentlyProvisioned(w, r, identity) {
 			return
 		}
+		// The collision was on the address rather than the subject, so the winner is not
+		// this identity's account and there is nothing to sign in to. The sequential path
+		// through this same state answers 409; a race must not answer 500 instead,
+		// because the caller's situation is identical and only the timing differed.
+		if isUniqueViolation(err) {
+			writeError(w, errEmailAlreadyRegistered())
+			return
+		}
 		writeError(w, err)
 		return
 	}

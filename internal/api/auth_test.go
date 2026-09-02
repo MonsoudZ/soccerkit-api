@@ -257,6 +257,56 @@ func TestConcurrentFirstSignInsResolveToOneAccount(t *testing.T) {
 	}
 }
 
+// TestConcurrentSignInsAtOneAddressStayATypedConflict — the recheck that resolves a
+// provisioning race asks who owns the *subject*. When the collision is on the address
+// instead, the winner holds a different subject, the recheck finds nothing, and the raw
+// unique violation used to fall through to a 500 — while the very same request made a
+// moment later answers 409. Timing must not change the answer.
+//
+// Two Apple IDs do not share a verified address, so this is not reachable through Apple;
+// it is here because an unmapped error reaching the caller as a 500 is the defect
+// docs/AUDIT-3.md M3, L1 and L2 were all instances of, and the fix for C1 put one back.
+func TestConcurrentSignInsAtOneAddressStayATypedConflict(t *testing.T) {
+	resetDB(t)
+	const email = "shared@example.com"
+
+	var wg sync.WaitGroup
+	var mu sync.Mutex
+	statuses := map[int]int{}
+	codes := map[string]int{}
+	start := make(chan struct{})
+	for _, sub := range []string{"sub-one", "sub-two", "sub-three", "sub-four"} {
+		wg.Add(1)
+		go func(sub string) {
+			defer wg.Done()
+			<-start
+			r := appleSignIn(t, sub, email, nil)
+			code, _ := errCode(r)
+			mu.Lock()
+			statuses[r.status]++
+			if code != "" {
+				codes[code]++
+			}
+			mu.Unlock()
+		}(sub)
+	}
+	close(start)
+	wg.Wait()
+
+	if statuses[http.StatusInternalServerError] != 0 {
+		t.Errorf("a racing sign-in reported a server fault: %v", statuses)
+	}
+	if statuses[http.StatusOK] != 1 {
+		t.Errorf("exactly one subject should get the address, got %v", statuses)
+	}
+	if got := statuses[http.StatusConflict]; got != 3 {
+		t.Errorf("the other three should be told the address is taken, got %v", statuses)
+	}
+	if codes["EMAIL_ALREADY_REGISTERED"] != 3 {
+		t.Errorf("and told it with the code the sequential path uses, got %v", codes)
+	}
+}
+
 // TestOneRefreshTokenRedeemsOnce pins rotation's single-use invariant against
 // concurrency. handleRefresh used to read the row, decide it was live, and revoke it in
 // a separate unconditional statement — a check-then-act that simultaneous
