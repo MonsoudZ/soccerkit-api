@@ -169,17 +169,26 @@ func (s *Server) handleUpdateGame(w http.ResponseWriter, r *http.Request) {
 		params.SetOpponent, params.Opponent = true, opponent
 	}
 	if v, ok := raw["kickoffAt"]; ok {
-		var text string
-		if err := json.Unmarshal(v, &text); err != nil {
-			writeError(w, errValidation("kickoffAt must be an RFC3339 timestamp"))
-			return
+		// Explicit null clears it, the same as every other optional field here. This
+		// used to json.Unmarshal straight into a string, where JSON null is a silent
+		// no-op that leaves "" behind and then fails RFC3339 parsing — so a cancelled
+		// fixture's kickoff time could not be unset. See docs/AUDIT-2.md L3.
+		params.SetKickoffAt = true
+		if string(v) == "null" {
+			params.KickoffAt = nullTimestamptz()
+		} else {
+			var text string
+			if err := json.Unmarshal(v, &text); err != nil {
+				writeError(w, errValidation("kickoffAt must be an RFC3339 timestamp or null"))
+				return
+			}
+			t, perr := time.Parse(time.RFC3339, text)
+			if perr != nil {
+				writeError(w, errValidation("kickoffAt must be an RFC3339 timestamp or null"))
+				return
+			}
+			params.KickoffAt = timestamptz(t)
 		}
-		t, perr := time.Parse(time.RFC3339, text)
-		if perr != nil {
-			writeError(w, errValidation("kickoffAt must be an RFC3339 timestamp"))
-			return
-		}
-		params.KickoffAt = timestamptz(t)
 	}
 	if v, ok := raw["homeAway"]; ok {
 		homeAway, err := optionalString(v, "homeAway")

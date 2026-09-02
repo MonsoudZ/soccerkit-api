@@ -8,6 +8,8 @@ import (
 	"net/http"
 	"strings"
 	"testing"
+
+	"github.com/google/uuid"
 )
 
 type syncPull struct {
@@ -546,18 +548,23 @@ func TestSyncPullIsPagedAndLosesNothing(t *testing.T) {
 // cursor. A payload larger than the budget is returned on its own rather than skipped;
 // skipping it would leave the client asking for the same page forever, because the
 // cursor only advances over rows actually delivered.
+//
+// The heavy record is planted rather than pushed, and that is the point rather than a
+// convenience: maxSyncRecordBytes now rejects a payload this size at the door, so no
+// push can create one. The rule still has to hold, because rows written before that cap
+// existed are still in the table and a page that cannot get past one is a device that
+// never syncs again. Planting is the only way left to reach the state.
 func TestSyncPullAlwaysMakesProgress(t *testing.T) {
 	resetDB(t)
-	coach, _ := signInCoach(t, "bigpayload@e.com")
+	coach, personID := signInCoach(t, "bigpayload@e.com")
 
 	// One record heavier than the page's byte budget, then an ordinary one after it.
 	big := strings.Repeat("x", 3<<20)
-	if r := do(t, http.MethodPost, "/api/v1/sync", coach, map[string]any{
-		"upserts": []map[string]any{
-			{"type": "Note", "id": "heavy", "payload": map[string]any{"blob": big}},
-		},
-	}); r.status != http.StatusOK {
-		t.Fatalf("push the heavy record: %d %s", r.status, r.raw)
+	if _, err := testPool.Exec(context.Background(), `
+		INSERT INTO sync_documents (sync_account_id, type, id, payload, deleted, seq)
+		VALUES ($1, 'Note', 'heavy', $2::jsonb, false, nextval('sync_seq'))`,
+		personID, fmt.Sprintf(`{"blob":%q}`, big)); err != nil {
+		t.Fatalf("plant the heavy record: %v", err)
 	}
 	if r := do(t, http.MethodPost, "/api/v1/sync", coach, map[string]any{
 		"upserts": []map[string]any{
@@ -958,5 +965,84 @@ func TestRESTDeleteAlsoClearsWhatItHeld(t *testing.T) {
 	if name != "" || ageGroup != nil || season != nil || payload != nil {
 		t.Errorf("a REST delete left the row's content behind: name=%q ageGroup=%v season=%v payload=%v",
 			name, ageGroup, season, payload)
+	}
+}
+
+// TestSyncBoundsTypeAndIDAndPayload — the three client-chosen strings a push writes
+// verbatim. Any type outside the seven projected ones becomes a sync_documents row
+// carrying that type, and nothing bounded the type, the id, or a single payload: the
+// only limit was the 4 MiB body. See docs/AUDIT-2.md L6 and docs/AUDIT-5.md M1 (3).
+func TestSyncBoundsTypeAndIDAndPayload(t *testing.T) {
+	resetDB(t)
+	coach, _ := signInCoach(t, "bounds@e.com")
+
+	push := func(body map[string]any) int {
+		return do(t, http.MethodPost, "/api/v1/sync", coach, body).status
+	}
+	upsert := func(rec map[string]any) int {
+		return push(map[string]any{"upserts": []map[string]any{rec}})
+	}
+	ok := map[string]any{"n": 1}
+
+	// The types the app actually sends must all still be accepted — this is the
+	// forward-compatibility property TestContractUnprojectedTypesRoundTrip pins, and the
+	// reason this is a shape check rather than an allowlist of known types.
+	for _, typ := range []string{
+		"Team", "Prefs", "RosterMembership", "OrgMembership", "ShareGrant", "FormInstance",
+		"Some_New_Type", "v2.Thing", "kebab-type",
+	} {
+		if st := upsert(map[string]any{"type": typ, "id": uuid.NewString(), "payload": ok}); st != http.StatusOK {
+			t.Errorf("type %q must be accepted, got %d", typ, st)
+		}
+	}
+
+	// Shapes that are not record type names.
+	for _, typ := range []string{
+		strings.Repeat("T", 65), "9Leading", "_leading", "has space", "has/slash", "emoji😀",
+	} {
+		if st := upsert(map[string]any{"type": typ, "id": uuid.NewString(), "payload": ok}); st != http.StatusBadRequest {
+			t.Errorf("type %q should be rejected, got %d", typ, st)
+		}
+	}
+
+	// An unbounded id is the other half of the same key.
+	if st := upsert(map[string]any{
+		"type": "Note", "id": strings.Repeat("i", 129), "payload": ok,
+	}); st != http.StatusBadRequest {
+		t.Errorf("an over-long id should be rejected, got %d", st)
+	}
+	if st := upsert(map[string]any{"type": "Note", "id": "prefs", "payload": ok}); st != http.StatusOK {
+		t.Errorf("the fixed non-UUID id 'prefs' must still be accepted, got %d", st)
+	}
+
+	// A single payload is capped well under the body limit, because a pull's row limit
+	// and byte budget only balance at ~4.2 KiB a record and everything above that makes
+	// a page scan more rows than it delivers.
+	under := strings.Repeat("x", 200<<10)
+	if st := upsert(map[string]any{
+		"type": "Note", "id": uuid.NewString(), "payload": map[string]any{"b": under},
+	}); st != http.StatusOK {
+		t.Errorf("a 200 KiB payload should be accepted, got %d", st)
+	}
+	over := strings.Repeat("x", 300<<10)
+	r := do(t, http.MethodPost, "/api/v1/sync", coach, map[string]any{
+		"upserts": []map[string]any{
+			{"type": "Note", "id": "toobig", "payload": map[string]any{"b": over}},
+		},
+	})
+	if r.status != http.StatusBadRequest {
+		t.Errorf("a 300 KiB payload should be rejected, got %d", r.status)
+	}
+	// The error has to name the record: an offline-first client retries the batch it
+	// failed to push, so a failure it cannot attribute stops that device syncing.
+	if !strings.Contains(string(r.raw), "toobig") {
+		t.Errorf("the rejection must name the record, got %s", r.raw)
+	}
+
+	// Deletes carry the same key and get the same bounds.
+	if st := push(map[string]any{
+		"deletes": []map[string]any{{"type": "has space", "id": "x"}},
+	}); st != http.StatusBadRequest {
+		t.Errorf("a delete's type should be bounded too, got %d", st)
 	}
 }

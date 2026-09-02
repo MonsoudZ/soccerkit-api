@@ -708,7 +708,12 @@ components:
           description: >-
             Where the client has read up to. Accepted and ignored — the response
             does not echo it back. Only a pull advances the cursor.
-      description: At most 1000 records across upserts and deletes combined.
+      description: >-
+        At most 1000 records across upserts and deletes combined. A record's `type` must
+        be a record type name (letters, digits, underscore, dot and dash, starting with a
+        letter) of at most 64 characters, its `id` at most 128, and its `payload` at most
+        256 KiB. A record over any of those is a 400 naming it, so a client can act on
+        the specific record rather than retrying the batch forever.
     SyncPushResponse:
       type: object
       properties:
@@ -873,7 +878,12 @@ components:
               key: { type: string }
               label: { type: string }
               kind: { $ref: "#/components/schemas/FieldKind" }
-              config: {}
+              config:
+                description: >-
+                  Per-kind configuration. A `scale` field takes {"min":n,"max":n}; a
+                  `select` field takes {"options":["..."]} and answers are checked
+                  against that list. A field that declares no config is unconstrained,
+                  which is what keeps existing templates working.
     Answer:
       type: object
       properties:
@@ -998,10 +1008,14 @@ components:
         homeAway: { type: string, enum: [home, away, neutral] }
     UpdateGameRequest:
       type: object
-      description: Send ourScore and opponentScore together to record a result.
+      description: >-
+        Send ourScore and opponentScore together to record a result. Every nullable field
+        here is a three-state PATCH: omit it to leave it alone, send a value to set it,
+        send explicit null to clear it. kickoffAt included — a cancelled fixture's kickoff
+        time can be unset.
       properties:
         opponent: { type: string, nullable: true }
-        kickoffAt: { type: string, format: date-time }
+        kickoffAt: { type: string, format: date-time, nullable: true }
         homeAway: { type: string, enum: [home, away, neutral], nullable: true }
         ourScore: { type: integer }
         opponentScore: { type: integer }

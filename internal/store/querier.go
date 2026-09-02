@@ -8,6 +8,7 @@ import (
 	"context"
 
 	"github.com/google/uuid"
+	"github.com/jackc/pgx/v5/pgtype"
 )
 
 type Querier interface {
@@ -211,6 +212,22 @@ type Querier interface {
 	// roster arm matters because an athlete can be added to a team without a membership
 	// row of their own.
 	PersonVisibleInOrg(ctx context.Context, arg PersonVisibleInOrgParams) (bool, error)
+	// Delete refresh tokens that expired long enough ago to be of no further use.
+	//
+	// Nothing ever deleted. RevokeRefreshToken and RevokeRefreshTokensForAccount stamp
+	// revoked_at; logout removes its own row; everything else accumulated, one row per
+	// sign-in and one per refresh, forever. Since password authentication was removed a
+	// refresh token is the only credential this service stores, so the table is both the
+	// fastest-growing thing here and the most sensitive. See docs/AUDIT-2.md L4.
+	//
+	// The predicate is expires_at, not revoked_at, and that is the whole subtlety. A revoked
+	// row is what replay detection reads: presenting an already-rotated token is evidence
+	// the chain leaked, and the response is to revoke the family. Delete revoked rows
+	// eagerly and a replay stops looking like a replay -- it looks like an unknown token,
+	// answered with a plain 401, and the theft goes unremarked. Keying on expiry keeps every
+	// revoked row for as long as the token it describes could still be presented, plus the
+	// grace the caller passes.
+	ReapExpiredRefreshTokens(ctx context.Context, grace pgtype.Interval) (int64, error)
 	// Rotation's single-use guard, not a follow-up to one. handleRefresh used to read the
 	// row, decide it was live, and then revoke it unconditionally — a check-then-act with
 	// nothing between the two statements, so concurrent presentations of one token all read
@@ -289,6 +306,10 @@ type Querier interface {
 	// Ownership never transfers on update, so the SET clauses do not reassign
 	// sync_account_id; SyncUpsertPerson is the one exception, see its comment.
 	SyncUpsertTeam(ctx context.Context, arg SyncUpsertTeamParams) (int64, error)
+	// Every clearable field is a set-flag plus a nullable value, kickoff_at included. It
+	// used to be COALESCE(narg, kickoff_at), which reads NULL as "leave this alone" and so
+	// leaves no value that means "clear it": a cancelled fixture's kickoff time could not be
+	// unset. See docs/AUDIT-2.md L3.
 	UpdateGame(ctx context.Context, arg UpdateGameParams) (Game, error)
 	UpdatePerson(ctx context.Context, arg UpdatePersonParams) (Person, error)
 	UpdateTeam(ctx context.Context, arg UpdateTeamParams) (Team, error)

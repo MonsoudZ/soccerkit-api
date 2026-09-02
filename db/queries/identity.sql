@@ -96,6 +96,25 @@ UPDATE refresh_tokens SET revoked_at = now() WHERE id = $1 AND revoked_at IS NUL
 -- every other device off too.
 DELETE FROM refresh_tokens WHERE token_hash = $1;
 
+-- name: ReapExpiredRefreshTokens :execrows
+-- Delete refresh tokens that expired long enough ago to be of no further use.
+--
+-- Nothing ever deleted. RevokeRefreshToken and RevokeRefreshTokensForAccount stamp
+-- revoked_at; logout removes its own row; everything else accumulated, one row per
+-- sign-in and one per refresh, forever. Since password authentication was removed a
+-- refresh token is the only credential this service stores, so the table is both the
+-- fastest-growing thing here and the most sensitive. See docs/AUDIT-2.md L4.
+--
+-- The predicate is expires_at, not revoked_at, and that is the whole subtlety. A revoked
+-- row is what replay detection reads: presenting an already-rotated token is evidence
+-- the chain leaked, and the response is to revoke the family. Delete revoked rows
+-- eagerly and a replay stops looking like a replay -- it looks like an unknown token,
+-- answered with a plain 401, and the theft goes unremarked. Keying on expiry keeps every
+-- revoked row for as long as the token it describes could still be presented, plus the
+-- grace the caller passes.
+DELETE FROM refresh_tokens
+WHERE expires_at < now() - sqlc.arg('grace')::interval;
+
 -- name: RevokeRefreshTokensForAccount :exec
 -- Revoke every live token for one account. Used when a already-rotated token is
 -- presented again: that is a replay, and the only safe reading is that the chain has

@@ -297,3 +297,44 @@ func TestAggregateSurvivesUnboundedLegacyAnswers(t *testing.T) {
 		t.Errorf("expected the aggregate to still report the athlete: %s", agg.raw)
 	}
 }
+
+// TestSelectAnswersAreCheckedAgainstTheirOptions — a select answer used to need only
+// *some* textValue, so the column accumulated arbitrary strings. A select field's config
+// is where its options live, and not consulting it is the same defect the scale range
+// check exists to prevent. See docs/AUDIT-2.md L2.
+func TestSelectAnswersAreCheckedAgainstTheirOptions(t *testing.T) {
+	resetDB(t)
+	coach, personID := signInCoach(t, "selectopts@e.com")
+
+	tpl := do(t, http.MethodPost, "/api/v1/templates", coach, map[string]any{
+		"context": "development", "name": "Position Review",
+		"fields": []map[string]any{
+			{"key": "foot", "label": "Preferred foot", "kind": "select",
+				"config": map[string]any{"options": []string{"left", "right", "both"}}},
+			{"key": "freeform", "label": "Anything", "kind": "select"},
+		},
+	})
+	if tpl.status != http.StatusCreated {
+		t.Fatalf("create template: %d %s", tpl.status, tpl.raw)
+	}
+	tplID := tpl.body["id"].(string)
+
+	submit := func(key, value string) resp {
+		return do(t, http.MethodPost, "/api/v1/form-instances", coach, map[string]any{
+			"templateId": tplID, "subjectPersonId": personID,
+			"answers": []map[string]any{{"key": key, "textValue": value}},
+		})
+	}
+
+	if r := submit("foot", "left"); r.status != http.StatusCreated && r.status != http.StatusOK {
+		t.Errorf("a declared option must be accepted: %d %s", r.status, r.raw)
+	}
+	if r := submit("foot", "sideways"); r.status != http.StatusBadRequest {
+		t.Errorf("an undeclared option must be rejected: %d %s", r.status, r.raw)
+	}
+	// A field that declares no options stays unbounded, exactly as a scale with neither
+	// bound does — that is what keeps this from breaking select fields already in use.
+	if r := submit("freeform", "anything at all"); r.status != http.StatusCreated && r.status != http.StatusOK {
+		t.Errorf("a select with no declared options must stay unbounded: %d %s", r.status, r.raw)
+	}
+}

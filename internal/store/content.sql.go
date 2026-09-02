@@ -427,19 +427,20 @@ func (q *Queries) ListSessionsInOrg(ctx context.Context, arg ListSessionsInOrgPa
 const updateGame = `-- name: UpdateGame :one
 UPDATE games
 SET opponent       = CASE WHEN $1::bool THEN $2 ELSE opponent END,
-    kickoff_at     = COALESCE($3, kickoff_at),
-    home_away      = CASE WHEN $4::bool THEN $5 ELSE home_away END,
-    our_score      = CASE WHEN $6::bool THEN $7 ELSE our_score END,
-    opponent_score = CASE WHEN $6::bool THEN $8 ELSE opponent_score END,
-    status         = COALESCE($9, status),
+    kickoff_at     = CASE WHEN $3::bool THEN $4 ELSE kickoff_at END,
+    home_away      = CASE WHEN $5::bool THEN $6 ELSE home_away END,
+    our_score      = CASE WHEN $7::bool THEN $8 ELSE our_score END,
+    opponent_score = CASE WHEN $7::bool THEN $9 ELSE opponent_score END,
+    status         = COALESCE($10, status),
     updated_at     = now()
-WHERE id = $10
+WHERE id = $11
 RETURNING id, organization_id, team_id, opponent, kickoff_at, home_away, our_score, opponent_score, status, created_at, updated_at
 `
 
 type UpdateGameParams struct {
 	SetOpponent   bool               `json:"set_opponent"`
 	Opponent      *string            `json:"opponent"`
+	SetKickoffAt  bool               `json:"set_kickoff_at"`
 	KickoffAt     pgtype.Timestamptz `json:"kickoff_at"`
 	SetHomeAway   bool               `json:"set_home_away"`
 	HomeAway      *string            `json:"home_away"`
@@ -450,10 +451,15 @@ type UpdateGameParams struct {
 	ID            uuid.UUID          `json:"id"`
 }
 
+// Every clearable field is a set-flag plus a nullable value, kickoff_at included. It
+// used to be COALESCE(narg, kickoff_at), which reads NULL as "leave this alone" and so
+// leaves no value that means "clear it": a cancelled fixture's kickoff time could not be
+// unset. See docs/AUDIT-2.md L3.
 func (q *Queries) UpdateGame(ctx context.Context, arg UpdateGameParams) (Game, error) {
 	row := q.db.QueryRow(ctx, updateGame,
 		arg.SetOpponent,
 		arg.Opponent,
+		arg.SetKickoffAt,
 		arg.KickoffAt,
 		arg.SetHomeAway,
 		arg.HomeAway,

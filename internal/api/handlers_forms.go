@@ -7,6 +7,8 @@ import (
 	"fmt"
 	"math"
 	"net/http"
+	"slices"
+	"strings"
 
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
@@ -480,6 +482,12 @@ type scaleConfig struct {
 	Max *float64 `json:"max"`
 }
 
+// selectConfig is the shape a "select" field stores in form_fields.config: the options
+// it will accept. Same place scaleConfig keeps its bounds, and read the same way.
+type selectConfig struct {
+	Options []string `json:"options"`
+}
+
 // validateAnswer checks one answer against the field it claims to answer. Each kind
 // requires its own value column and rejects the others, so a bool field can no longer
 // be handed a number and end up in the score aggregate.
@@ -516,12 +524,45 @@ func validateAnswer(field store.FormField, numeric *float64, boolean *bool, text
 		if boolean == nil {
 			return errValidation(field.Key + " is a bool field and needs a boolValue")
 		}
-	case "text", "select":
+	case "text":
 		if text == nil {
-			return errValidation(field.Key + " is a " + field.Kind + " field and needs a textValue")
+			return errValidation(field.Key + " is a text field and needs a textValue")
 		}
+	case "select":
+		if text == nil {
+			return errValidation(field.Key + " is a select field and needs a textValue")
+		}
+		return validateSelectOption(field, *text)
 	}
 	return nil
+}
+
+// validateSelectOption enforces the options a select field declares in its config.
+//
+// A select answer used to need only *some* textValue, so the column accumulated
+// arbitrary strings — the same defect the scale range check exists to prevent, and the
+// reason a select field has a config at all. See docs/AUDIT-2.md L2.
+//
+// A field that declares no options is unbounded, exactly as a scale with neither bound
+// is unbounded. That is what keeps this from breaking the select fields already out
+// there: nothing has been writing an options list, so nothing starts failing today, and
+// a template author opts in by declaring one.
+func validateSelectOption(field store.FormField, v string) error {
+	if len(field.Config) == 0 {
+		return nil
+	}
+	var cfg selectConfig
+	if err := json.Unmarshal(field.Config, &cfg); err != nil {
+		return nil // a config we cannot read is not the submitter's problem
+	}
+	if len(cfg.Options) == 0 {
+		return nil
+	}
+	if slices.Contains(cfg.Options, v) {
+		return nil
+	}
+	return errValidation(fmt.Sprintf("%s must be one of: %s",
+		field.Key, strings.Join(cfg.Options, ", ")))
 }
 
 // validateScaleRange enforces the min/max a scale field declares in its config. A

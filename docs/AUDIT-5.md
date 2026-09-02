@@ -72,11 +72,23 @@ hash.
 
 ### M1 — the page bounds the response, not the read (confirmed)
 
-> **Status.** Parts (1) and (2) of the fix shipped in the commit following this one, and
-> the measurements below were re-taken against the fixed code. Part (3) — a cap on a
-> single record's payload at push time — is still open, because it is a wire change and
-> wants a real payload-size distribution behind the number. Left in the present tense as
-> a record of what was wrong.
+> **Status.** All three parts of the fix have shipped, in the two commits following this
+> one. Left in the present tense as a record of what was wrong.
+>
+> Part (3), the per-record payload cap, landed at **256 KiB**, with a 32 KiB watch-log so
+> the real size distribution becomes visible without rejecting anything. That bounds one
+> page's read to `maxSyncPage × 256 KiB` = 128 MiB and the over-scan ratio to ~62×,
+> against ~2 GiB and ~1000× before. It is deliberately generous: an offline-first client
+> retries the batch it failed to push, so a cap that rejects a record a coach already has
+> on their phone stops that device syncing, and too low is a worse failure than the one it
+> prevents. **Tightening toward 16–32 KiB is what would make the drain close to linear,
+> and that still wants `pg_column_size(payload)` percentiles over a real database first.**
+>
+> One consequence worth knowing: the cap makes an oversized *stored* record unreachable
+> through the API, so `TestSyncPullAlwaysMakesProgress` now plants its heavy row rather
+> than pushing it. The oversized-first-row rule still has to hold, because rows written
+> before the cap existed are still in the table and a page that cannot get past one is a
+> device that never syncs again.
 >
 > The allocation blowup is closed. Allocation is now flat in the payload size instead of
 > growing with it, and the delivered counts are unchanged, so this costs nothing on the
@@ -393,11 +405,17 @@ seven projected tables should match it.
    payload size now, and a page of deletes costs what a delete weighs.
 3. ~~**L1**~~ — done, including the backfill for rows already tombstoned; see the status
    note under L1.
-4. **M1 (3), the per-record payload cap** — the remaining half of M1, and the only thing
-   that makes a drain linear again. Decide deliberately, with the real payload size
-   distribution in hand, since it is the one piece that needs the app to agree. **This is
-   the next thing to do, and the first step is a measurement, not a change:** run
-   `pg_column_size(payload)` percentiles over a real database before picking a number.
-5. Unchanged from AUDIT-3 and AUDIT-4: the AUDIT-2 leftovers (**L1–L6**) as ordinary
-   hardening, with **L4**'s token reaping now the only credential material left in the
-   database, and **P2–P4** alongside the club feature.
+4. ~~**M1 (3), the per-record payload cap**~~ — shipped at **256 KiB**, with a 32 KiB
+   watch-log so the real distribution becomes visible. That bounds one page's read to
+   128 MiB and the over-scan ratio to ~62x, against ~2 GiB and ~1000x before. It does
+   **not** make the drain linear; tightening toward 16–32 KiB would, and that still wants
+   `pg_column_size(payload)` percentiles over a real database first. The cap was set
+   generously on purpose: an offline-first client retries the batch it failed to push, so
+   a cap that rejects a record a coach already has on their phone stops that device
+   syncing, and too low is a worse failure than the one it prevents.
+5. ~~The AUDIT-2 leftovers~~ — **L1, L2, L3, L4 and L6 are done** (see AUDIT-2's own
+   status notes). **L5 is closed as a knowing trade** rather than fixed, with the
+   reasoning recorded above `handleSyncPush`: the conflict *is* the feature, and the only
+   real fix is re-keying seven tables on `(sync_account_id, id)`, which is out of all
+   proportion to 122 bits of UUID entropy. **P2–P4** still wait on the club feature and
+   their precondition still holds.

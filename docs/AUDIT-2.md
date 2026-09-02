@@ -471,6 +471,42 @@ about the wire format changes.
 
 ## Low
 
+> **Status (added later).** L1, L2, L3, L4 and L6 are all fixed, each with a regression
+> test; L5 is closed as a knowing trade rather than fixed. Findings are left in the
+> present tense as a record of what was wrong. See docs/AUDIT-5.md for the round that
+> cleared them.
+>
+> - **L1** — pinned to an exact `swagger-ui-dist` version with sha384 SRI on both
+>   subresources, cross-checked against unpkg and jsdelivr so they are the canonical npm
+>   artifacts. `crossorigin="anonymous"` is there because SRI is not enforced on a
+>   cross-origin fetch without it — the browser cannot read the response to check it, and
+>   skips the check rather than failing.
+> - **L2** — a `select` answer is checked against the options its config declares. A field
+>   declaring no options stays unbounded, exactly as a scale with neither bound is, which
+>   is what keeps existing templates working.
+> - **L3** — `kickoff_at` got the set-flag every other clearable field already had, and
+>   the handler reads explicit `null` as "clear it". Both halves were needed: the SQL
+>   overloaded NULL as "leave alone", and the handler unmarshalled JSON null into a string,
+>   which is a silent no-op leaving `""` behind.
+> - **L4** — `ReapExpiredRefreshTokens`, run at boot and every six hours from
+>   `cmd/api`. It keys on **expiry, not revocation**, which is the whole subtlety: a
+>   revoked row is what replay detection reads, so deleting revoked rows eagerly makes a
+>   replay look like an unknown token — a plain 401, with the theft unremarked.
+> - **L5** — **not fixed, and deliberately.** The conflict *is* the feature: a client not
+>   told its write was rejected loses the write silently, which is strictly worse. The
+>   only real fix is keying the seven projected tables on `(sync_account_id, id)` the way
+>   `sync_documents` already is — a composite primary key on seven tables and every
+>   foreign key that references them, out of all proportion to 122 bits of UUIDv4 entropy
+>   standing between a caller and a probe that returns anything but "created". The
+>   reasoning is recorded above `handleSyncPush` so it travels with the code.
+> - **L6** — the type and id are bounded and shape-checked. Deliberately **not** an
+>   allowlist of known types: the app syncs more types than this service projects and the
+>   rest ride as opaque documents on purpose, so an allowlist would turn a newer app's
+>   data into silent loss on every release — the exact failure
+>   `TestContractUnprojectedTypesRoundTrip` exists to prevent. The per-account row cap is
+>   also not implemented: a hard reject mid-sync would brick a legitimate power user's
+>   device, and the body and batch caps already bound the rate.
+
 **L1 — `/docs` loads Swagger UI from unpkg, unpinned.** `docs.go` pulls
 `https://unpkg.com/swagger-ui-dist@5/swagger-ui-bundle.js` — a third-party CDN, a
 floating major version, no `integrity` attribute. Whatever that URL returns runs on your

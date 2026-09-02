@@ -616,6 +616,34 @@ func (q *Queries) PersonVisibleInOrg(ctx context.Context, arg PersonVisibleInOrg
 	return exists, err
 }
 
+const reapExpiredRefreshTokens = `-- name: ReapExpiredRefreshTokens :execrows
+DELETE FROM refresh_tokens
+WHERE expires_at < now() - $1::interval
+`
+
+// Delete refresh tokens that expired long enough ago to be of no further use.
+//
+// Nothing ever deleted. RevokeRefreshToken and RevokeRefreshTokensForAccount stamp
+// revoked_at; logout removes its own row; everything else accumulated, one row per
+// sign-in and one per refresh, forever. Since password authentication was removed a
+// refresh token is the only credential this service stores, so the table is both the
+// fastest-growing thing here and the most sensitive. See docs/AUDIT-2.md L4.
+//
+// The predicate is expires_at, not revoked_at, and that is the whole subtlety. A revoked
+// row is what replay detection reads: presenting an already-rotated token is evidence
+// the chain leaked, and the response is to revoke the family. Delete revoked rows
+// eagerly and a replay stops looking like a replay -- it looks like an unknown token,
+// answered with a plain 401, and the theft goes unremarked. Keying on expiry keeps every
+// revoked row for as long as the token it describes could still be presented, plus the
+// grace the caller passes.
+func (q *Queries) ReapExpiredRefreshTokens(ctx context.Context, grace pgtype.Interval) (int64, error) {
+	result, err := q.db.Exec(ctx, reapExpiredRefreshTokens, grace)
+	if err != nil {
+		return 0, err
+	}
+	return result.RowsAffected(), nil
+}
+
 const revokeRefreshToken = `-- name: RevokeRefreshToken :execrows
 UPDATE refresh_tokens SET revoked_at = now() WHERE id = $1 AND revoked_at IS NULL
 `

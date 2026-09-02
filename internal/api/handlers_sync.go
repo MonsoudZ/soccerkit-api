@@ -164,6 +164,26 @@ func (s *Server) cursorWithinSequence(ctx context.Context, account uuid.UUID, si
 // does not own affects nothing and comes back in Conflicts, so the client learns
 // its change was rejected rather than silently losing it.
 //
+// That conflict is also a cross-tenant existence oracle, and it is a knowing trade
+// rather than an oversight (docs/AUDIT-2.md L5). A push naming a free id creates the
+// row; a push naming one that exists elsewhere comes back as a conflict. The two are
+// distinguishable, which tells the caller that some id exists somewhere in the database
+// — the signal personVisibleTo deliberately withholds by answering 404 rather than 403.
+//
+// It is not fixable by softening the answer, because the answer is the feature: a client
+// that is not told its write was rejected loses the write silently, which is strictly
+// worse. The only real fix is to make the collision impossible, by keying the projected
+// tables on (sync_account_id, id) the way sync_documents already is — a composite
+// primary key on seven tables, with every foreign key that references them along for the
+// trip. That is a schema migration out of all proportion to the exposure.
+//
+// The exposure being: the ids are client-generated UUIDv4, so 122 bits of entropy stand
+// between a caller and a probe that returns anything but "created". There is nothing to
+// enumerate, and a hit tells the attacker only that an id exists — not whose it is, nor
+// anything in it. Written down here so the next reader can weigh it rather than
+// rediscover it, and so that if these tables are ever re-keyed for another reason, this
+// goes with them.
+//
 // The response carries no cursor. Pull owns the cursor; push has no business
 // touching it, and both other options are wrong:
 //
@@ -215,8 +235,12 @@ func (s *Server) handleSyncPush(w http.ResponseWriter, r *http.Request) {
 
 	conflicts := []syncRecord{}
 	for _, rec := range req.Upserts {
-		if rec.Type == "" || rec.ID == "" {
-			writeError(w, errValidation("each upsert needs a type and id"))
+		if err := validateSyncKey(rec.Type, rec.ID, "upsert"); err != nil {
+			writeError(w, err)
+			return
+		}
+		if err := s.validateSyncPayload(account, rec); err != nil {
+			writeError(w, err)
 			return
 		}
 		ok, err := s.applyUpsert(ctx, q, account, org.orgID, rec)
@@ -229,8 +253,8 @@ func (s *Server) handleSyncPush(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	for _, key := range req.Deletes {
-		if key.Type == "" || key.ID == "" {
-			writeError(w, errValidation("each delete needs a type and id"))
+		if err := validateSyncKey(key.Type, key.ID, "delete"); err != nil {
+			writeError(w, err)
 			return
 		}
 		ok, err := s.applyDelete(ctx, q, account, key)
@@ -249,6 +273,82 @@ func (s *Server) handleSyncPush(w http.ResponseWriter, r *http.Request) {
 
 	// Cursor deliberately omitted — see the note above handleSyncPush.
 	writeJSON(w, http.StatusOK, syncPushResponse{Conflicts: conflicts})
+}
+
+// validateSyncKey bounds the two client-chosen strings that become part of a record's
+// identity. Any type outside the seven projected ones becomes a sync_documents row
+// carrying that type verbatim, and nothing bounded either string: the namespace was as
+// wide as a 4 MiB body allowed. See docs/AUDIT-2.md L6.
+//
+// A bound and a shape, not an allowlist. The app syncs more types than this service
+// projects and the rest ride as opaque documents on purpose, so an allowlist would drop
+// exactly the types an older server has never heard of — turning a newer app's data into
+// silent loss. The shape is permissive enough for any type name the app could reasonably
+// hold (it accepts every type in the contract tests, "Prefs" and "RosterMembership"
+// included) and narrow enough that a namespace cannot be filled with arbitrary text.
+func validateSyncKey(recType, id, verb string) error {
+	if recType == "" || id == "" {
+		return errValidation("each " + verb + " needs a type and id")
+	}
+	if len(recType) > maxSyncTypeLen {
+		return errValidation(fmt.Sprintf(
+			"%s type is longer than %d characters", verb, maxSyncTypeLen))
+	}
+	if !plausibleSyncType(recType) {
+		return errValidation(fmt.Sprintf(
+			"%s type %q is not a record type name: letters, digits, underscore, dot and "+
+				"dash, starting with a letter", verb, recType))
+	}
+	if len(id) > maxSyncIDLen {
+		return errValidation(fmt.Sprintf(
+			"%s %s id is longer than %d characters", verb, recType, maxSyncIDLen))
+	}
+	return nil
+}
+
+// plausibleSyncType reports whether a type looks like a record type name. Deliberately
+// not a UUID check and not an allowlist — see validateSyncKey.
+func plausibleSyncType(s string) bool {
+	for i := 0; i < len(s); i++ {
+		c := s[i]
+		switch {
+		case c >= 'a' && c <= 'z', c >= 'A' && c <= 'Z':
+		case c >= '0' && c <= '9', c == '_', c == '.', c == '-':
+			if i == 0 {
+				return false
+			}
+		default:
+			return false
+		}
+	}
+	return true
+}
+
+// validateSyncPayload caps one record's payload, and records the ones approaching the
+// cap so the real size distribution becomes visible.
+//
+// Nothing capped a single payload: the only limit was the 4 MiB body, which is also the
+// reason a pull could allocate half a gigabyte to return one record — a pull's row limit
+// and its byte budget only balance at ~4.2 KiB a record, and everything above that makes
+// each page scan more rows than it delivers. See docs/AUDIT-5.md M1 (3).
+//
+// The rejection is a 400 naming the record, for the same reason syncRecordError is: an
+// offline-first client retries the batch it failed to push, so a failure it cannot
+// attribute to a specific record stops that device syncing with nothing to act on.
+func (s *Server) validateSyncPayload(account uuid.UUID, rec syncRecord) error {
+	n := len(rec.Payload)
+	if n > maxSyncRecordBytes {
+		return errValidation(fmt.Sprintf(
+			"%s %s: payload is %d bytes, over the %d byte limit for a single record; "+
+				"split it or store the large part outside sync",
+			rec.Type, rec.ID, n, maxSyncRecordBytes))
+	}
+	if n > syncPayloadWatchBytes {
+		log.Printf("sync: account %s pushed %s %s with a %d byte payload (over the %d "+
+			"byte watch threshold, under the %d byte limit)",
+			account, rec.Type, rec.ID, n, syncPayloadWatchBytes, maxSyncRecordBytes)
+	}
+	return nil
 }
 
 // applyUpsert routes one record to its projected table, or to sync_documents. It

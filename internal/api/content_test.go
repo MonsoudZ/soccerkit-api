@@ -168,3 +168,44 @@ func TestUpdateGameRejectsWrongTypes(t *testing.T) {
 		t.Errorf("clearing opponent must not disturb the score: %s", clear.raw)
 	}
 }
+
+// TestGameKickoffCanBeCleared — a cancelled fixture's kickoff time could not be unset.
+// UpdateGame read kickoff_at as COALESCE(narg, kickoff_at), which treats NULL as "leave
+// it alone", so there was no value that meant "clear it"; the handler made it moot
+// anyway by unmarshalling JSON null into a string, which is a silent no-op that leaves
+// "" behind and then fails RFC3339 parsing. See docs/AUDIT-2.md L3.
+func TestGameKickoffCanBeCleared(t *testing.T) {
+	resetDB(t)
+	coach, _ := signInCoach(t, "kickoff@e.com")
+	team := do(t, http.MethodPost, "/api/v1/teams", coach, map[string]any{"name": "Clearables"})
+	teamID := team.body["id"].(string)
+
+	game := do(t, http.MethodPost, "/api/v1/teams/"+teamID+"/games", coach, map[string]any{
+		"opponent": "Postponed FC", "kickoffAt": "2027-03-01T15:00:00Z",
+	})
+	if game.status != http.StatusCreated {
+		t.Fatalf("create game: %d %s", game.status, game.raw)
+	}
+	gameID := game.body["id"].(string)
+
+	// An unrelated PATCH must leave it alone — the set-flag's other half.
+	if r := do(t, http.MethodPatch, "/api/v1/games/"+gameID, coach, map[string]any{
+		"opponent": "Postponed United",
+	}); r.status != http.StatusOK {
+		t.Fatalf("patch opponent: %d %s", r.status, r.raw)
+	}
+	if got := do(t, http.MethodGet, "/api/v1/games/"+gameID, coach, nil); got.body["kickoffAt"] == nil {
+		t.Fatalf("an unrelated PATCH cleared kickoffAt: %s", got.raw)
+	}
+
+	// Explicit null clears it.
+	if r := do(t, http.MethodPatch, "/api/v1/games/"+gameID, coach, map[string]any{
+		"kickoffAt": nil,
+	}); r.status != http.StatusOK {
+		t.Fatalf("clear kickoffAt: %d %s", r.status, r.raw)
+	}
+	got := do(t, http.MethodGet, "/api/v1/games/"+gameID, coach, nil)
+	if got.body["kickoffAt"] != nil {
+		t.Errorf("kickoffAt should be null after clearing, got %v", got.body["kickoffAt"])
+	}
+}

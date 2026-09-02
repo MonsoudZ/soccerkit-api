@@ -5,6 +5,12 @@ import (
 	"net/http"
 	"sync"
 	"testing"
+	"time"
+
+	"github.com/google/uuid"
+	"github.com/jackc/pgx/v5/pgtype"
+
+	"github.com/monsoudz/soccerkit-api/internal/store"
 )
 
 // TestSignInCreatesIdentityGraph — a first Sign in with Apple provisions the whole
@@ -358,5 +364,80 @@ func TestOneRefreshTokenRedeemsOnce(t *testing.T) {
 	})
 	if next.status != http.StatusOK {
 		t.Errorf("the surviving chain should still rotate: %d %s", next.status, next.raw)
+	}
+}
+
+// TestExpiredRefreshTokensAreReaped — nothing ever deleted a refresh token. The table
+// grew by a row per sign-in and per refresh, forever, and since password authentication
+// was removed a refresh token is the only credential this service stores. See
+// docs/AUDIT-2.md L4.
+//
+// The property that matters is not that rows go, it is *which* rows go. Reaping keys on
+// expiry, not on revocation: a revoked row is what replay detection reads, so deleting
+// revoked rows eagerly would make a replay look like an unknown token — a plain 401,
+// with the theft unremarked.
+func TestExpiredRefreshTokensAreReaped(t *testing.T) {
+	resetDB(t)
+	ctx := context.Background()
+	q := store.New(testPool)
+
+	// A live account to hang tokens off.
+	_, personID := signInCoach(t, "reap@e.com")
+	var accountID uuid.UUID
+	if err := testPool.QueryRow(ctx,
+		`SELECT id FROM user_accounts WHERE person_id = $1`, personID).Scan(&accountID); err != nil {
+		t.Fatalf("find account: %v", err)
+	}
+
+	plant := func(hash string, expiresAt time.Time, revoked bool) {
+		t.Helper()
+		var revokedAt any
+		if revoked {
+			revokedAt = time.Now().Add(-time.Hour)
+		}
+		if _, err := testPool.Exec(ctx, `
+			INSERT INTO refresh_tokens (token_hash, user_account_id, expires_at, revoked_at)
+			VALUES ($1, $2, $3, $4)`, hash, accountID, expiresAt, revokedAt); err != nil {
+			t.Fatalf("plant %s: %v", hash, err)
+		}
+	}
+	now := time.Now()
+	plant("long-expired", now.Add(-90*24*time.Hour), false)
+	plant("long-expired-revoked", now.Add(-90*24*time.Hour), true)
+	plant("recently-expired", now.Add(-24*time.Hour), false)
+	plant("recently-revoked-still-valid", now.Add(24*time.Hour), true)
+	plant("live", now.Add(24*time.Hour), false)
+
+	grace := pgtype.Interval{Microseconds: int64(30 * 24 * time.Hour / time.Microsecond), Valid: true}
+	n, err := q.ReapExpiredRefreshTokens(ctx, grace)
+	if err != nil {
+		t.Fatalf("reap: %v", err)
+	}
+	if n != 2 {
+		t.Errorf("reaped %d rows, want the 2 long-expired ones", n)
+	}
+
+	survives := func(hash string) bool {
+		var ok bool
+		if err := testPool.QueryRow(ctx,
+			`SELECT EXISTS(SELECT 1 FROM refresh_tokens WHERE token_hash = $1)`, hash).Scan(&ok); err != nil {
+			t.Fatalf("check %s: %v", hash, err)
+		}
+		return ok
+	}
+	for _, gone := range []string{"long-expired", "long-expired-revoked"} {
+		if survives(gone) {
+			t.Errorf("%s should have been reaped", gone)
+		}
+	}
+	for _, kept := range []string{"recently-expired", "recently-revoked-still-valid", "live"} {
+		if !survives(kept) {
+			t.Errorf("%s was reaped; replay detection reads recently-revoked rows", kept)
+		}
+	}
+
+	// Idempotent: a second pass over the same table removes nothing more.
+	if again, err := q.ReapExpiredRefreshTokens(ctx, grace); err != nil || again != 0 {
+		t.Errorf("second reap removed %d rows (err %v), want 0", again, err)
 	}
 }

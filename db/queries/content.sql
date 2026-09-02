@@ -60,9 +60,13 @@ SELECT * FROM games WHERE id = $1;
 SELECT * FROM games WHERE team_id = $1 ORDER BY kickoff_at DESC NULLS LAST, created_at DESC;
 
 -- name: UpdateGame :one
+-- Every clearable field is a set-flag plus a nullable value, kickoff_at included. It
+-- used to be COALESCE(narg, kickoff_at), which reads NULL as "leave this alone" and so
+-- leaves no value that means "clear it": a cancelled fixture's kickoff time could not be
+-- unset. See docs/AUDIT-2.md L3.
 UPDATE games
 SET opponent       = CASE WHEN sqlc.arg('set_opponent')::bool THEN sqlc.narg('opponent') ELSE opponent END,
-    kickoff_at     = COALESCE(sqlc.narg('kickoff_at'), kickoff_at),
+    kickoff_at     = CASE WHEN sqlc.arg('set_kickoff_at')::bool THEN sqlc.narg('kickoff_at') ELSE kickoff_at END,
     home_away      = CASE WHEN sqlc.arg('set_home_away')::bool THEN sqlc.narg('home_away') ELSE home_away END,
     our_score      = CASE WHEN sqlc.arg('set_scores')::bool THEN sqlc.narg('our_score') ELSE our_score END,
     opponent_score = CASE WHEN sqlc.arg('set_scores')::bool THEN sqlc.narg('opponent_score') ELSE opponent_score END,
