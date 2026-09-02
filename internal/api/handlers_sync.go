@@ -42,15 +42,20 @@ type syncPullResponse struct {
 	Cursor  *string      `json:"cursor"`
 }
 
-// handleSyncPull returns every synced record and tombstone written after the
-// client's cursor, unioned across the projected tables and the generic document
-// store, scoped to the authenticated account (Person).
+// handleSyncPull returns one page of the synced records and tombstones written after the
+// client's cursor, unioned across the projected tables and the generic document store,
+// scoped to the authenticated account (Person).
+//
+// A page, not the whole delta. The client asks again from the cursor this returns and
+// keeps going until it stops moving, which is the same loop it already had to run to
+// tolerate a slow writer, and needs no flag on the wire: a cursor that did not advance
+// means there was nothing more to advance it with.
 func (s *Server) handleSyncPull(w http.ResponseWriter, r *http.Request) {
 	account := personIDFrom(r.Context())
 	since := parseCursor(r.URL.Query().Get("since"))
 
 	rows, err := s.store.ListSyncChangesSince(r.Context(), store.ListSyncChangesSinceParams{
-		SyncAccountID: &account, Seq: &since,
+		SyncAccountID: &account, Seq: &since, Lim: maxSyncPage,
 	})
 	if err != nil {
 		writeError(w, err)
@@ -59,7 +64,19 @@ func (s *Server) handleSyncPull(w http.ResponseWriter, r *http.Request) {
 
 	resp := syncPullResponse{Records: []syncRecord{}, Deletes: []syncKey{}}
 	high := since
-	for _, row := range rows {
+	weight := 0
+	for i, row := range rows {
+		// The first row goes in whatever it weighs. A payload bigger than the budget
+		// would otherwise be skipped by every pull forever, and because the cursor only
+		// advances over rows actually returned, the client would ask for it again and
+		// again and never get past it. One oversized page is the lesser fault.
+		if i > 0 && weight+len(row.Payload) > maxSyncPageBytes {
+			break
+		}
+		weight += len(row.Payload)
+
+		// Only over rows that made it into this response: the cursor is a promise that
+		// everything up to it has been delivered.
 		if row.Seq != nil && *row.Seq > high {
 			high = *row.Seq
 		}

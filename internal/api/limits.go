@@ -20,6 +20,18 @@ const (
 	// transaction, so an unbounded batch holds it open for as long as it takes.
 	maxSyncBatch = 1000
 
+	// maxSyncPage caps the records in one pull, and maxSyncPageBytes caps what they
+	// weigh. A pull used to return the whole delta: nothing limits how many pushes an
+	// account makes, so its delta grows without bound and every since=0 pull — what a
+	// reinstall sends — became an unbounded allocation.
+	//
+	// Both limits are needed. Rows alone do not bound the response, because a single
+	// payload may be as large as a push body allows; bytes alone do not bound the work,
+	// because the query still has to produce the rows. Neither is a wire change: the
+	// client resumes from the cursor until it stops moving.
+	maxSyncPage      = 500
+	maxSyncPageBytes = 2 << 20 // 2 MiB
+
 	// authRate is the sustained requests-per-minute allowed per client IP on the
 	// credential endpoints, and authBurst how many may arrive at once. A coach signing
 	// in with Apple, or a device renewing a session, stays far below this.

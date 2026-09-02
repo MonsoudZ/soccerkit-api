@@ -465,3 +465,126 @@ func TestSyncRejectsAnUnstorableCharacter(t *testing.T) {
 		t.Errorf("a later clean push: %d %s", r.status, r.raw)
 	}
 }
+
+// TestSyncPullIsPagedAndLosesNothing — a pull used to return the whole delta, so an
+// account that had pushed for a season made every since=0 pull (a reinstall) an
+// unbounded allocation. It now returns a page, and the client resumes from the cursor.
+//
+// The property that matters is not the page size, it is that draining the pages yields
+// exactly what one unpaged response would have: every record once, none skipped. That
+// holds because seq comes from a single sequence and is unique across every source, so a
+// page boundary can never fall inside a group of rows sharing a cursor value.
+func TestSyncPullIsPagedAndLosesNothing(t *testing.T) {
+	resetDB(t)
+	coach, _ := signInCoach(t, "paged@e.com")
+
+	// More records than one page holds, pushed in batches the push cap allows.
+	const total = 1200
+	written := map[string]bool{}
+	for start := 0; start < total; start += 400 {
+		upserts := []map[string]any{}
+		for i := start; i < start+400; i++ {
+			id := fmt.Sprintf("note-%04d", i)
+			written[id] = true
+			upserts = append(upserts, map[string]any{
+				"type": "Note", "id": id, "payload": map[string]any{"n": i},
+			})
+		}
+		if r := do(t, http.MethodPost, "/api/v1/sync", coach, map[string]any{
+			"upserts": upserts,
+		}); r.status != http.StatusOK {
+			t.Fatalf("push %d: %d %s", start, r.status, r.raw)
+		}
+	}
+
+	// Drain the way a client does: ask again from the cursor until it stops moving.
+	seen := map[string]int{}
+	cursor := "0"
+	pages := 0
+	for pages < 50 {
+		pages++
+		var pull syncPull
+		r := do(t, http.MethodGet, "/api/v1/sync?since="+cursor, coach, nil)
+		if r.status != http.StatusOK {
+			t.Fatalf("pull page %d: %d %s", pages, r.status, r.raw)
+		}
+		if err := json.Unmarshal(r.raw, &pull); err != nil {
+			t.Fatalf("decode page %d: %v", pages, err)
+		}
+		if len(pull.Records) > 500 {
+			t.Fatalf("page %d returned %d records; the page cap is 500", pages, len(pull.Records))
+		}
+		for _, rec := range pull.Records {
+			seen[rec.ID]++
+		}
+		next := pull.Cursor
+		if next == cursor {
+			break
+		}
+		cursor = next
+	}
+
+	if pages < 2 {
+		t.Fatalf("expected the delta to need more than one page, drained in %d", pages)
+	}
+	if len(seen) != total {
+		t.Errorf("drained %d distinct records, want %d — a page boundary dropped rows",
+			len(seen), total)
+	}
+	for id := range written {
+		switch seen[id] {
+		case 1: // delivered exactly once
+		case 0:
+			t.Fatalf("%s was never delivered", id)
+		default:
+			t.Fatalf("%s was delivered %d times", id, seen[id])
+		}
+	}
+}
+
+// TestSyncPullAlwaysMakesProgress — the byte budget must not be able to stall the
+// cursor. A payload larger than the budget is returned on its own rather than skipped;
+// skipping it would leave the client asking for the same page forever, because the
+// cursor only advances over rows actually delivered.
+func TestSyncPullAlwaysMakesProgress(t *testing.T) {
+	resetDB(t)
+	coach, _ := signInCoach(t, "bigpayload@e.com")
+
+	// One record heavier than the page's byte budget, then an ordinary one after it.
+	big := strings.Repeat("x", 3<<20)
+	if r := do(t, http.MethodPost, "/api/v1/sync", coach, map[string]any{
+		"upserts": []map[string]any{
+			{"type": "Note", "id": "heavy", "payload": map[string]any{"blob": big}},
+		},
+	}); r.status != http.StatusOK {
+		t.Fatalf("push the heavy record: %d %s", r.status, r.raw)
+	}
+	if r := do(t, http.MethodPost, "/api/v1/sync", coach, map[string]any{
+		"upserts": []map[string]any{
+			{"type": "Note", "id": "light", "payload": map[string]any{"n": 1}},
+		},
+	}); r.status != http.StatusOK {
+		t.Fatalf("push the light record: %d %s", r.status, r.raw)
+	}
+
+	var first syncPull
+	r := do(t, http.MethodGet, "/api/v1/sync?since=0", coach, nil)
+	if err := json.Unmarshal(r.raw, &first); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if len(first.Records) != 1 || first.Records[0].ID != "heavy" {
+		t.Fatalf("the oversized record should come back alone, got %d records", len(first.Records))
+	}
+	if first.Cursor == "" || first.Cursor == "0" {
+		t.Fatal("the cursor must advance past it, or the client can never get past it")
+	}
+
+	var second syncPull
+	r = do(t, http.MethodGet, "/api/v1/sync?since="+first.Cursor, coach, nil)
+	if err := json.Unmarshal(r.raw, &second); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if len(second.Records) != 1 || second.Records[0].ID != "light" {
+		t.Fatalf("the next page should carry the rest, got %d records", len(second.Records))
+	}
+}

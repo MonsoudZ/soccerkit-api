@@ -2,6 +2,29 @@
 -- The delta an account hasn't seen: synced rows across every source, ordered by
 -- the shared cursor. Projected tables contribute their type; sync_documents
 -- carries its own.
+--
+-- One page of it, not all of it. This had no LIMIT, and a pull accumulated whatever it
+-- returned into a single response: pushes are capped at maxSyncBatch records but nothing
+-- caps how many pushes an account makes, so an account grows its own delta without bound
+-- and then every full pull -- since=0, which is what a reinstall sends -- is an unbounded
+-- allocation on the server.
+--
+-- seq comes from a single sequence and is unique across every source, so ordering by it
+-- is total and a page boundary cannot fall inside a group of equal keys. That is what
+-- makes "resume from the last seq I returned" safe: no row is skipped and none is sent
+-- twice. The client drains by asking again until the cursor stops moving; nothing about
+-- the wire format changes.
+--
+-- What the LIMIT does and does not buy, measured rather than assumed. Every branch has an
+-- index on (sync_account_id, seq), and the planner index-scans each one and then top-N
+-- heapsorts into the page: memory is bounded on both sides -- 500 rows here, 60kB of sort
+-- there -- where before the whole delta was materialized into one response.
+--
+-- It does not stop early. There is no merge-append plan available for this shape (checked
+-- with enable_sort off; it sorts anyway), so each page reads the account's remaining
+-- delta to find the next 500 rows, and draining k pages costs k scans of a shrinking
+-- tail. That is cheap at any size a coach will reach and it is where to look first if a
+-- full resync ever gets slow rather than merely large.
 SELECT delta.type, delta.id, delta.payload, delta.deleted, delta.seq FROM (
     SELECT 'Team'::text    AS type, t.id::text AS id, t.payload AS payload, t.deleted AS deleted, t.seq AS seq
         FROM teams    t WHERE t.sync_account_id = $1 AND t.seq > $2
@@ -27,7 +50,8 @@ SELECT delta.type, delta.id, delta.payload, delta.deleted, delta.seq FROM (
     SELECT sd.type, sd.id, sd.payload, sd.deleted, sd.seq
         FROM sync_documents sd WHERE sd.sync_account_id = $1 AND sd.seq > $2
 ) delta
-ORDER BY delta.seq ASC;
+ORDER BY delta.seq ASC
+LIMIT sqlc.arg('lim');
 
 -- Upserts are keyed on the client-supplied primary key, so each conflict clause is
 -- guarded on the row's owner: a push naming a row this account does not own affects
