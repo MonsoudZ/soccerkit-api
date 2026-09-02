@@ -44,14 +44,18 @@ func errNotFound(msg string) *apiError  { return &apiError{http.StatusNotFound, 
 func errConflict(msg string) *apiError  { return &apiError{http.StatusConflict, "CONFLICT", msg} }
 
 // errEmailAlreadyRegistered is what /auth/apple answers when the identity's address
-// already has an account. It carries its own code rather than a bare CONFLICT because
-// the client has to act on it: this one means "sign in with your password, then link
-// Apple from settings", while the other 409 on that endpoint (a pre-claimed Person id)
-// means "contact support". A status code alone cannot tell them apart.
+// already belongs to an account that is not this Apple identity's. It keeps its own code
+// rather than a bare CONFLICT so a client can tell the two 409s on that endpoint apart,
+// and because it is the code that would have to carry a remedy if one ever exists.
+//
+// Today there is none to offer, which is the honest thing for the message to say: with
+// registration removed, an account's address comes from a verified Apple claim, so this
+// state cannot arise through the API and a user cannot resolve it themselves. It means
+// something is wrong in the data, not in what the caller did.
 func errEmailAlreadyRegistered() *apiError {
 	return &apiError{http.StatusConflict, "EMAIL_ALREADY_REGISTERED",
-		"An account already exists for this email address. Sign in with your password, " +
-			"then link Sign in with Apple from your account settings."}
+		"This email address is already in use by another account, so it cannot be set " +
+			"up for this Apple ID. Please contact support."}
 }
 
 // writeJSON serialises v as JSON with the given status code.

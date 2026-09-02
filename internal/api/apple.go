@@ -23,10 +23,11 @@ const (
 type appleIdentity struct {
 	Sub   string // stable Apple user id — our account key
 	Email string // may be empty (user chose to hide it) or a private relay address
-	// EmailVerified is Apple's own assertion about the address. It gates linking this
-	// Apple identity to an existing password account: merging accounts on an
-	// unverified address is a standard takeover primitive, and the claim is right
-	// there in the token.
+	// EmailVerified is Apple's own assertion about the address. It gates whether the
+	// address is stored at all (see appleEmail): user_accounts.email is UNIQUE and is
+	// what /auth/apple refuses on, so an address nobody vouched for must not become an
+	// account's identity. It used to gate merging into an existing password account,
+	// which is a takeover primitive and is why that merge no longer exists.
 	EmailVerified bool
 }
 

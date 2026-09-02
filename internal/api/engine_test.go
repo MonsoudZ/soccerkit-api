@@ -27,7 +27,7 @@ func createAthlete(t *testing.T, token, name string) string {
 
 func TestEvaluationEngineAggregates(t *testing.T) {
 	resetDB(t)
-	coach, _ := registerUser(t, "coach@e.com")
+	coach, _ := signInCoach(t, "coach@e.com")
 	athlete := createAthlete(t, coach, "Sam Player")
 	preGame := templateID(t, coach, "pre_game")
 
@@ -74,7 +74,7 @@ func TestEvaluationEngineAggregates(t *testing.T) {
 
 func TestSubmitRejectsUnknownFieldKey(t *testing.T) {
 	resetDB(t)
-	coach, _ := registerUser(t, "coach2@e.com")
+	coach, _ := signInCoach(t, "coach2@e.com")
 	athlete := createAthlete(t, coach, "Pat Player")
 	preGame := templateID(t, coach, "pre_game")
 
@@ -90,7 +90,7 @@ func TestSubmitRejectsUnknownFieldKey(t *testing.T) {
 
 func TestCreateCustomTemplate(t *testing.T) {
 	resetDB(t)
-	coach, _ := registerUser(t, "coach3@e.com")
+	coach, _ := signInCoach(t, "coach3@e.com")
 
 	r := do(t, http.MethodPost, "/api/v1/templates", coach, map[string]any{
 		"context": "tryout",
@@ -116,8 +116,8 @@ func TestCreateCustomTemplate(t *testing.T) {
 // instances writable, by any authenticated account that knew an id.
 func TestEvaluationIsScopedToTheOrg(t *testing.T) {
 	resetDB(t)
-	coachA, _ := registerUser(t, "evalA@e.com")
-	coachB, _ := registerUser(t, "evalB@e.com")
+	coachA, _ := signInCoach(t, "evalA@e.com")
+	coachB, _ := signInCoach(t, "evalB@e.com")
 	athleteA := createAthlete(t, coachA, "A's Athlete")
 	templateA := templateID(t, coachA, "pre_game")
 
@@ -161,7 +161,7 @@ func TestEvaluationIsScopedToTheOrg(t *testing.T) {
 // product is built on averaged unvalidated client input.
 func TestAnswersAreValidatedAgainstTheirField(t *testing.T) {
 	resetDB(t)
-	coach, _ := registerUser(t, "answers@e.com")
+	coach, _ := signInCoach(t, "answers@e.com")
 	athlete := createAthlete(t, coach, "Val Idation")
 	preGame := templateID(t, coach, "pre_game")
 
@@ -219,7 +219,7 @@ func TestAnswersAreValidatedAgainstTheirField(t *testing.T) {
 // already rejects the same mistake by name.
 func TestTemplateRejectsDuplicateFieldKeys(t *testing.T) {
 	resetDB(t)
-	token, _ := registerUser(t, "dupe@example.com")
+	token, _ := signInCoach(t, "dupe@example.com")
 
 	r := do(t, http.MethodPost, "/api/v1/templates", token, map[string]any{
 		"context": "tryout", "name": "Dupe",
@@ -241,7 +241,7 @@ func TestTemplateRejectsDuplicateFieldKeys(t *testing.T) {
 // stayed failed.
 func TestNumericAnswersAreBounded(t *testing.T) {
 	resetDB(t)
-	token, personID := registerUser(t, "bounds@example.com")
+	token, personID := signInCoach(t, "bounds@example.com")
 	tpl := templateID(t, token, "post_game")
 
 	for _, v := range []float64{1e308, -1e308} {
@@ -268,7 +268,7 @@ func TestNumericAnswersAreBounded(t *testing.T) {
 func TestAggregateSurvivesUnboundedLegacyAnswers(t *testing.T) {
 	resetDB(t)
 	ctx := context.Background()
-	token, personID := registerUser(t, "legacy@example.com")
+	token, personID := signInCoach(t, "legacy@example.com")
 	tpl := templateID(t, token, "post_game")
 
 	// Two answers at the ceiling, written the way the old code would have accepted them.

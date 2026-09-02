@@ -1,7 +1,14 @@
-// Command seed loads idempotent sample data for local development: one coach
-// (login coach@soccerkit.dev / password123), their personal org, a team with a
-// few athletes on the roster, and a couple of pre-game check-ins to populate
-// the evaluation aggregates.
+// Command seed loads idempotent sample data for local development: one coach, their
+// personal org, a team with a few athletes on the roster, and a couple of pre-game
+// check-ins to populate the evaluation aggregates.
+//
+// The coach signs in the only way anyone signs in — Sign in with Apple, with the subject
+// devAppleSub. There is no password to seed any more; with DEV_APPLE_BYPASS=true a
+// crafted, unsigned identity token carrying that subject is accepted, so:
+//
+//	POST /api/v1/auth/apple  {"identityToken": "<unsigned JWT with sub=dev-coach>"}
+//
+// signs into this data. See internal/api/apple_test.go for how the tests build one.
 package main
 
 import (
@@ -9,8 +16,8 @@ import (
 	"log"
 
 	"github.com/jackc/pgx/v5/pgxpool"
-	"golang.org/x/crypto/bcrypt"
 
+	"github.com/monsoudz/soccerkit-api/internal/api"
 	"github.com/monsoudz/soccerkit-api/internal/config"
 	"github.com/monsoudz/soccerkit-api/internal/database"
 )
@@ -20,8 +27,10 @@ func main() {
 	if err != nil {
 		log.Fatal(err)
 	}
-	// This plants a known account (coach@soccerkit.dev / password123). Pointed at a
-	// deployed DATABASE_URL by accident, it would be a public login.
+	// This plants a known account whose Apple subject is published in this file, and it
+	// is only signable-in-as while DEV_APPLE_BYPASS is set. Pointed at a deployed
+	// DATABASE_URL by accident it would still be somebody else's data with a known
+	// identity attached, so the guard stays.
 	if cfg.IsDeployed() {
 		log.Fatalf("refusing to seed: ENV=%q is not a development environment", cfg.Env)
 	}
@@ -32,24 +41,29 @@ func main() {
 	}
 	defer pool.Close()
 
-	hash, err := bcrypt.GenerateFromPassword([]byte("password123"), bcrypt.DefaultCost)
-	if err != nil {
+	if err := seed(ctx, pool); err != nil {
 		log.Fatal(err)
 	}
-	if err := seed(ctx, pool, string(hash)); err != nil {
-		log.Fatal(err)
-	}
-	log.Println("seed complete — coach logs in as coach@soccerkit.dev / password123")
+	log.Printf("seed complete — POST /api/v1/auth/apple with an unsigned token for "+
+		"sub=%q (DEV_APPLE_BYPASS=true) signs in as the seeded coach", devAppleSub)
 }
 
 const (
 	orgID    = "00000000-0000-0000-0000-0000000000f0"
-	coachID  = "00000000-0000-0000-0000-000000000c01"
 	teamID   = "00000000-0000-0000-0000-000000000071"
 	preTplID = "00000000-0000-0000-0000-0000000000e1"
+
+	// devAppleSub is the Apple subject the seeded coach signs in with. The athletes keep
+	// their readable fixed ids below; the coach cannot, because /auth/apple derives a
+	// coach's Person id from their subject and the app derives the same id locally.
+	devAppleSub = "dev-coach"
 )
 
-func seed(ctx context.Context, pool *pgxpool.Pool, hash string) error {
+// coachID is that derivation, not a literal, so the seeded coach is the same Person the
+// sign-in resolves to.
+var coachID = api.DerivePersonID(devAppleSub).String()
+
+func seed(ctx context.Context, pool *pgxpool.Pool) error {
 	// Organization + coach identity.
 	if _, err := pool.Exec(ctx, `
 		INSERT INTO organizations (id, name, kind) VALUES ($1, 'Riverside FC', 'personal')
@@ -62,8 +76,8 @@ func seed(ctx context.Context, pool *pgxpool.Pool, hash string) error {
 		return err
 	}
 	if _, err := pool.Exec(ctx, `
-		INSERT INTO user_accounts (person_id, email, password_hash) VALUES ($1, 'coach@soccerkit.dev', $2)
-		ON CONFLICT (email) DO NOTHING`, coachID, hash); err != nil {
+		INSERT INTO user_accounts (person_id, email, apple_sub) VALUES ($1, 'coach@soccerkit.dev', $2)
+		ON CONFLICT (email) DO NOTHING`, coachID, devAppleSub); err != nil {
 		return err
 	}
 	for _, role := range []string{"admin", "director", "coach"} {

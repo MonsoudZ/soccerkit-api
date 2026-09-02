@@ -120,19 +120,25 @@ func do(t *testing.T, method, path, token string, payload any) resp {
 	return out
 }
 
-// registerUser creates a coach (Person + account + personal org) and returns
-// (accessToken, personID).
-func registerUser(t *testing.T, email string) (string, string) {
+// signInCoach creates (or resumes) a coach the only way anyone gets an account — Sign
+// in with Apple — and returns (accessToken, personID). The Apple subject is derived from
+// the address so each test coach is distinct and stable across calls, and the identity
+// token is unsigned, which the server accepts because the harness sets
+// DEV_APPLE_BYPASS=true.
+//
+// This used to POST /auth/register. Registration and password login are gone: nothing
+// shipped used them, and they were an unauthenticated way to create an account at any
+// address (see docs/AUDIT-3.md C1 and L5).
+func signInCoach(t *testing.T, email string) (string, string) {
 	t.Helper()
-	r := do(t, http.MethodPost, "/api/v1/auth/register", "", map[string]any{
-		"email": email, "password": "password123", "displayName": email,
-	})
-	if r.status != http.StatusCreated {
-		t.Fatalf("register %s: status %d body %s", email, r.status, r.raw)
+	r := appleSignIn(t, "sub-"+email, email, email)
+	if r.status != http.StatusOK {
+		t.Fatalf("sign in %s: status %d body %s", email, r.status, r.raw)
 	}
-	token, _ := r.body["accessToken"].(string)
-	me, _ := r.body["me"].(map[string]any)
-	person, _ := me["person"].(map[string]any)
-	id, _ := person["id"].(string)
+	token, _ := r.body["token"].(string)
+	id, _ := r.body["personID"].(string)
+	if token == "" || id == "" {
+		t.Fatalf("sign in %s returned no session: %s", email, r.raw)
+	}
 	return token, id
 }

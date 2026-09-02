@@ -31,8 +31,10 @@ WHERE id = sqlc.arg('id')
 RETURNING *;
 
 -- name: CreateUserAccount :one
-INSERT INTO user_accounts (person_id, email, password_hash, apple_sub)
-VALUES ($1, $2, $3, $4)
+-- Sign in with Apple is the only path that creates an account, so an account is born
+-- with its Apple subject and there is no credential of ours to store alongside it.
+INSERT INTO user_accounts (person_id, email, apple_sub)
+VALUES ($1, $2, $3)
 RETURNING *;
 
 -- name: GetUserAccountByEmail :one
@@ -40,12 +42,6 @@ SELECT * FROM user_accounts WHERE email = $1;
 
 -- name: GetUserAccountByID :one
 SELECT * FROM user_accounts WHERE id = $1;
-
--- name: GetUserAccountByPersonID :one
--- The account behind an authenticated Person. Access tokens name a Person, so this is
--- how a signed-in caller reaches their own account row — used by the Apple-link
--- endpoint, where the session is the proof of ownership that the address is not.
-SELECT * FROM user_accounts WHERE person_id = $1;
 
 -- name: CreateMembership :one
 INSERT INTO memberships (person_id, organization_id, role)
@@ -178,15 +174,6 @@ DELETE FROM persons WHERE id = $1;
 
 -- name: GetUserAccountByAppleSub :one
 SELECT * FROM user_accounts WHERE apple_sub = $1;
-
--- name: LinkAppleSub :execrows
--- Attach an Apple identity to an account that does not have one. Guarded on
--- apple_sub IS NULL rather than checked beforehand: the handler does read the row first
--- (to tell an idempotent re-link from a different Apple ID, which deserve different
--- answers), but a predicate on the write is what makes two concurrent links unable to
--- overwrite each other and silently cut one Apple ID off from the account.
-UPDATE user_accounts SET apple_sub = $2, updated_at = now()
-WHERE id = $1 AND apple_sub IS NULL;
 
 -- name: CreatePersonWithID :one
 -- Create a Person at an explicit id — the coach's deterministic account Person, so it

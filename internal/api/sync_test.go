@@ -204,7 +204,7 @@ func mustJSON(v any) string {
 func TestSyncPushCannotWriteAnotherAccountsRow(t *testing.T) {
 	resetDB(t)
 	ctx := context.Background()
-	victim, victimPerson := registerUser(t, "sync-victim@e.com")
+	victim, victimPerson := signInCoach(t, "sync-victim@e.com")
 	attacker := appleToken(t, "sub-sync-attacker", "sync-attacker@example.com")
 
 	teamID := "5e1f0a11-0000-4000-8000-00000000ab01"
@@ -259,7 +259,7 @@ func TestSyncPushCannotWriteAnotherAccountsRow(t *testing.T) {
 func TestSyncTombstoneCannotDeleteAnotherAccountsRow(t *testing.T) {
 	resetDB(t)
 	ctx := context.Background()
-	victim, _ := registerUser(t, "tomb-victim@e.com")
+	victim, _ := signInCoach(t, "tomb-victim@e.com")
 	attacker := appleToken(t, "sub-tomb-attacker", "tomb-attacker@example.com")
 
 	drillID := "5e1f0a11-0000-4000-8000-00000000ab02"
@@ -294,7 +294,7 @@ func TestSyncTombstoneCannotDeleteAnotherAccountsRow(t *testing.T) {
 func TestSyncCannotAdoptRESTCreatedRow(t *testing.T) {
 	resetDB(t)
 	ctx := context.Background()
-	coach, _ := registerUser(t, "rest-owner@e.com")
+	coach, _ := signInCoach(t, "rest-owner@e.com")
 
 	team := do(t, http.MethodPost, "/api/v1/teams", coach, map[string]any{"name": "REST Team"})
 	teamID, _ := team.body["id"].(string)
@@ -324,7 +324,7 @@ func TestSyncCannotAdoptRESTCreatedRow(t *testing.T) {
 // by every REST list and get.
 func TestTombstonesHideRowsFromREST(t *testing.T) {
 	resetDB(t)
-	coach, _ := registerUser(t, "tombstone-rest@e.com")
+	coach, _ := signInCoach(t, "tombstone-rest@e.com")
 
 	teamID := "7d000000-0000-4000-8000-00000000dd01"
 	drillID := "7d000000-0000-4000-8000-00000000dd02"
@@ -364,7 +364,7 @@ func TestTombstonesHideRowsFromREST(t *testing.T) {
 // learned it was gone and re-created it on its next push.
 func TestRESTDeleteReachesSyncClients(t *testing.T) {
 	resetDB(t)
-	coach, _ := registerUser(t, "rest-delete-sync@e.com")
+	coach, _ := signInCoach(t, "rest-delete-sync@e.com")
 
 	teamID := "7d000000-0000-4000-8000-00000000dd03"
 	do(t, http.MethodPost, "/api/v1/sync", coach, map[string]any{
@@ -389,7 +389,7 @@ func TestRESTDeleteReachesSyncClients(t *testing.T) {
 // transaction, so an unbounded batch held it open for as long as it took.
 func TestSyncPushRejectsOversizedBatch(t *testing.T) {
 	resetDB(t)
-	coach, _ := registerUser(t, "batch@e.com")
+	coach, _ := signInCoach(t, "batch@e.com")
 
 	upserts := make([]map[string]any, 1001)
 	for i := range upserts {
@@ -415,7 +415,7 @@ func TestSyncPushRejectsOversizedBatch(t *testing.T) {
 // TestRequestBodyIsCapped — decodeJSON would previously read a body of any size.
 func TestRequestBodyIsCapped(t *testing.T) {
 	resetDB(t)
-	coach, _ := registerUser(t, "bodycap@e.com")
+	coach, _ := signInCoach(t, "bodycap@e.com")
 
 	huge := strings.Repeat("a", 5<<20) // 5 MiB, over the 4 MiB cap
 	r := do(t, http.MethodPost, "/api/v1/drills", coach, map[string]any{"name": huge})
@@ -430,7 +430,7 @@ func TestRequestBodyIsCapped(t *testing.T) {
 // was changed on the phone; a 400 naming the record is something it can act on.
 func TestSyncRejectsAnUnstorableCharacter(t *testing.T) {
 	resetDB(t)
-	token, _ := registerUser(t, "unstorable@example.com")
+	token, _ := signInCoach(t, "unstorable@example.com")
 
 	body := `{"upserts":[{"type":"Note","id":"note-1","payload":{"text":"hello` +
 		"\\u0000" + `world"}}]}`

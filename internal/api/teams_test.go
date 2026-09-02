@@ -7,7 +7,7 @@ import (
 
 func TestTeamAndTimeBoundedRoster(t *testing.T) {
 	resetDB(t)
-	coach, _ := registerUser(t, "tcoach@e.com")
+	coach, _ := signInCoach(t, "tcoach@e.com")
 	athlete := createAthlete(t, coach, "Roster Kid")
 
 	team := do(t, http.MethodPost, "/api/v1/teams", coach, map[string]any{
@@ -55,8 +55,8 @@ func TestTeamAndTimeBoundedRoster(t *testing.T) {
 
 func TestTeamIsolatedByOrg(t *testing.T) {
 	resetDB(t)
-	coachA, _ := registerUser(t, "orgA@e.com")
-	coachB, _ := registerUser(t, "orgB@e.com")
+	coachA, _ := signInCoach(t, "orgA@e.com")
+	coachB, _ := signInCoach(t, "orgB@e.com")
 
 	team := do(t, http.MethodPost, "/api/v1/teams", coachA, map[string]any{"name": "A Team"})
 	teamID := team.body["id"].(string)
@@ -95,8 +95,8 @@ func TestTeamIsolatedByOrg(t *testing.T) {
 // to check anything beyond "is the caller authenticated".
 func TestPersonReadsAreScopedToTheOrg(t *testing.T) {
 	resetDB(t)
-	coachA, _ := registerUser(t, "readA@e.com")
-	coachB, _ := registerUser(t, "readB@e.com")
+	coachA, _ := signInCoach(t, "readA@e.com")
+	coachB, _ := signInCoach(t, "readB@e.com")
 
 	create := do(t, http.MethodPost, "/api/v1/persons", coachA, map[string]any{
 		"displayName": "Kid Athlete", "birthdate": "2015-04-01",
@@ -128,8 +128,8 @@ func TestPersonReadsAreScopedToTheOrg(t *testing.T) {
 // own coach's account deletion.
 func TestRosterRejectsPersonOutsideTheOrg(t *testing.T) {
 	resetDB(t)
-	coachA, _ := registerUser(t, "rosterA@e.com")
-	coachB, _ := registerUser(t, "rosterB@e.com")
+	coachA, _ := signInCoach(t, "rosterA@e.com")
+	coachB, _ := signInCoach(t, "rosterB@e.com")
 
 	athlete := createAthlete(t, coachA, "Minor Athlete")
 	teamB := do(t, http.MethodPost, "/api/v1/teams", coachB, map[string]any{"name": "B Team"})
@@ -150,7 +150,7 @@ func TestRosterRejectsPersonOutsideTheOrg(t *testing.T) {
 // membership and the endpoint refuses to mint privileged roles.
 func TestCreatePersonAlwaysLinksToTheOrg(t *testing.T) {
 	resetDB(t)
-	coach, _ := registerUser(t, "roles@e.com")
+	coach, _ := signInCoach(t, "roles@e.com")
 
 	parent := do(t, http.MethodPost, "/api/v1/persons", coach, map[string]any{
 		"displayName": "A Parent", "role": "parent",
@@ -179,7 +179,7 @@ func TestCreatePersonAlwaysLinksToTheOrg(t *testing.T) {
 // record the result of a match for a team that no longer existed.
 func TestGamesDieWithTheirTeam(t *testing.T) {
 	resetDB(t)
-	coach, _ := registerUser(t, "gamedel@e.com")
+	coach, _ := signInCoach(t, "gamedel@e.com")
 
 	team := do(t, http.MethodPost, "/api/v1/teams", coach, map[string]any{"name": "U12"})
 	teamID, _ := team.body["id"].(string)

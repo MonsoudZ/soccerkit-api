@@ -85,27 +85,22 @@ func (s *Server) handleAppleAuth(w http.ResponseWriter, r *http.Request) {
 	// 2. First Apple sign-in for this subject: provision a whole new identity.
 	email := appleEmail(identity)
 
-	// An account already holds this address, so the sign-in is refused rather than
-	// merged into it.
+	// An account already holds this address and this is not its Apple identity, so the
+	// sign-in is refused rather than merged into it.
 	//
-	// The merge that used to live here linked the Apple identity to whatever account
-	// held the address and signed the caller into it. Both halves of a merge have to be
-	// trustworthy and only one of them was: Apple's half is checked (its email_verified
-	// claim, see appleEmail), while user_accounts.email is an address somebody typed
-	// into POST /auth/register, which sends no verification mail and has no verified
-	// column.
+	// This branch used to be the merge: it linked the Apple identity to whatever account
+	// held a matching address and signed the caller in. Both halves of a merge have to be
+	// trustworthy and only one was — Apple checks its half, while user_accounts.email was
+	// whatever somebody typed into POST /auth/register, which verified nothing. So
+	// registering an address you did not own was a way to be handed the account of
+	// whoever later signed in with Apple at it (docs/AUDIT-3.md C1).
 	//
-	// So registering an address you do not own was a way to be handed the account of
-	// whoever later signed in with Apple at it. Permanently: the password stays the
-	// attacker's, nothing notifies the victim, and no endpoint unlinks an Apple sub. In
-	// an app holding minors' medical notes and emergency contacts that is the worst
-	// thing here, and its only preconditions are knowing an email address and arriving
-	// first — which is every user of a newly shipped app.
-	//
-	// Proof of control has to come from something an attacker cannot hold at the same
-	// time. That is the existing account's password, so linking moved to
-	// POST /me/apple-link, which runs against an authenticated session. The cost is one
-	// extra step, once, for a coach who genuinely has both.
+	// Registration is gone now, so nothing can plant an address any more and this is
+	// unreachable in practice: an account's address comes from a verified Apple claim, and
+	// two Apple IDs do not share one. The guard stays because the invariant is about
+	// addresses, not about who can currently create them — an address is not proof of
+	// anything, whatever writes it, and the next thing that writes one should meet the
+	// same refusal rather than inherit a hole.
 	if _, err := s.store.GetUserAccountByEmail(ctx, email); err == nil {
 		writeError(w, errEmailAlreadyRegistered())
 		return
@@ -124,11 +119,21 @@ func (s *Server) handleAppleAuth(w http.ResponseWriter, r *http.Request) {
 
 	person, account, err := s.provisionAppleIdentity(ctx, q, identity, req.FullName, email)
 	if err != nil {
-		// The lookup above races a concurrent registration at the same address. The
-		// unique constraint catches that, and it is the same conflict, so it gets the
-		// same answer rather than surfacing as a 500.
-		if isUniqueViolation(err) {
-			writeError(w, errEmailAlreadyRegistered())
+		// Provisioning can lose a race with itself. Two first sign-ins for one subject —
+		// a coach opening the app on a second device while the first is still working, or
+		// a client re-sending a request whose response it lost — and the loser fails on
+		// the winner's committed rows: on user_accounts' unique apple_sub or email, or on
+		// the Person id the subject derives, where CreatePersonWithID's DO NOTHING
+		// reports the id as taken. That last one is the same signal a pre-claimed row
+		// gives, so the refusal alone cannot tell an attacker from ourselves.
+		//
+		// Asking who owns it now settles it. If an account for this subject exists, the
+		// winner built precisely what this request was going to build, and signing in to
+		// it is both correct and what a request arriving a moment later would have got.
+		// If none does, the id belongs to somebody else and the refusal stands — which is
+		// C2's guarantee, undiminished, because a squatted row has no account behind it.
+		_ = tx.Rollback(ctx)
+		if s.signedInToConcurrentlyProvisioned(w, r, identity) {
 			return
 		}
 		writeError(w, err)
@@ -149,79 +154,33 @@ func (s *Server) handleAppleAuth(w http.ResponseWriter, r *http.Request) {
 	respondAppleAuth(w, auth, person.ID)
 }
 
-type appleLinkRequest struct {
-	IdentityToken string `json:"identityToken"`
-}
-
-// handleLinkApple attaches an Apple identity to the account the caller is already
-// authenticated as. It is the other half of the refusal in handleAppleAuth: a coach who
-// registered with a password and now wants Sign in with Apple links the two here, where
-// the proof that both belong to the same person is the session they are already holding
-// — a thing an attacker who merely typed the address into the registration form does not
-// have.
-//
-// Deliberately not on /auth: it requires a bearer token, so it belongs behind
-// requireAuth with the rest of /me.
-func (s *Server) handleLinkApple(w http.ResponseWriter, r *http.Request) {
-	var req appleLinkRequest
-	if err := decodeJSON(r, &req); err != nil {
-		writeError(w, err)
-		return
-	}
-	if strings.TrimSpace(req.IdentityToken) == "" {
-		writeError(w, errValidation("identityToken is required"))
-		return
-	}
+// signedInToConcurrentlyProvisioned answers a sign-in whose provisioning failed, in the
+// one case where failure is not the caller's problem: another request for this same
+// Apple subject got there first. It reports whether it handled the response, so the
+// caller can fall through to the real error when nothing owns this subject.
+func (s *Server) signedInToConcurrentlyProvisioned(w http.ResponseWriter, r *http.Request, identity appleIdentity) bool {
 	ctx := r.Context()
-	identity, err := s.apple.verify(ctx, req.IdentityToken)
+	account, err := s.store.GetUserAccountByAppleSub(ctx, &identity.Sub)
 	if err != nil {
-		writeError(w, errUnauthorized("Apple sign-in could not be verified"))
-		return
+		return false
 	}
-
-	account, err := s.store.GetUserAccountByPersonID(ctx, personIDFrom(ctx))
-	if errors.Is(err, pgx.ErrNoRows) {
-		writeError(w, errUnauthorized("this account no longer exists"))
-		return
-	} else if err != nil {
-		writeError(w, err)
-		return
-	}
-	if account.AppleSub != nil {
-		// Re-linking the same Apple ID is what a client retrying a lost response does.
-		if *account.AppleSub == identity.Sub {
-			writeJSON(w, http.StatusOK, map[string]bool{"ok": true})
-			return
-		}
-		writeError(w, errConflict("this account is already linked to a different Apple ID"))
-		return
-	}
-
-	linked, err := s.store.LinkAppleSub(ctx, store.LinkAppleSubParams{
-		ID: account.ID, AppleSub: &identity.Sub,
-	})
+	person, err := s.store.GetPerson(ctx, account.PersonID)
 	if err != nil {
-		// user_accounts.apple_sub is UNIQUE, so this is an Apple ID that already belongs
-		// to somebody else's account. Refusing keeps one Apple identity to one account,
-		// which is what makes branch 1 of handleAppleAuth unambiguous.
-		if isUniqueViolation(err) {
-			writeError(w, errConflict("that Apple ID is already linked to another account"))
-			return
-		}
 		writeError(w, err)
-		return
+		return true
 	}
-	if linked == 0 {
-		// A concurrent link won between the read above and this write.
-		writeError(w, errConflict("this account is already linked to a different Apple ID"))
-		return
+	auth, err := s.issueTokens(ctx, s.store, account, person)
+	if err != nil {
+		writeError(w, err)
+		return true
 	}
-	writeJSON(w, http.StatusOK, map[string]bool{"ok": true})
+	respondAppleAuth(w, auth, person.ID)
+	return true
 }
 
-// provisionAppleIdentity creates the full identity for a first-time Apple user,
-// mirroring email registration (Person + UserAccount + personal Org + roles +
-// seeded templates).
+// provisionAppleIdentity creates the full identity for a first-time Apple user:
+// Person + UserAccount + personal Org + admin/director/coach memberships + seeded
+// templates. It is the only path that creates an account.
 func (s *Server) provisionAppleIdentity(
 	ctx context.Context, q *store.Queries, identity appleIdentity, fullName *string, email string,
 ) (store.Person, store.UserAccount, error) {
@@ -229,12 +188,12 @@ func (s *Server) provisionAppleIdentity(
 
 	// The coach's person id is derived from the Apple subject, so it matches the
 	// id the app derives locally — the account Person and the synced Person are
-	// one row (see derivePersonID).
+	// one row (see DerivePersonID).
 	//
 	// Deriving it from a public namespace makes the id predictable, which is the point
 	// for reconciliation and a liability here: the insert must create the row, never
 	// adopt one that is already there. See CreatePersonWithID for what adopting cost.
-	personID := derivePersonID(identity.Sub)
+	personID := DerivePersonID(identity.Sub)
 	person, err := q.CreatePersonWithID(ctx, store.CreatePersonWithIDParams{
 		ID: personID, DisplayName: displayName, Email: &email,
 	})
@@ -299,8 +258,11 @@ func respondAppleAuth(w http.ResponseWriter, auth AuthResponse, personID uuid.UU
 // — no id round-tripping, no migration. Keep this value identical in the client.
 var coachPersonNamespace = uuid.MustParse("2b6f0cc9-04e9-4c8e-8f1a-7c3d5e2a9b40")
 
-// derivePersonID maps an Apple subject to its stable coach Person id.
-func derivePersonID(appleSub string) uuid.UUID {
+// DerivePersonID maps an Apple subject to its stable coach Person id. Exported for
+// cmd/seed, which plants a signed-in-able coach and has to mint the id this function
+// would: a seeded coach whose id is not the one their subject derives would fork into
+// two Person rows the moment the app pushed its own.
+func DerivePersonID(appleSub string) uuid.UUID {
 	return uuid.NewSHA1(coachPersonNamespace, []byte(appleSub))
 }
 

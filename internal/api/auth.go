@@ -7,52 +7,15 @@ import (
 	"encoding/base64"
 	"net/http"
 	"strings"
-	"sync"
 	"time"
 
 	"github.com/golang-jwt/jwt/v5"
 	"github.com/google/uuid"
-	"golang.org/x/crypto/bcrypt"
 )
 
 type ctxKey string
 
 const personIDKey ctxKey = "personID"
-
-// --- password hashing -----------------------------------------------------
-
-// maxPasswordBytes is bcrypt's input limit. Anything longer is rejected by
-// GenerateFromPassword (it does not truncate), so registration checks it as validation
-// rather than letting the crypto library's error surface as a 500.
-const maxPasswordBytes = 72
-
-func hashPassword(plain string) (string, error) {
-	b, err := bcrypt.GenerateFromPassword([]byte(plain), bcrypt.DefaultCost)
-	return string(b), err
-}
-
-func verifyPassword(plain, hash string) bool {
-	return bcrypt.CompareHashAndPassword([]byte(hash), []byte(plain)) == nil
-}
-
-// dummyPasswordHash is a real bcrypt hash of a fixed string, compared against when
-// there is no password to check — an unknown email, or an account that only has Apple
-// sign-in. Without it, login returned immediately on a miss and spent ~60ms hashing on
-// a hit, and that difference is trivially measurable: it tells an attacker which
-// addresses have accounts. Built once, on first use, so the cost is not paid at boot.
-var dummyPasswordHash = sync.OnceValue(func() []byte {
-	h, err := bcrypt.GenerateFromPassword([]byte("no-such-account"), bcrypt.DefaultCost)
-	if err != nil {
-		// Cannot happen for a fixed input, and a nil hash still burns a comparison.
-		return nil
-	}
-	return h
-})
-
-// burnPasswordComparison spends the same work verifyPassword would, and discards it.
-func burnPasswordComparison(plain string) {
-	_ = bcrypt.CompareHashAndPassword(dummyPasswordHash(), []byte(plain))
-}
 
 // --- access tokens (JWT) --------------------------------------------------
 // The access token identifies a Person (the authenticated human). Org and role

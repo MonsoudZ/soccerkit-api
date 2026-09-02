@@ -21,7 +21,7 @@ func countRows(t *testing.T, query string, args ...any) int {
 // athlete Person rows (minors' PII) are gone, not just their memberships.
 func TestDeleteMeCascadesAndErasesAthletePII(t *testing.T) {
 	resetDB(t)
-	coach, coachPerson := registerUser(t, "delete-me@e.com")
+	coach, coachPerson := signInCoach(t, "delete-me@e.com")
 	athlete := createAthlete(t, coach, "PII Kid")
 
 	// Give the athlete a team, a roster spot, and a submitted evaluation — the
@@ -46,7 +46,7 @@ func TestDeleteMeCascadesAndErasesAthletePII(t *testing.T) {
 	}
 
 	// A second, unrelated coach whose data must be untouched by the deletion.
-	other, otherPerson := registerUser(t, "survivor@e.com")
+	other, otherPerson := signInCoach(t, "survivor@e.com")
 	otherAthlete := createAthlete(t, other, "Safe Kid")
 
 	// Delete.
@@ -96,7 +96,7 @@ func TestDeleteMeCascadesAndErasesAthletePII(t *testing.T) {
 // account) still returns 204 rather than 500 — the flaky-network case.
 func TestDeleteMeIsIdempotent(t *testing.T) {
 	resetDB(t)
-	coach, _ := registerUser(t, "idem@e.com")
+	coach, _ := signInCoach(t, "idem@e.com")
 
 	if first := do(t, http.MethodDelete, "/api/v1/me", coach, nil); first.status != http.StatusNoContent {
 		t.Fatalf("first delete: expected 204, got %d %s", first.status, first.raw)
@@ -121,8 +121,8 @@ func TestDeleteMeRequiresAuth(t *testing.T) {
 // though that can't happen in today's solo-coach model.
 func TestDeleteMeSparesSharedAthlete(t *testing.T) {
 	resetDB(t)
-	coachA, _ := registerUser(t, "shareA@e.com")
-	coachB, _ := registerUser(t, "shareB@e.com")
+	coachA, _ := signInCoach(t, "shareA@e.com")
+	coachB, _ := signInCoach(t, "shareB@e.com")
 
 	// Athlete belongs to coach A's org (membership) but is also rostered on a
 	// team in coach B's org.
@@ -180,7 +180,7 @@ func TestDeleteMeSparesSharedAthlete(t *testing.T) {
 // and because the handler is one transaction the account could never be deleted at all.
 func TestDeleteMeAfterSelfEvaluation(t *testing.T) {
 	resetDB(t)
-	coach, coachPerson := registerUser(t, "self-eval@e.com")
+	coach, coachPerson := signInCoach(t, "self-eval@e.com")
 
 	inst := do(t, http.MethodPost, "/api/v1/form-instances", coach, map[string]any{
 		"templateId": templateID(t, coach, "pre_game"), "subjectPersonId": coachPerson,
@@ -219,8 +219,8 @@ func TestDeleteMeAfterSelfEvaluation(t *testing.T) {
 func TestDeleteMeSparesAnOrgTheCallerOnlyBelongsTo(t *testing.T) {
 	resetDB(t)
 	ctx := context.Background()
-	owner, ownerPerson := registerUser(t, "owner@e.com")
-	joiner, joinerPerson := registerUser(t, "joiner@e.com")
+	owner, ownerPerson := signInCoach(t, "owner@e.com")
+	joiner, joinerPerson := signInCoach(t, "joiner@e.com")
 
 	// Every org gets an owner at creation; deletion selects on that column, so an org
 	// without one would be undeletable by the person who made it.
@@ -285,7 +285,7 @@ func TestDeleteMeSparesAnOrgTheCallerOnlyBelongsTo(t *testing.T) {
 // reported a server fault, which a client cannot tell from an outage.
 func TestMeAfterAccountDeletionIsUnauthorized(t *testing.T) {
 	resetDB(t)
-	token, _ := registerUser(t, "gone@example.com")
+	token, _ := signInCoach(t, "gone@example.com")
 
 	if r := do(t, http.MethodDelete, "/api/v1/me", token, nil); r.status != http.StatusNoContent {
 		t.Fatalf("delete: %d %s", r.status, r.raw)

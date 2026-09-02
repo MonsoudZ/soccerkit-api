@@ -9,9 +9,8 @@ import (
 )
 
 // Request limits. None of these existed: an unauthenticated caller could POST an
-// unbounded body, hammer /auth/login (a ~60ms bcrypt comparison each time, so a cheap
-// resource-exhaustion lever as well as an unmetered credential-stuffing target), or
-// push a sync batch of any size into a single transaction.
+// unbounded body, hammer the credential endpoints, or push a sync batch of any size
+// into a single transaction.
 const (
 	// maxBodyBytes caps any request body. The largest legitimate body is a sync push,
 	// which is JSON payloads mirrored from a phone.
@@ -23,7 +22,7 @@ const (
 
 	// authRate is the sustained requests-per-minute allowed per client IP on the
 	// credential endpoints, and authBurst how many may arrive at once. A coach signing
-	// in, mistyping, and retrying stays far below this.
+	// in with Apple, or a device renewing a session, stays far below this.
 	authRate  = 20
 	authBurst = 10
 )

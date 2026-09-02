@@ -38,8 +38,8 @@ exist in the schema now:
 
 | Area | Endpoints |
 |------|-----------|
-| **auth** | `POST /auth/register` (provisions Person + UserAccount + personal Org + admin/director/coach memberships + seeded templates), `/auth/login`, `/auth/apple` (Sign in with Apple — same provisioning; returns `{ token, refreshToken, personID }` for the iOS app), `/auth/refresh` (rotating), `/auth/logout` |
-| **me** | `GET /me` — the authenticated person + their org memberships, `DELETE /me` (full account erasure), `POST /me/apple-link` (attach Sign in with Apple to the account you are signed in as — `/auth/apple` will not join the two on a matching email address, because nothing verifies one) |
+| **auth** | `POST /auth/apple` — Sign in with Apple, the only way into an account; a first sign-in provisions Person + UserAccount + personal Org + admin/director/coach memberships + seeded templates, and it returns `{ token, refreshToken, personID }` for the iOS app. `/auth/refresh` (rotating), `/auth/logout`. There is no registration or password login: nothing shipped used them, and they let anyone create an account at an address nobody verified (see `docs/AUDIT-3.md`). |
+| **me** | `GET /me` — the authenticated person + their org memberships, `DELETE /me` (full account erasure) |
 | **persons** | `POST /persons` (add an athlete), `GET /persons/:id`, `GET /persons/:id/instances`, `GET /persons/:id/aggregate` |
 | **teams** | `GET/POST /teams`, `GET/DELETE /teams/:id`, `POST /teams/:id/roster`, `DELETE /teams/:id/roster/:personId` |
 | **evaluation** | `GET/POST /templates`, `GET /templates/:id`, `POST /form-instances`, `GET /form-instances/:id` |
@@ -81,7 +81,7 @@ export JWT_ACCESS_SECRET="dev-access-secret"
 export DEV_APPLE_BYPASS=true   # or set APPLE_CLIENT_ID to the app's bundle id
 
 make run                    # migrations apply on boot; docs at /docs
-make seed                   # coach@soccerkit.dev / password123
+make seed                   # a coach who signs in with Apple sub "dev-coach"
 make test                   # needs TEST_DATABASE_URL
 ```
 

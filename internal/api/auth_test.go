@@ -3,28 +3,36 @@ package api_test
 import (
 	"context"
 	"net/http"
-	"strings"
 	"sync"
 	"testing"
-	"time"
 )
 
-func TestRegisterCreatesIdentityGraph(t *testing.T) {
+// TestSignInCreatesIdentityGraph — a first Sign in with Apple provisions the whole
+// identity: a Person, an account, a personal organization, and the three top roles in
+// it. This is the only path that creates an account; email+password registration is
+// gone (docs/AUDIT-3.md C1, L5).
+func TestSignInCreatesIdentityGraph(t *testing.T) {
 	resetDB(t)
 
-	r := do(t, http.MethodPost, "/api/v1/auth/register", "", map[string]any{
-		"email": "Coach@Example.com", "password": "password123", "displayName": "Coach Kim",
-	})
-	if r.status != http.StatusCreated {
-		t.Fatalf("expected 201, got %d: %s", r.status, r.raw)
+	r := appleSignIn(t, "graph-sub", "Coach@Example.com", "Coach Kim")
+	if r.status != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", r.status, r.raw)
 	}
-	me := r.body["me"].(map[string]any)
-	person := me["person"].(map[string]any)
+	if r.body["token"] == nil || r.body["refreshToken"] == nil {
+		t.Error("expected a session")
+	}
+	token, _ := r.body["token"].(string)
+
+	me := do(t, http.MethodGet, "/api/v1/me", token, nil)
+	if me.status != http.StatusOK {
+		t.Fatalf("/me: %d %s", me.status, me.raw)
+	}
+	person := me.body["person"].(map[string]any)
 	if person["displayName"] != "Coach Kim" {
 		t.Errorf("unexpected person: %v", person)
 	}
 	// Personal org with admin+director+coach memberships.
-	memberships := me["memberships"].([]any)
+	memberships := me.body["memberships"].([]any)
 	if len(memberships) != 3 {
 		t.Fatalf("expected 3 memberships (admin/director/coach), got %d", len(memberships))
 	}
@@ -37,14 +45,11 @@ func TestRegisterCreatesIdentityGraph(t *testing.T) {
 			t.Errorf("missing role %q", want)
 		}
 	}
-	if r.body["accessToken"] == nil || r.body["refreshToken"] == nil {
-		t.Error("expected tokens")
-	}
 }
 
-func TestRegisterSeedsTemplates(t *testing.T) {
+func TestNewAccountSeedsTemplates(t *testing.T) {
 	resetDB(t)
-	token, _ := registerUser(t, "seeded@e.com")
+	token, _ := signInCoach(t, "seeded@e.com")
 
 	list := do(t, http.MethodGet, "/api/v1/templates", token, nil)
 	if list.status != http.StatusOK {
@@ -63,39 +68,10 @@ func TestRegisterSeedsTemplates(t *testing.T) {
 	}
 }
 
-func TestDuplicateEmailAndValidation(t *testing.T) {
+func TestRefreshRotation(t *testing.T) {
 	resetDB(t)
-	payload := map[string]any{"email": "dup@e.com", "password": "password123", "displayName": "Dup"}
-	do(t, http.MethodPost, "/api/v1/auth/register", "", payload)
-
-	if r := do(t, http.MethodPost, "/api/v1/auth/register", "", payload); r.status != http.StatusConflict {
-		t.Errorf("expected 409 on duplicate, got %d", r.status)
-	}
-	bad := do(t, http.MethodPost, "/api/v1/auth/register", "", map[string]any{
-		"email": "notanemail", "password": "short", "displayName": "Z",
-	})
-	if bad.status != http.StatusBadRequest {
-		t.Errorf("expected 400 on invalid input, got %d", bad.status)
-	}
-}
-
-func TestLoginAndRefreshRotation(t *testing.T) {
-	resetDB(t)
-	reg := do(t, http.MethodPost, "/api/v1/auth/register", "", map[string]any{
-		"email": "log@e.com", "password": "password123", "displayName": "Log",
-	})
-	refresh := reg.body["refreshToken"].(string)
-
-	if ok := do(t, http.MethodPost, "/api/v1/auth/login", "", map[string]any{
-		"email": "log@e.com", "password": "password123",
-	}); ok.status != http.StatusOK || ok.body["accessToken"] == nil {
-		t.Fatalf("valid login failed: %d %s", ok.status, ok.raw)
-	}
-	if bad := do(t, http.MethodPost, "/api/v1/auth/login", "", map[string]any{
-		"email": "log@e.com", "password": "wrongpassword",
-	}); bad.status != http.StatusUnauthorized {
-		t.Errorf("expected 401 on bad password, got %d", bad.status)
-	}
+	r := appleSignIn(t, "rotate-sub", "log@e.com", nil)
+	refresh := r.body["refreshToken"].(string)
 
 	first := do(t, http.MethodPost, "/api/v1/auth/refresh", "", map[string]any{"refreshToken": refresh})
 	if first.status != http.StatusOK || first.body["refreshToken"] == refresh {
@@ -117,9 +93,7 @@ func TestProtectedRouteRequiresAuth(t *testing.T) {
 // the database was a set of working credentials for every account.
 func TestRefreshTokensAreStoredHashed(t *testing.T) {
 	resetDB(t)
-	r := do(t, http.MethodPost, "/api/v1/auth/register", "", map[string]any{
-		"email": "hashed@e.com", "password": "password123", "displayName": "H",
-	})
+	r := appleSignIn(t, "hashed-sub", "hashed@e.com", nil)
 	refresh, _ := r.body["refreshToken"].(string)
 	if refresh == "" {
 		t.Fatal("no refresh token issued")
@@ -147,9 +121,7 @@ func TestRefreshTokensAreStoredHashed(t *testing.T) {
 func TestReplayedRefreshTokenRevokesTheFamily(t *testing.T) {
 	resetDB(t)
 	ctx := context.Background()
-	r := do(t, http.MethodPost, "/api/v1/auth/register", "", map[string]any{
-		"email": "replay@e.com", "password": "password123", "displayName": "R",
-	})
+	r := appleSignIn(t, "replay-sub", "replay@e.com", nil)
 	stolen, _ := r.body["refreshToken"].(string)
 
 	rotated := do(t, http.MethodPost, "/api/v1/auth/refresh", "", map[string]any{"refreshToken": stolen})
@@ -180,10 +152,8 @@ func TestReplayedRefreshTokenRevokesTheFamily(t *testing.T) {
 	}
 
 	// Signing in fresh still works.
-	if login := do(t, http.MethodPost, "/api/v1/auth/login", "", map[string]any{
-		"email": "replay@e.com", "password": "password123",
-	}); login.status != http.StatusOK {
-		t.Errorf("re-login after the cascade: %d %s", login.status, login.raw)
+	if again := appleSignIn(t, "replay-sub", "replay@e.com", nil); again.status != http.StatusOK {
+		t.Errorf("signing in again after the cascade: %d %s", again.status, again.raw)
 	}
 }
 
@@ -192,9 +162,7 @@ func TestReplayedRefreshTokenRevokesTheFamily(t *testing.T) {
 // one failed retry, not every session on every device.
 func TestRefreshRetryWithinGraceDoesNotCascade(t *testing.T) {
 	resetDB(t)
-	r := do(t, http.MethodPost, "/api/v1/auth/register", "", map[string]any{
-		"email": "retry@e.com", "password": "password123", "displayName": "T",
-	})
+	r := appleSignIn(t, "retry-sub", "retry@e.com", nil)
 	first, _ := r.body["refreshToken"].(string)
 
 	rotated := do(t, http.MethodPost, "/api/v1/auth/refresh", "", map[string]any{"refreshToken": first})
@@ -218,15 +186,15 @@ func TestRefreshRetryWithinGraceDoesNotCascade(t *testing.T) {
 // it, so a signed-out token can never be mistaken for a rotation replay.
 func TestLogoutDoesNotCascadeToOtherDevices(t *testing.T) {
 	resetDB(t)
-	reg := do(t, http.MethodPost, "/api/v1/auth/register", "", map[string]any{
-		"email": "twodevices@e.com", "password": "password123", "displayName": "D",
-	})
-	deviceA, _ := reg.body["refreshToken"].(string)
+	first := appleSignIn(t, "twodevices-sub", "twodevices@e.com", nil)
+	deviceA, _ := first.body["refreshToken"].(string)
 
-	login := do(t, http.MethodPost, "/api/v1/auth/login", "", map[string]any{
-		"email": "twodevices@e.com", "password": "password123",
-	})
-	deviceB, _ := login.body["refreshToken"].(string)
+	// The same coach signs in on a second device: same Apple subject, new session.
+	second := appleSignIn(t, "twodevices-sub", "twodevices@e.com", nil)
+	deviceB, _ := second.body["refreshToken"].(string)
+	if deviceB == "" || deviceB == deviceA {
+		t.Fatalf("the second device should get its own token: %s", second.raw)
+	}
 
 	if out := do(t, http.MethodPost, "/api/v1/auth/logout", "", map[string]any{
 		"refreshToken": deviceA,
@@ -242,87 +210,66 @@ func TestLogoutDoesNotCascadeToOtherDevices(t *testing.T) {
 	}
 }
 
-// TestLoginDoesNotRevealWhichEmailsExist — login returned immediately on an unknown
-// address and spent a bcrypt comparison on a known one, and that difference is
-// measurable, so it told an attacker which addresses have accounts.
-func TestLoginDoesNotRevealWhichEmailsExist(t *testing.T) {
-	resetDB(t)
-	registerUser(t, "known@e.com")
-
-	timeLogin := func(email string) time.Duration {
-		start := time.Now()
-		r := do(t, http.MethodPost, "/api/v1/auth/login", "", map[string]any{
-			"email": email, "password": "definitely-wrong-password",
-		})
-		if r.status != http.StatusUnauthorized {
-			t.Fatalf("login %s: got %d, want 401", email, r.status)
-		}
-		return time.Since(start)
-	}
-	// Warm the lazily-built dummy hash so it is not charged to the first call.
-	timeLogin("unknown@e.com")
-
-	known, unknown := timeLogin("known@e.com"), timeLogin("unknown@e.com")
-	ratio := float64(known) / float64(unknown)
-	if ratio > 3 || ratio < 0.33 {
-		t.Errorf("login timing differs by %.1fx between a known and unknown address "+
-			"(known %v, unknown %v) — that is an enumeration oracle", ratio, known, unknown)
-	}
-}
-
-// TestConcurrentRegistrationConflicts — the existence check races the insert, and the
-// loser hit the unique constraint and surfaced as a 500.
-func TestConcurrentRegistrationConflicts(t *testing.T) {
+// TestConcurrentFirstSignInsResolveToOneAccount — provisioning races itself when a
+// coach's first sign-in arrives twice at once (a second device, or a client re-sending
+// a request whose response it lost). The loser fails on the winner's committed rows,
+// and on the Person id in particular that failure is indistinguishable from the
+// pre-claimed row CreatePersonWithID exists to refuse. Both must resolve to one
+// account, and both callers must end up signed in to it.
+func TestConcurrentFirstSignInsResolveToOneAccount(t *testing.T) {
 	resetDB(t)
 	const n = 4
-	body := map[string]any{"email": "race@e.com", "password": "password123", "displayName": "Race"}
 
-	statuses := make(chan int, n)
 	var wg sync.WaitGroup
+	var mu sync.Mutex
+	statuses := map[int]int{}
+	persons := map[string]bool{}
+	start := make(chan struct{})
 	for i := 0; i < n; i++ {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
-			statuses <- do(t, http.MethodPost, "/api/v1/auth/register", "", body).status
+			<-start
+			r := appleSignIn(t, "concurrent-sub", "concurrent@e.com", nil)
+			id, _ := r.body["personID"].(string)
+			mu.Lock()
+			statuses[r.status]++
+			if id != "" {
+				persons[id] = true
+			}
+			mu.Unlock()
 		}()
 	}
+	close(start)
 	wg.Wait()
-	close(statuses)
 
-	created, conflict := 0, 0
-	for st := range statuses {
-		switch st {
-		case http.StatusCreated:
-			created++
-		case http.StatusConflict:
-			conflict++
-		default:
-			t.Errorf("unexpected status %d — a duplicate registration should be 409", st)
-		}
+	if statuses[http.StatusOK] != n {
+		t.Errorf("every concurrent first sign-in should succeed, got %v", statuses)
 	}
-	if created != 1 {
-		t.Errorf("exactly one registration should succeed, got %d", created)
+	if len(persons) != 1 {
+		t.Errorf("they must all resolve to one Person, got %d distinct: %v", len(persons), persons)
 	}
-	if conflict != n-1 {
-		t.Errorf("the rest should be 409, got %d", conflict)
+	if got := countRows(t, `SELECT count(*) FROM user_accounts`); got != 1 {
+		t.Errorf("expected exactly one account, found %d", got)
+	}
+	if got := countRows(t, `SELECT count(*) FROM organizations`); got != 1 {
+		t.Errorf("expected exactly one organization, found %d", got)
 	}
 }
 
 // TestOneRefreshTokenRedeemsOnce pins rotation's single-use invariant against
 // concurrency. handleRefresh used to read the row, decide it was live, and revoke it in
-// a separate unconditional statement — a check-then-act that simultaneous presentations
-// of one token all passed before any of them wrote. Measured against that code: 32
-// concurrent redemptions of a single token produced six independent live families, and
-// none of them tripped the replay cascade, which is precisely the case the cascade
-// exists for.
+// a separate unconditional statement — a check-then-act that simultaneous
+// presentations of one token all passed before any of them wrote. Measured against that
+// code: 32 concurrent redemptions of a single token produced six independent live
+// families, and none of them tripped the replay cascade, which is precisely the case
+// the cascade exists for.
 func TestOneRefreshTokenRedeemsOnce(t *testing.T) {
 	resetDB(t)
 
-	reg := do(t, http.MethodPost, "/api/v1/auth/register", "", map[string]any{
-		"email": "race@example.com", "password": "password123", "displayName": "Race",
-	})
-	if reg.status != http.StatusCreated {
-		t.Fatalf("register: %d %s", reg.status, reg.raw)
+	reg := appleSignIn(t, "race-sub", "race@example.com", nil)
+	if reg.status != http.StatusOK {
+		t.Fatalf("sign in: %d %s", reg.status, reg.raw)
 	}
 	refresh, _ := reg.body["refreshToken"].(string)
 
@@ -361,26 +308,5 @@ func TestOneRefreshTokenRedeemsOnce(t *testing.T) {
 	})
 	if next.status != http.StatusOK {
 		t.Errorf("the surviving chain should still rotate: %d %s", next.status, next.raw)
-	}
-}
-
-// TestRegisterRejectsAPasswordBcryptCannotHash — bcrypt refuses an input over 72 bytes
-// rather than truncating it, and that refusal used to reach the caller as a 500. A
-// generated passphrase is an ordinary thing to paste into a signup form.
-func TestRegisterRejectsAPasswordBcryptCannotHash(t *testing.T) {
-	resetDB(t)
-
-	long := strings.Repeat("correct horse battery staple ", 4) // 116 bytes
-	r := do(t, http.MethodPost, "/api/v1/auth/register", "", map[string]any{
-		"email": "long@example.com", "password": long, "displayName": "Long",
-	})
-	if r.status != http.StatusBadRequest {
-		t.Fatalf("a %d-byte password: got %d %s, want 400", len(long), r.status, r.raw)
-	}
-	// 72 bytes exactly is still accepted: the limit is bcrypt's, not one of our own.
-	if r := do(t, http.MethodPost, "/api/v1/auth/register", "", map[string]any{
-		"email": "just-fits@example.com", "password": strings.Repeat("a", 72), "displayName": "Fits",
-	}); r.status != http.StatusCreated {
-		t.Errorf("a 72-byte password: got %d %s, want 201", r.status, r.raw)
 	}
 }

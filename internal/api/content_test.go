@@ -7,7 +7,7 @@ import (
 
 func TestSessionWithBlocks(t *testing.T) {
 	resetDB(t)
-	coach, _ := registerUser(t, "scoach@e.com")
+	coach, _ := signInCoach(t, "scoach@e.com")
 
 	team := do(t, http.MethodPost, "/api/v1/teams", coach, map[string]any{"name": "U13"})
 	teamID := team.body["id"].(string)
@@ -54,7 +54,7 @@ func TestSessionWithBlocks(t *testing.T) {
 	if list := do(t, http.MethodGet, "/api/v1/sessions", coach, nil); len(list.arr()) != 1 {
 		t.Errorf("expected 1 session in list")
 	}
-	other, _ := registerUser(t, "sother@e.com")
+	other, _ := signInCoach(t, "sother@e.com")
 	if r := do(t, http.MethodGet, "/api/v1/sessions/"+sessID, other, nil); r.status != http.StatusForbidden {
 		t.Errorf("cross-org session read should be 403, got %d", r.status)
 	}
@@ -62,7 +62,7 @@ func TestSessionWithBlocks(t *testing.T) {
 
 func TestGameDayFlow(t *testing.T) {
 	resetDB(t)
-	coach, _ := registerUser(t, "gcoach@e.com")
+	coach, _ := signInCoach(t, "gcoach@e.com")
 	team := do(t, http.MethodPost, "/api/v1/teams", coach, map[string]any{"name": "First XI"})
 	teamID := team.body["id"].(string)
 
@@ -118,7 +118,7 @@ func TestGameDayFlow(t *testing.T) {
 // and destroyed the recorded result of a match, with no undo.
 func TestUpdateGameRejectsWrongTypes(t *testing.T) {
 	resetDB(t)
-	coach, _ := registerUser(t, "patchgame@e.com")
+	coach, _ := signInCoach(t, "patchgame@e.com")
 	team := do(t, http.MethodPost, "/api/v1/teams", coach, map[string]any{"name": "T"})
 	teamID, _ := team.body["id"].(string)
 	created := do(t, http.MethodPost, "/api/v1/teams/"+teamID+"/games", coach, map[string]any{

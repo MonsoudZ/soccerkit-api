@@ -70,17 +70,19 @@ func (s *Server) Router() http.Handler {
 	r.Get("/docs", s.handleDocs)
 
 	r.Route("/api/v1", func(r chi.Router) {
-		// Auth (public). Throttled per IP in deployed environments: these are the only
-		// unauthenticated write endpoints, and login spends a bcrypt comparison on
-		// every attempt. Left off on a laptop, where the only traffic is the developer
-		// and the test suite — the same fail-closed IsDeployed switch config.go uses
-		// for the other environment-specific behaviour.
+		// Auth (public). Sign in with Apple is the only way into an account: there is no
+		// registration or password login, so there is no address anybody typed and no
+		// credential this service has to store, verify or reset. See handlers_auth.go.
+		//
+		// Throttled per IP in deployed environments: these are the only unauthenticated
+		// endpoints, /apple verifies an RSA signature on an attacker-supplied token, and
+		// /refresh is a lookup on a value the caller chooses. Left off on a laptop, where
+		// the only traffic is the developer and the test suite — the same fail-closed
+		// IsDeployed switch config.go uses for the other environment-specific behaviour.
 		r.Route("/auth", func(r chi.Router) {
 			if s.hasAuthLimiter() {
 				r.Use(s.authLimiter.middleware)
 			}
-			r.Post("/register", s.handleRegister)
-			r.Post("/login", s.handleLogin)
 			r.Post("/apple", s.handleAppleAuth)
 			r.Post("/refresh", s.handleRefresh)
 			r.Post("/logout", s.handleLogout)
@@ -92,11 +94,6 @@ func (s *Server) Router() http.Handler {
 
 			r.Get("/me", s.handleGetMe)
 			r.Delete("/me", s.handleDeleteMe)
-			// Linking Apple to an existing account is an authenticated operation, not a
-			// sign-in: the session is the proof that the two identities are the same
-			// person. /auth/apple used to infer that from a matching email address, which
-			// nothing verifies. See handleAppleAuth.
-			r.Post("/me/apple-link", s.handleLinkApple)
 
 			// iOS opaque delta-sync (projection over the domain tables).
 			r.Get("/sync", s.handleSyncPull)

@@ -34,6 +34,16 @@ Baseline health: `go vet`, `go build` and `go test ./...` all pass clean.
 >   who was relying on a `number` field accepting anything gets a 400. Nothing legitimate
 >   records 1e12 goals, and the alternative was leaving the aggregate breakable.
 >
+> **Followed by the removal of password authentication.** `POST /auth/register` and
+> `POST /auth/login` are gone, along with `POST /me/apple-link`, `password_hash` and the
+> bcrypt dependency. Sign in with Apple is the only way into an account. That deletes the
+> precondition C1 needed rather than guarding it — nothing can create an account at an
+> address any more — and closes L5 below by removing the endpoint that had to answer
+> whether an address was taken. The decision it rests on is a product one: iOS only, for
+> now. An Android or web client would need a credential back, and a credential needs an
+> address somebody proved they own, so the email verification described under L5 comes
+> back with it.
+>
 > Two notes on what the fixes do *not* do. `POST /auth/register` still discloses which
 > addresses have accounts (L5): closing that properly means verifying addresses at
 > registration, which needs mail infrastructure this project does not have, and which
@@ -84,7 +94,7 @@ WHERE id = $1` with no `deleted = false`, reachable only through `personVisibleT
 | L2 ✅ | Low | Two template fields sharing a `key` is a 500, not a 400 |
 | L3 ✅ | Low | Games outlive their team's tombstone and stay readable and patchable |
 | L4 ✅ | Low | A `\u0000` anywhere in a sync payload is a 500, and the client will retry it forever |
-| L5 | Low | `POST /auth/register` says which addresses have accounts; `POST /auth/login` deliberately does not |
+| L5 ✅ | Low | `POST /auth/register` says which addresses have accounts; `POST /auth/login` deliberately does not |
 | L6 ✅ | Low | The HTTP server sets `ReadHeaderTimeout` and nothing else |
 
 ---
@@ -421,7 +431,7 @@ the batch it failed to push, and this one fails identically every time, so that 
 stops syncing until the record is edited or deleted locally. Strip or reject `\u0000` in
 `applyUpsert` and return a 400 naming the record, so the client can drop it.
 
-**L5 — registration says which addresses have accounts.** `handleRegister` answers 409
+**L5 ✅ — registration says which addresses have accounts.** `handleRegister` answers 409
 `"an account with that email already exists"` on a pre-flight lookup.
 `handleLogin` goes to real trouble not to leak the same fact —
 `burnPasswordComparison`, a whole `dummyPasswordHash` — and `TestLoginDoesNotRevealWhichEmailsExist`
@@ -430,6 +440,18 @@ whose it is), but it is the reconnaissance step for C1: it says which addresses 
 free to claim. Rate-limiting `/auth` bounds enumeration and is already in place; the
 residual leak is worth a line in the docs rather than a redesign, unless C1's fix
 introduces mail verification, in which case both endpoints can go quiet.
+
+**Fix (applied).** Not by making registration quieter — by deleting it. `/auth/register`
+and `/auth/login` are gone, so there is no endpoint left to ask, no unverified address in
+`user_accounts`, and no password to reset or verify. That was available because nothing
+shipped used them: the iOS client calls only `/v1/auth/apple` and `/v1/auth/refresh`.
+Migration `0008` drops `password_hash`, and refuses to run if any account has a password
+and no Apple identity, since dropping it would strand that account permanently — a deploy
+that would do so fails at boot with the count rather than succeeding quietly.
+
+The trade is stated in the status note above: this is the right answer for an iOS-only
+product and the wrong one the day a second client needs a credential, at which point the
+verification work described here is what brings it back safely.
 
 **L6 ✅ — the HTTP server has one timeout.** `cmd/api/main.go` sets `ReadHeaderTimeout: 10s`
 and leaves `ReadTimeout`, `WriteTimeout` and `IdleTimeout` at zero.
@@ -487,8 +509,10 @@ still be written. Each has a regression test named for the invariant it pins.
 3. ~~**M3** and **L1**, **L2**, **L4** — four unmapped errors surfacing as 500s.~~ Done.
 4. ~~**M1** — bound `number`, and decide what to do about rows already written.~~ Done:
    bounded going forward, and the query made overflow-proof for what is already there.
-5. ~~**L3**, **L6**~~ Done. **L5** is left open on purpose: closing it means verifying
-   addresses at registration, which needs mail infrastructure — and that, not the 409,
-   is the root fix for C1. It is the next thing worth building in this area.
+5. ~~**L3**, **L6**~~ Done. ~~**L5** is left open on purpose: closing it means verifying
+   addresses at registration, which needs mail infrastructure — and that, not the 409, is
+   the root fix for C1.~~ Closed instead by removing password authentication outright,
+   which was available because no client used it. Verification is what a future non-iOS
+   client needs in order to bring a credential back.
 6. The AUDIT-2 leftovers (its M1 sync page limit and L1–L6) remain ordinary hardening,
    and **P2–P4** remain work for the club/invite feature, unchanged.

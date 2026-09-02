@@ -221,31 +221,26 @@ func (q *Queries) CreateRefreshToken(ctx context.Context, arg CreateRefreshToken
 }
 
 const createUserAccount = `-- name: CreateUserAccount :one
-INSERT INTO user_accounts (person_id, email, password_hash, apple_sub)
-VALUES ($1, $2, $3, $4)
-RETURNING id, person_id, email, password_hash, apple_sub, created_at, updated_at
+INSERT INTO user_accounts (person_id, email, apple_sub)
+VALUES ($1, $2, $3)
+RETURNING id, person_id, email, apple_sub, created_at, updated_at
 `
 
 type CreateUserAccountParams struct {
-	PersonID     uuid.UUID `json:"person_id"`
-	Email        string    `json:"email"`
-	PasswordHash *string   `json:"password_hash"`
-	AppleSub     *string   `json:"apple_sub"`
+	PersonID uuid.UUID `json:"person_id"`
+	Email    string    `json:"email"`
+	AppleSub *string   `json:"apple_sub"`
 }
 
+// Sign in with Apple is the only path that creates an account, so an account is born
+// with its Apple subject and there is no credential of ours to store alongside it.
 func (q *Queries) CreateUserAccount(ctx context.Context, arg CreateUserAccountParams) (UserAccount, error) {
-	row := q.db.QueryRow(ctx, createUserAccount,
-		arg.PersonID,
-		arg.Email,
-		arg.PasswordHash,
-		arg.AppleSub,
-	)
+	row := q.db.QueryRow(ctx, createUserAccount, arg.PersonID, arg.Email, arg.AppleSub)
 	var i UserAccount
 	err := row.Scan(
 		&i.ID,
 		&i.PersonID,
 		&i.Email,
-		&i.PasswordHash,
 		&i.AppleSub,
 		&i.CreatedAt,
 		&i.UpdatedAt,
@@ -358,7 +353,7 @@ func (q *Queries) GetRefreshToken(ctx context.Context, tokenHash string) (Refres
 }
 
 const getUserAccountByAppleSub = `-- name: GetUserAccountByAppleSub :one
-SELECT id, person_id, email, password_hash, apple_sub, created_at, updated_at FROM user_accounts WHERE apple_sub = $1
+SELECT id, person_id, email, apple_sub, created_at, updated_at FROM user_accounts WHERE apple_sub = $1
 `
 
 func (q *Queries) GetUserAccountByAppleSub(ctx context.Context, appleSub *string) (UserAccount, error) {
@@ -368,7 +363,6 @@ func (q *Queries) GetUserAccountByAppleSub(ctx context.Context, appleSub *string
 		&i.ID,
 		&i.PersonID,
 		&i.Email,
-		&i.PasswordHash,
 		&i.AppleSub,
 		&i.CreatedAt,
 		&i.UpdatedAt,
@@ -377,7 +371,7 @@ func (q *Queries) GetUserAccountByAppleSub(ctx context.Context, appleSub *string
 }
 
 const getUserAccountByEmail = `-- name: GetUserAccountByEmail :one
-SELECT id, person_id, email, password_hash, apple_sub, created_at, updated_at FROM user_accounts WHERE email = $1
+SELECT id, person_id, email, apple_sub, created_at, updated_at FROM user_accounts WHERE email = $1
 `
 
 func (q *Queries) GetUserAccountByEmail(ctx context.Context, email string) (UserAccount, error) {
@@ -387,7 +381,6 @@ func (q *Queries) GetUserAccountByEmail(ctx context.Context, email string) (User
 		&i.ID,
 		&i.PersonID,
 		&i.Email,
-		&i.PasswordHash,
 		&i.AppleSub,
 		&i.CreatedAt,
 		&i.UpdatedAt,
@@ -396,7 +389,7 @@ func (q *Queries) GetUserAccountByEmail(ctx context.Context, email string) (User
 }
 
 const getUserAccountByID = `-- name: GetUserAccountByID :one
-SELECT id, person_id, email, password_hash, apple_sub, created_at, updated_at FROM user_accounts WHERE id = $1
+SELECT id, person_id, email, apple_sub, created_at, updated_at FROM user_accounts WHERE id = $1
 `
 
 func (q *Queries) GetUserAccountByID(ctx context.Context, id uuid.UUID) (UserAccount, error) {
@@ -406,29 +399,6 @@ func (q *Queries) GetUserAccountByID(ctx context.Context, id uuid.UUID) (UserAcc
 		&i.ID,
 		&i.PersonID,
 		&i.Email,
-		&i.PasswordHash,
-		&i.AppleSub,
-		&i.CreatedAt,
-		&i.UpdatedAt,
-	)
-	return i, err
-}
-
-const getUserAccountByPersonID = `-- name: GetUserAccountByPersonID :one
-SELECT id, person_id, email, password_hash, apple_sub, created_at, updated_at FROM user_accounts WHERE person_id = $1
-`
-
-// The account behind an authenticated Person. Access tokens name a Person, so this is
-// how a signed-in caller reaches their own account row — used by the Apple-link
-// endpoint, where the session is the proof of ownership that the address is not.
-func (q *Queries) GetUserAccountByPersonID(ctx context.Context, personID uuid.UUID) (UserAccount, error) {
-	row := q.db.QueryRow(ctx, getUserAccountByPersonID, personID)
-	var i UserAccount
-	err := row.Scan(
-		&i.ID,
-		&i.PersonID,
-		&i.Email,
-		&i.PasswordHash,
 		&i.AppleSub,
 		&i.CreatedAt,
 		&i.UpdatedAt,
@@ -452,29 +422,6 @@ func (q *Queries) HasMembership(ctx context.Context, arg HasMembershipParams) (b
 	var exists bool
 	err := row.Scan(&exists)
 	return exists, err
-}
-
-const linkAppleSub = `-- name: LinkAppleSub :execrows
-UPDATE user_accounts SET apple_sub = $2, updated_at = now()
-WHERE id = $1 AND apple_sub IS NULL
-`
-
-type LinkAppleSubParams struct {
-	ID       uuid.UUID `json:"id"`
-	AppleSub *string   `json:"apple_sub"`
-}
-
-// Attach an Apple identity to an account that does not have one. Guarded on
-// apple_sub IS NULL rather than checked beforehand: the handler does read the row first
-// (to tell an idempotent re-link from a different Apple ID, which deserve different
-// answers), but a predicate on the write is what makes two concurrent links unable to
-// overwrite each other and silently cut one Apple ID off from the account.
-func (q *Queries) LinkAppleSub(ctx context.Context, arg LinkAppleSubParams) (int64, error) {
-	result, err := q.db.Exec(ctx, linkAppleSub, arg.ID, arg.AppleSub)
-	if err != nil {
-		return 0, err
-	}
-	return result.RowsAffected(), nil
 }
 
 const listChildren = `-- name: ListChildren :many

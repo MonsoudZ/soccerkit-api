@@ -3,9 +3,7 @@ package api
 import (
 	"context"
 	"errors"
-	"fmt"
 	"net/http"
-	"strings"
 	"time"
 
 	"github.com/jackc/pgx/v5"
@@ -13,174 +11,21 @@ import (
 	"github.com/monsoudz/soccerkit-api/internal/store"
 )
 
-type registerRequest struct {
-	Email        string `json:"email"`
-	Password     string `json:"password"`
-	DisplayName  string `json:"displayName"`
-	Organization string `json:"organizationName"` // optional; defaults to a personal org
-}
-
-// handleRegister provisions a full identity in one transaction: a Person, their
-// UserAccount, a personal Organization, admin/director/coach memberships, and
-// the seeded pre/post-game evaluation templates.
-func (s *Server) handleRegister(w http.ResponseWriter, r *http.Request) {
-	var req registerRequest
-	if err := decodeJSON(r, &req); err != nil {
-		writeError(w, err)
-		return
-	}
-	email := strings.ToLower(strings.TrimSpace(req.Email))
-	if !looksLikeEmail(email) {
-		writeError(w, errValidation("a valid email is required"))
-		return
-	}
-	if len(req.Password) < 8 {
-		writeError(w, errValidation("password must be at least 8 characters"))
-		return
-	}
-	// bcrypt refuses an input over 72 bytes rather than truncating it, which is the safe
-	// behaviour and was reaching the caller as a 500 — a generated passphrase or a
-	// password manager's output is an ordinary thing to paste in, and being told the
-	// server is broken is the wrong answer to it. Bytes, not runes: the limit is on what
-	// bcrypt hashes.
-	if len(req.Password) > maxPasswordBytes {
-		writeError(w, errValidation(fmt.Sprintf(
-			"password must be at most %d bytes (the limit bcrypt hashes)", maxPasswordBytes)))
-		return
-	}
-	if strings.TrimSpace(req.DisplayName) == "" {
-		writeError(w, errValidation("displayName is required"))
-		return
-	}
-
-	ctx := r.Context()
-	if _, err := s.store.GetUserAccountByEmail(ctx, email); err == nil {
-		writeError(w, errConflict("an account with that email already exists"))
-		return
-	} else if !errors.Is(err, pgx.ErrNoRows) {
-		writeError(w, err)
-		return
-	}
-
-	hash, err := hashPassword(req.Password)
-	if err != nil {
-		writeError(w, err)
-		return
-	}
-	orgName := strings.TrimSpace(req.Organization)
-	if orgName == "" {
-		orgName = req.DisplayName + "'s Club"
-	}
-
-	tx, err := s.pool.Begin(ctx)
-	if err != nil {
-		writeError(w, err)
-		return
-	}
-	defer tx.Rollback(ctx)
-	q := s.store.WithTx(tx)
-
-	person, err := q.CreatePerson(ctx, store.CreatePersonParams{
-		DisplayName: strings.TrimSpace(req.DisplayName),
-		Email:       &email,
-	})
-	if err != nil {
-		writeError(w, err)
-		return
-	}
-	account, err := q.CreateUserAccount(ctx, store.CreateUserAccountParams{
-		PersonID: person.ID, Email: email, PasswordHash: &hash,
-	})
-	if err != nil {
-		// The check above races: two concurrent registrations for the same address both
-		// pass it and one reaches the unique constraint. That is the same conflict, so
-		// it gets the same 409 rather than surfacing as a 500.
-		if isUniqueViolation(err) {
-			writeError(w, errConflict("an account with that email already exists"))
-			return
-		}
-		writeError(w, err)
-		return
-	}
-	org, err := q.CreateOrganization(ctx, store.CreateOrganizationParams{
-		Name: orgName, Kind: "personal", OwnerPersonID: &person.ID,
-	})
-	if err != nil {
-		writeError(w, err)
-		return
-	}
-	// Solo coach holds all three top roles in their personal org.
-	for _, role := range []string{"admin", "director", "coach"} {
-		if _, err := q.CreateMembership(ctx, store.CreateMembershipParams{
-			PersonID: person.ID, OrganizationID: org.ID, Role: role,
-		}); err != nil {
-			writeError(w, err)
-			return
-		}
-	}
-	if err := seedDefaultTemplates(ctx, q, org.ID, person.ID); err != nil {
-		writeError(w, err)
-		return
-	}
-
-	resp, err := s.issueTokens(ctx, q, account, person)
-	if err != nil {
-		writeError(w, err)
-		return
-	}
-	if err := tx.Commit(ctx); err != nil {
-		writeError(w, err)
-		return
-	}
-	writeJSON(w, http.StatusCreated, resp)
-}
-
-type loginRequest struct {
-	Email    string `json:"email"`
-	Password string `json:"password"`
-}
-
-func (s *Server) handleLogin(w http.ResponseWriter, r *http.Request) {
-	var req loginRequest
-	if err := decodeJSON(r, &req); err != nil {
-		writeError(w, err)
-		return
-	}
-	email := strings.ToLower(strings.TrimSpace(req.Email))
-
-	account, err := s.store.GetUserAccountByEmail(r.Context(), email)
-	if errors.Is(err, pgx.ErrNoRows) {
-		// Spend the same work a real comparison would, so the response time does not
-		// reveal whether the address has an account.
-		burnPasswordComparison(req.Password)
-		writeError(w, errUnauthorized("invalid email or password"))
-		return
-	} else if err != nil {
-		writeError(w, err)
-		return
-	}
-	if account.PasswordHash == nil {
-		// An Apple-only account has no password to check; burn the same work anyway.
-		burnPasswordComparison(req.Password)
-		writeError(w, errUnauthorized("invalid email or password"))
-		return
-	}
-	if !verifyPassword(req.Password, *account.PasswordHash) {
-		writeError(w, errUnauthorized("invalid email or password"))
-		return
-	}
-	person, err := s.store.GetPerson(r.Context(), account.PersonID)
-	if err != nil {
-		writeError(w, err)
-		return
-	}
-	resp, err := s.issueTokens(r.Context(), s.store, account, person)
-	if err != nil {
-		writeError(w, err)
-		return
-	}
-	writeJSON(w, http.StatusOK, resp)
-}
+// The only way into an account is Sign in with Apple; see handlers_apple.go. This file
+// is what happens after that: rotating the session, ending it, and assembling the
+// caller's view of themselves.
+//
+// There used to be email+password registration and login here as well. Nothing shipped
+// used them — the iOS client authenticates with Apple and renews with /auth/refresh, and
+// never called either — while they were a live, unauthenticated way for anyone with curl
+// to create an account at any address. That is what made the pre-hijack in
+// docs/AUDIT-3.md C1 possible (an address nobody verified became a merge key) and what
+// forced /auth/register to disclose which addresses are taken (L5). Deleting them closes
+// both by removing the thing rather than guarding it, and takes password reset and email
+// verification off the list of things this service owes its users.
+//
+// Bringing them back means bringing back verified addresses with them: an Android or web
+// client needs a credential, and a credential needs an address somebody proved they own.
 
 type refreshRequest struct {
 	RefreshToken string `json:"refreshToken"`
@@ -320,9 +165,4 @@ func buildMe(ctx context.Context, q *store.Queries, person store.Person) (Me, er
 		}
 	}
 	return Me{Person: personDTO(person), Memberships: views}, nil
-}
-
-func looksLikeEmail(s string) bool {
-	at := strings.IndexByte(s, '@')
-	return at > 0 && at < len(s)-1 && strings.IndexByte(s[at+1:], '.') >= 0
 }

@@ -53,7 +53,7 @@ func TestRateLimiterMiddlewareReturns429(t *testing.T) {
 		})))
 
 	call := func() int {
-		req := httptest.NewRequest(http.MethodPost, "/api/v1/auth/login", nil)
+		req := httptest.NewRequest(http.MethodPost, "/api/v1/auth/apple", nil)
 		req.RemoteAddr = "9.9.9.9:54321"
 		rec := httptest.NewRecorder()
 		h.ServeHTTP(rec, req)
@@ -84,7 +84,7 @@ func TestForwardingHeadersCannotChooseTheBucket(t *testing.T) {
 		}))
 
 	for _, header := range []string{"X-Forwarded-For", "X-Real-IP", "True-Client-IP"} {
-		req := httptest.NewRequest(http.MethodPost, "/api/v1/auth/login", nil)
+		req := httptest.NewRequest(http.MethodPost, "/api/v1/auth/apple", nil)
 		req.RemoteAddr = "198.51.100.4:41234"
 		req.Header.Set(header, "203.0.113.99")
 		h.ServeHTTP(httptest.NewRecorder(), req)
@@ -99,7 +99,7 @@ func TestTrustedProxyTakesTheFirstUntrustedHop(t *testing.T) {
 	h := middleware.ClientIPFromXFF("10.0.0.0/8")(http.HandlerFunc(
 		func(w http.ResponseWriter, r *http.Request) { got = clientIP(r) }))
 
-	req := httptest.NewRequest(http.MethodPost, "/api/v1/auth/login", nil)
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/auth/apple", nil)
 	req.RemoteAddr = "10.0.0.7:41234"
 	// The caller forged the first entry; our load balancer appended the real one.
 	req.Header.Set("X-Forwarded-For", "203.0.113.99, 198.51.100.4, 10.0.0.7")
@@ -113,7 +113,7 @@ func TestTrustedProxyTakesTheFirstUntrustedHop(t *testing.T) {
 // A request whose address cannot be established still has to be counted, so it
 // gets a bucket rather than a pass.
 func TestUnidentifiedClientStillGetsABucket(t *testing.T) {
-	req := httptest.NewRequest(http.MethodPost, "/api/v1/auth/login", nil)
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/auth/apple", nil)
 	if got := clientIP(req); got != unidentifiedClient {
 		t.Errorf("clientIP with no middleware = %q, want %q", got, unidentifiedClient)
 	}
