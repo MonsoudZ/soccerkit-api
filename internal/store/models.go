@@ -246,10 +246,11 @@ type Team struct {
 }
 
 type UserAccount struct {
-	ID        uuid.UUID          `json:"id"`
-	PersonID  uuid.UUID          `json:"person_id"`
-	Email     string             `json:"email"`
-	AppleSub  *string            `json:"apple_sub"`
-	CreatedAt pgtype.Timestamptz `json:"created_at"`
-	UpdatedAt pgtype.Timestamptz `json:"updated_at"`
+	ID           uuid.UUID          `json:"id"`
+	PersonID     uuid.UUID          `json:"person_id"`
+	Email        string             `json:"email"`
+	PasswordHash *string            `json:"password_hash"`
+	AppleSub     *string            `json:"apple_sub"`
+	CreatedAt    pgtype.Timestamptz `json:"created_at"`
+	UpdatedAt    pgtype.Timestamptz `json:"updated_at"`
 }

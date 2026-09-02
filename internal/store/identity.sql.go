@@ -223,7 +223,7 @@ func (q *Queries) CreateRefreshToken(ctx context.Context, arg CreateRefreshToken
 const createUserAccount = `-- name: CreateUserAccount :one
 INSERT INTO user_accounts (person_id, email, apple_sub)
 VALUES ($1, $2, $3)
-RETURNING id, person_id, email, apple_sub, created_at, updated_at
+RETURNING id, person_id, email, password_hash, apple_sub, created_at, updated_at
 `
 
 type CreateUserAccountParams struct {
@@ -241,6 +241,7 @@ func (q *Queries) CreateUserAccount(ctx context.Context, arg CreateUserAccountPa
 		&i.ID,
 		&i.PersonID,
 		&i.Email,
+		&i.PasswordHash,
 		&i.AppleSub,
 		&i.CreatedAt,
 		&i.UpdatedAt,
@@ -353,7 +354,7 @@ func (q *Queries) GetRefreshToken(ctx context.Context, tokenHash string) (Refres
 }
 
 const getUserAccountByAppleSub = `-- name: GetUserAccountByAppleSub :one
-SELECT id, person_id, email, apple_sub, created_at, updated_at FROM user_accounts WHERE apple_sub = $1
+SELECT id, person_id, email, password_hash, apple_sub, created_at, updated_at FROM user_accounts WHERE apple_sub = $1
 `
 
 func (q *Queries) GetUserAccountByAppleSub(ctx context.Context, appleSub *string) (UserAccount, error) {
@@ -363,6 +364,7 @@ func (q *Queries) GetUserAccountByAppleSub(ctx context.Context, appleSub *string
 		&i.ID,
 		&i.PersonID,
 		&i.Email,
+		&i.PasswordHash,
 		&i.AppleSub,
 		&i.CreatedAt,
 		&i.UpdatedAt,
@@ -371,7 +373,7 @@ func (q *Queries) GetUserAccountByAppleSub(ctx context.Context, appleSub *string
 }
 
 const getUserAccountByEmail = `-- name: GetUserAccountByEmail :one
-SELECT id, person_id, email, apple_sub, created_at, updated_at FROM user_accounts WHERE email = $1
+SELECT id, person_id, email, password_hash, apple_sub, created_at, updated_at FROM user_accounts WHERE email = $1
 `
 
 func (q *Queries) GetUserAccountByEmail(ctx context.Context, email string) (UserAccount, error) {
@@ -381,6 +383,7 @@ func (q *Queries) GetUserAccountByEmail(ctx context.Context, email string) (User
 		&i.ID,
 		&i.PersonID,
 		&i.Email,
+		&i.PasswordHash,
 		&i.AppleSub,
 		&i.CreatedAt,
 		&i.UpdatedAt,
@@ -389,7 +392,7 @@ func (q *Queries) GetUserAccountByEmail(ctx context.Context, email string) (User
 }
 
 const getUserAccountByID = `-- name: GetUserAccountByID :one
-SELECT id, person_id, email, apple_sub, created_at, updated_at FROM user_accounts WHERE id = $1
+SELECT id, person_id, email, password_hash, apple_sub, created_at, updated_at FROM user_accounts WHERE id = $1
 `
 
 func (q *Queries) GetUserAccountByID(ctx context.Context, id uuid.UUID) (UserAccount, error) {
@@ -399,6 +402,7 @@ func (q *Queries) GetUserAccountByID(ctx context.Context, id uuid.UUID) (UserAcc
 		&i.ID,
 		&i.PersonID,
 		&i.Email,
+		&i.PasswordHash,
 		&i.AppleSub,
 		&i.CreatedAt,
 		&i.UpdatedAt,
