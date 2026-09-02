@@ -68,26 +68,22 @@ func (s *Server) handleSyncPull(w http.ResponseWriter, r *http.Request) {
 	}
 
 	rows, err := s.store.ListSyncChangesSince(r.Context(), store.ListSyncChangesSinceParams{
-		SyncAccountID: &account, Seq: &since, Lim: maxSyncPage,
+		SyncAccountID: &account, Seq: &since,
+		Lim: maxSyncPage, MaxBytes: maxSyncPageBytes,
 	})
 	if err != nil {
 		writeError(w, err)
 		return
 	}
 
+	// Both page bounds are applied in the query now, including the rule that an
+	// oversized first record is returned on its own. This loop used to do the byte half
+	// here, which bounded the response but not the read: every row in the window had
+	// already been pulled off the wire and allocated before being discarded. See
+	// docs/AUDIT-5.md M1.
 	resp := syncPullResponse{Records: []syncRecord{}, Deletes: []syncKey{}}
 	high := since
-	weight := 0
-	for i, row := range rows {
-		// The first row goes in whatever it weighs. A payload bigger than the budget
-		// would otherwise be skipped by every pull forever, and because the cursor only
-		// advances over rows actually returned, the client would ask for it again and
-		// again and never get past it. One oversized page is the lesser fault.
-		if i > 0 && weight+len(row.Payload) > maxSyncPageBytes {
-			break
-		}
-		weight += len(row.Payload)
-
+	for _, row := range rows {
 		// Only over rows that made it into this response: the cursor is a promise that
 		// everything up to it has been delivered.
 		if row.Seq != nil && *row.Seq > high {

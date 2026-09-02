@@ -167,16 +167,36 @@ type Querier interface {
 	// twice. The client drains by asking again until the cursor stops moving; nothing about
 	// the wire format changes.
 	//
-	// What the LIMIT does and does not buy, measured rather than assumed. Every branch has an
-	// index on (sync_account_id, seq), and the planner index-scans each one and then top-N
-	// heapsorts into the page: memory is bounded on both sides -- 500 rows here, 60kB of sort
-	// there -- where before the whole delta was materialized into one response.
+	// A page is bounded twice, by rows and by bytes, and both bounds are applied here.
 	//
-	// It does not stop early. There is no merge-append plan available for this shape (checked
-	// with enable_sort off; it sorts anyway), so each page reads the account's remaining
-	// delta to find the next 500 rows, and draining k pages costs k scans of a shrinking
-	// tail. That is cheap at any size a coach will reach and it is where to look first if a
-	// full resync ever gets slow rather than merely large.
+	// The byte bound used to be applied in Go, after every row in the window had been read
+	// off the wire and materialized. That bounded the response but not the read, and the two
+	// bounds only balance at max_bytes/lim -- ~4.2 KiB per record at 2 MiB and 500. Above
+	// that the byte bound binds first and the window is mostly waste: measured at 1 MiB
+	// payloads, a pull allocated 513 MiB to return a single record. Cutting here means the
+	// discarded rows never cross the wire. See docs/AUDIT-5.md M1.
+	//
+	// rn = 1 keeps the rule that made the Go loop correct: the first row goes in whatever it
+	// weighs. A payload above the whole budget would otherwise be skipped by every pull
+	// forever, and because the cursor only advances over rows actually delivered the client
+	// would ask for it again and again and never get past it. Running weights are
+	// non-decreasing, so "the prefix that fits" is exactly what this filter selects.
+	//
+	// Every branch has an index on (sync_account_id, seq), and the planner index-scans each
+	// one and then top-N heapsorts into the window.
+	//
+	// The ::bigint on max_bytes is load-bearing and not cosmetic. sqlc infers a parameter's
+	// type from the column it is compared against, and it cannot resolve one that comes out
+	// of a derived table carrying window functions -- without the cast, generation fails with
+	// `table alias "budgeted" does not exist`. The cast tells it the type outright.
+	//
+	// What this still does not buy, and it is the open half of M1: it does not stop early.
+	// There is no merge-append plan available for this shape (checked with enable_sort off;
+	// it sorts anyway), so each page reads the account's remaining delta to find the next
+	// `lim` rows, and draining k pages costs k scans of a shrinking tail. When the byte bound
+	// binds, k is much larger than rows/lim -- 500 pages for 500 one-MiB records -- and the
+	// drain is quadratic in the row count. Bounding that needs a cap on a single record's
+	// payload at push time, which is a wire change and is written up as M1 (3).
 	ListSyncChangesSince(ctx context.Context, arg ListSyncChangesSinceParams) ([]ListSyncChangesSinceRow, error)
 	ListTeamsForPerson(ctx context.Context, personID uuid.UUID) ([]ListTeamsForPersonRow, error)
 	ListTeamsInOrg(ctx context.Context, organizationID uuid.UUID) ([]ListTeamsInOrgRow, error)

@@ -779,3 +779,52 @@ func TestSyncCannotSeeAStaleCursorOnceTheSequenceCatchesUp(t *testing.T) {
 	t.Logf("known gap: cursor %q survives because sync_seq caught back up to it; "+
 		"g,h,i are skipped silently (docs/AUDIT-5.md M2)", stale)
 }
+
+// TestSyncPullDoesNotSpendTheByteBudgetOnTombstones — a delete goes on the wire as
+// {type, id}, but the seven projected tables keep a tombstoned row's payload (see
+// docs/AUDIT-5.md L1) and the pull query used to select it. Those bytes were read,
+// charged against the page's byte budget, and then dropped, so a page of deletes came
+// back a fraction of the size it could have been and cost the whole budget to build.
+//
+// Pinned by count: 200 large tombstones now arrive in one page. Under the old query
+// their payloads alone were 50 MiB against a 2 MiB budget, so the page cut off after a
+// handful of them and a client needed dozens of round trips to drain a pure-delete
+// delta.
+func TestSyncPullDoesNotSpendTheByteBudgetOnTombstones(t *testing.T) {
+	resetDB(t)
+	coach, personID := signInCoach(t, "tombbudget@e.com")
+	ctx := context.Background()
+
+	const tombstones = 200
+	blob := strings.Repeat("x", 256<<10)
+	for i := 0; i < tombstones; i++ {
+		if _, err := testPool.Exec(ctx, `
+			INSERT INTO sync_documents (sync_account_id, type, id, payload, deleted, seq)
+			VALUES ($1, 'Note', $2, $3::jsonb, true, nextval('sync_seq'))`,
+			personID, fmt.Sprintf("gone-%04d", i), fmt.Sprintf(`{"b":%q}`, blob)); err != nil {
+			t.Fatalf("plant tombstone %d: %v", i, err)
+		}
+	}
+
+	r := do(t, http.MethodGet, "/api/v1/sync?since=0", coach, nil)
+	if r.status != http.StatusOK {
+		t.Fatalf("pull: %d %s", r.status, r.raw)
+	}
+	var p syncPull
+	if err := json.Unmarshal(r.raw, &p); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+
+	if len(p.Deletes) != tombstones {
+		t.Errorf("one page carried %d of %d tombstones; a delete weighs {type, id} and "+
+			"must not be charged for a payload it does not carry", len(p.Deletes), tombstones)
+	}
+	if len(p.Records) != 0 {
+		t.Errorf("tombstones must not come back as records, got %d", len(p.Records))
+	}
+	// The response is the wire cost of 200 {type, id} pairs, not of 50 MiB of payload.
+	if len(r.raw) > 64<<10 {
+		t.Errorf("a page of %d tombstones weighed %d bytes on the wire; payloads are "+
+			"leaking back into the response", tombstones, len(r.raw))
+	}
+}

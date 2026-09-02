@@ -72,6 +72,40 @@ hash.
 
 ### M1 — the page bounds the response, not the read (confirmed)
 
+> **Status.** Parts (1) and (2) of the fix shipped in the commit following this one, and
+> the measurements below were re-taken against the fixed code. Part (3) — a cap on a
+> single record's payload at push time — is still open, because it is a wire change and
+> wants a real payload-size distribution behind the number. Left in the present tense as
+> a record of what was wrong.
+>
+> The allocation blowup is closed. Allocation is now flat in the payload size instead of
+> growing with it, and the delivered counts are unchanged, so this costs nothing on the
+> wire:
+>
+> | payload | delivered | allocated before | after |
+> |---|---|---|---|
+> | 4 KiB | 500 | 20.1 MiB | 20.1 MiB |
+> | 64 KiB | 31 | 52.1 MiB | 18.9 MiB |
+> | 256 KiB | 7 | 145.4 MiB | 18.1 MiB |
+> | 1 MiB | 1 | 513.3 MiB | 10.1 MiB |
+>
+> A page of 200 tombstones holding 50 MiB of payload between them now allocates 0.3 MiB
+> and weighs 6 kB on the wire, and arrives in **one** page rather than being cut off after
+> a handful — pinned by
+> `TestSyncPullDoesNotSpendTheByteBudgetOnTombstones`.
+>
+> **The quadratic drain is not fixed and part (3) is what fixes it.** Above ~4.2 KiB per
+> record the byte bound still binds before the row bound, so a page still delivers fewer
+> rows than the window it scans, and draining *N* records still costs about *N²/2r* row
+> reads. What changed is that those rows no longer cross the wire or land on the Go heap
+> — which was the part that could take the process down.
+>
+> One implementation note worth keeping, because it will look like noise otherwise: the
+> `::bigint` cast on `max_bytes` in the query is load-bearing. sqlc infers a parameter's
+> type from the column it is compared against and cannot resolve one coming out of a
+> derived table that carries window functions; without the cast, generation fails with
+> `table alias "budgeted" does not exist`. The cast states the type outright.
+
 `ListSyncChangesSince` takes `LIMIT 500` (`maxSyncPage`). `handleSyncPull` then walks the
 returned rows and stops at 2 MiB (`maxSyncPageBytes`). Both limits are deliberate and the
 comment explains why both are needed. The gap is *where* the second one is applied: the
@@ -331,12 +365,14 @@ seven projected tables should match it.
    **The remaining half is a runbook line, not code: after any restore, bump `sync_seq`
    past the pre-restore high-water mark.** That is what makes every cursor in the field
    valid again, and it should be written into the restore procedure `0009` points at.
-2. **M1 (1) and (2)** — not selecting tombstone payloads, and cutting bytes in SQL. Local
-   to one query, no wire change, and together they remove the allocation blowup.
-3. **L1** — null the payload and PII on tombstone. Small, and it is the right answer to
-   "we deleted that athlete" independent of anything else here.
-4. **M1 (3), the per-record payload cap** — decide deliberately, with the real payload
-   size distribution in hand, since it is the one piece that needs the app to agree.
+2. ~~**M1 (1) and (2)**~~ — done; see the status note under M1. Allocation is flat in the
+   payload size now, and a page of deletes costs what a delete weighs.
+3. **L1** — null the payload and PII on tombstone. The pull query no longer *reads* a
+   tombstone's payload, which was L1's cost to M1, but the data is still sitting in the
+   row: this is the half that answers "we deleted that athlete", and it is unchanged.
+4. **M1 (3), the per-record payload cap** — the remaining half of M1, and the only thing
+   that makes a drain linear again. Decide deliberately, with the real payload size
+   distribution in hand, since it is the one piece that needs the app to agree.
 5. Unchanged from AUDIT-3 and AUDIT-4: the AUDIT-2 leftovers (**L1–L6**) as ordinary
    hardening, with **L4**'s token reaping now the only credential material left in the
    database, and **P2–P4** alongside the club feature.

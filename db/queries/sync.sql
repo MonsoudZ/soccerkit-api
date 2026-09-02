@@ -15,17 +15,55 @@
 -- twice. The client drains by asking again until the cursor stops moving; nothing about
 -- the wire format changes.
 --
--- What the LIMIT does and does not buy, measured rather than assumed. Every branch has an
--- index on (sync_account_id, seq), and the planner index-scans each one and then top-N
--- heapsorts into the page: memory is bounded on both sides -- 500 rows here, 60kB of sort
--- there -- where before the whole delta was materialized into one response.
+-- A page is bounded twice, by rows and by bytes, and both bounds are applied here.
 --
--- It does not stop early. There is no merge-append plan available for this shape (checked
--- with enable_sort off; it sorts anyway), so each page reads the account's remaining
--- delta to find the next 500 rows, and draining k pages costs k scans of a shrinking
--- tail. That is cheap at any size a coach will reach and it is where to look first if a
--- full resync ever gets slow rather than merely large.
-SELECT delta.type, delta.id, delta.payload, delta.deleted, delta.seq FROM (
+-- The byte bound used to be applied in Go, after every row in the window had been read
+-- off the wire and materialized. That bounded the response but not the read, and the two
+-- bounds only balance at max_bytes/lim -- ~4.2 KiB per record at 2 MiB and 500. Above
+-- that the byte bound binds first and the window is mostly waste: measured at 1 MiB
+-- payloads, a pull allocated 513 MiB to return a single record. Cutting here means the
+-- discarded rows never cross the wire. See docs/AUDIT-5.md M1.
+--
+-- rn = 1 keeps the rule that made the Go loop correct: the first row goes in whatever it
+-- weighs. A payload above the whole budget would otherwise be skipped by every pull
+-- forever, and because the cursor only advances over rows actually delivered the client
+-- would ask for it again and again and never get past it. Running weights are
+-- non-decreasing, so "the prefix that fits" is exactly what this filter selects.
+--
+-- Every branch has an index on (sync_account_id, seq), and the planner index-scans each
+-- one and then top-N heapsorts into the window.
+--
+-- The ::bigint on max_bytes is load-bearing and not cosmetic. sqlc infers a parameter's
+-- type from the column it is compared against, and it cannot resolve one that comes out
+-- of a derived table carrying window functions -- without the cast, generation fails with
+-- `table alias "budgeted" does not exist`. The cast tells it the type outright.
+--
+-- What this still does not buy, and it is the open half of M1: it does not stop early.
+-- There is no merge-append plan available for this shape (checked with enable_sort off;
+-- it sorts anyway), so each page reads the account's remaining delta to find the next
+-- `lim` rows, and draining k pages costs k scans of a shrinking tail. When the byte bound
+-- binds, k is much larger than rows/lim -- 500 pages for 500 one-MiB records -- and the
+-- drain is quadratic in the row count. Bounding that needs a cap on a single record's
+-- payload at push time, which is a wire change and is written up as M1 (3).
+SELECT budgeted.type, budgeted.id, budgeted.payload, budgeted.deleted, budgeted.seq
+FROM (
+    -- Running weight of the page in wire bytes. octet_length over the rendered text is
+    -- what the client actually receives; pg_column_size would be cheaper but reports the
+    -- stored, possibly compressed size, and underestimating here means overshooting the
+    -- budget -- the wrong direction for a limit whose job is to bound a response.
+    SELECT page.type, page.id, page.payload, page.deleted, page.seq,
+           (row_number() OVER (ORDER BY page.seq))::bigint                 AS rn,
+           (sum(coalesce(octet_length(page.payload::text), 0))
+               OVER (ORDER BY page.seq ROWS UNBOUNDED PRECEDING))::bigint   AS running
+    FROM (
+        -- The row window, and the point where a tombstone stops carrying its payload: a
+        -- delete goes on the wire as {type, id}, so selecting the rest of it only spends
+        -- the byte budget on bytes nobody receives. sync_documents already nulls a
+        -- tombstoned payload on write; the seven projected tables keep theirs (see
+        -- docs/AUDIT-5.md L1), so this is where that difference stops mattering.
+        SELECT delta.type, delta.id, delta.deleted, delta.seq,
+               (CASE WHEN delta.deleted THEN NULL ELSE delta.payload END)::jsonb AS payload
+        FROM (
     SELECT 'Team'::text    AS type, t.id::text AS id, t.payload AS payload, t.deleted AS deleted, t.seq AS seq
         FROM teams    t WHERE t.sync_account_id = $1 AND t.seq > $2
     UNION ALL
@@ -49,9 +87,13 @@ SELECT delta.type, delta.id, delta.payload, delta.deleted, delta.seq FROM (
     UNION ALL
     SELECT sd.type, sd.id, sd.payload, sd.deleted, sd.seq
         FROM sync_documents sd WHERE sd.sync_account_id = $1 AND sd.seq > $2
-) delta
-ORDER BY delta.seq ASC
-LIMIT sqlc.arg('lim');
+        ) delta
+        ORDER BY delta.seq ASC
+        LIMIT sqlc.arg('lim')
+    ) page
+) budgeted
+WHERE budgeted.rn = 1 OR budgeted.running <= sqlc.arg('max_bytes')::bigint
+ORDER BY budgeted.seq ASC;
 
 -- Upserts are keyed on the client-supplied primary key, so each conflict clause is
 -- guarded on the row's owner: a push naming a row this account does not own affects
