@@ -126,6 +126,54 @@ func TestContractSyncShapes(t *testing.T) {
 	requireKeys(t, "SyncPushResponse", r.body, "cursor", "conflicts")
 }
 
+// A push must not hand back a cursor.
+//
+// The client stores whatever a push returns — apply(..., cursor: response.cursor)
+// then `if let cursor { defaults.set(...) }` — so anything here becomes its read
+// position. Both non-nil options are wrong.
+//
+// Advancing to this push's high-water mark skips a second device's interleaved
+// rows for good: seqs come from one global sequence, so a device at 10 pushing
+// alongside another device's 11 and 12 would be told 13 and never see 11 or 12.
+//
+// Echoing the request's cursor, which this used to do, rewinds. That value is
+// from when the request was built, and the client pushes and pulls in separate
+// tasks: a push that began at 10 and lands after a drain reached 5000 writes 10
+// back. With paged pulls that undoes real progress rather than costing one
+// re-pull.
+func TestContractPushReturnsNoCursor(t *testing.T) {
+	token, _ := contractSignIn(t)
+
+	// Read up to a real position first, so an echo would be visible as one.
+	drillID := uuid.NewString()
+	if r := do(t, http.MethodPost, "/api/v1/sync", token, map[string]any{
+		"upserts": []any{map[string]any{
+			"type": "Drill", "id": drillID,
+			"payload": map[string]any{"id": drillID, "title": "Rondo"},
+		}},
+		"deletes": []any{}, "cursor": nil,
+	}); r.status != http.StatusOK {
+		t.Fatalf("seed push: status %d, body %s", r.status, r.raw)
+	}
+	pullRecords(t, token) // advances a real client's cursor well past "7"
+
+	// A push that reports an old read position, the way one built before a drain
+	// does.
+	r := do(t, http.MethodPost, "/api/v1/sync", token, map[string]any{
+		"upserts": []any{}, "deletes": []any{}, "cursor": "7",
+	})
+	if r.status != http.StatusOK {
+		t.Fatalf("push: status %d, body %s", r.status, r.raw)
+	}
+	if _, present := r.body["cursor"]; !present {
+		t.Fatal("SyncPushResponse requires a cursor key, even when null")
+	}
+	if got := r.body["cursor"]; got != nil {
+		t.Errorf("push returned cursor %v; it must return null so the client's "+
+			"read position is left alone", got)
+	}
+}
+
 // A record type this server doesn't project must still round-trip. The app syncs
 // sixteen types and this server lifts seven; the rest ride as opaque documents,
 // and an older server must not drop a newer app's records on the floor.

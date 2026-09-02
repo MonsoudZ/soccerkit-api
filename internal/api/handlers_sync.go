@@ -28,7 +28,11 @@ type syncKey struct {
 type syncPushRequest struct {
 	Upserts []syncRecord `json:"upserts"`
 	Deletes []syncKey    `json:"deletes"`
-	Cursor  *string      `json:"cursor"`
+	// Accepted and ignored. The client sends where it has read up to; nothing
+	// here needs it, and the response deliberately does not echo it back — see
+	// the note above handleSyncPush. Kept on the wire because removing it would
+	// break clients that send it.
+	Cursor *string `json:"cursor"`
 }
 
 type syncPushResponse struct {
@@ -93,11 +97,28 @@ func (s *Server) handleSyncPull(w http.ResponseWriter, r *http.Request) {
 // handleSyncPush applies the client's local changes. Each record is routed by
 // type: projected types land in their domain table (columns projected out of the
 // payload, full payload retained); everything else lands in sync_documents.
-// Writes are last-write-wins within an account; the cursor is echoed, not advanced
-// (only a pull advances it), so a second device's interleaved changes are never
-// skipped. A write naming a row this account does not own affects nothing and comes
-// back in Conflicts, so the client learns its change was rejected rather than
-// silently losing it.
+// Writes are last-write-wins within an account. A write naming a row this account
+// does not own affects nothing and comes back in Conflicts, so the client learns
+// its change was rejected rather than silently losing it.
+//
+// The response carries no cursor. Pull owns the cursor; push has no business
+// touching it, and both other options are wrong:
+//
+// Advancing it to this push's high-water mark loses data. Every row takes a fresh
+// seq from the global sequence, so a device at cursor 10 that pushes while another
+// device's rows are taking seq 11 and 12 gets back 13, stores it, and pulls from
+// 14 — and 11 and 12 are never delivered to it. Silent, cross-device, permanent.
+//
+// Echoing the client's own cursor back, which this used to do, rewinds it. The
+// value is whatever the cursor was when the request was *built*, and the client
+// pulls and pushes from separate tasks: a push that started at 10 and lands after
+// a drain has reached 5000 writes 10 back over it. That cost a re-pull before
+// pulls were paged. Now that a drain deliberately leaves the cursor behind until
+// each page is delivered, it can undo an arbitrary amount of progress, and a
+// chatty client can livelock a large resync.
+//
+// Sending nothing leaves the client's stored cursor alone — its `if let cursor`
+// guard skips a null — which is the only one of the three that is always right.
 func (s *Server) handleSyncPush(w http.ResponseWriter, r *http.Request) {
 	account := personIDFrom(r.Context())
 
@@ -163,7 +184,8 @@ func (s *Server) handleSyncPush(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	writeJSON(w, http.StatusOK, syncPushResponse{Cursor: req.Cursor, Conflicts: conflicts})
+	// Cursor deliberately omitted — see the note above handleSyncPush.
+	writeJSON(w, http.StatusOK, syncPushResponse{Conflicts: conflicts})
 }
 
 // applyUpsert routes one record to its projected table, or to sync_documents. It

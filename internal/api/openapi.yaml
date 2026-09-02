@@ -195,8 +195,12 @@ paths:
         through the REST API are owned by no sync account and cannot be adopted this way.
 
 
-        The cursor is echoed, not advanced — only a pull advances it, so a second device's
-        interleaved changes are never skipped.
+        The response carries no cursor: `cursor` is always null. Pull owns the read
+        position. Advancing it here would skip a second device's interleaved changes —
+        seqs come from one global sequence, so a client told its own push's high-water
+        mark never sees the rows another device wrote just below it. Echoing the request's
+        cursor, which this used to do, rewinds a client whose pull has moved on since the
+        request was built. Sending nothing leaves the client's position alone.
       security: [{ bearerAuth: [] }]
       requestBody:
         required: true
@@ -688,7 +692,9 @@ components:
         cursor:
           type: string
           nullable: true
-          description: Echoed back unchanged. Only a pull advances the cursor.
+          description: >-
+            Where the client has read up to. Accepted and ignored — the response
+            does not echo it back. Only a pull advances the cursor.
       description: At most 1000 records across upserts and deletes combined.
     SyncPushResponse:
       type: object
@@ -696,6 +702,9 @@ components:
         cursor:
           type: string
           nullable: true
+          description: >-
+            Always null. Present for shape stability; a push never moves the
+            client's read position.
         conflicts:
           type: array
           description: >
