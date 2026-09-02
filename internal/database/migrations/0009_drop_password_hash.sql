@@ -1,0 +1,29 @@
+-- Drop the password column, one release after the code stopped needing it.
+--
+-- Deploy this on its own. It is a one-way door: the release before it still *reads*
+-- password_hash — sqlc expands SELECT * into an explicit column list at generate time,
+-- so every user_accounts query names the column even though nothing looks at the value —
+-- and once it is gone that binary fails on the returning-user path of /auth/apple. There
+-- are no down-migrations here and database.Migrate applies whatever is unapplied at boot,
+-- so rolling the app back does not roll the schema back with it. The way back is a
+-- database restore.
+--
+-- That is why this is not in the release that removed password authentication. That
+-- release carries all the behaviour and all the risk, and keeping the schema untouched is
+-- what lets it be rolled back (verified: deploy it, roll the binary back one release
+-- against the same database, returning users still sign in). This one carries a single
+-- statement, so the odds of needing to reverse *it* are as small as they can be made.
+--
+-- The check that matters ran a release ago, in 0008: an account with a password and no
+-- Apple identity was already locked out by the endpoint removal, and that is where the
+-- refusal belongs. By the time this runs, either there were none or somebody dealt with
+-- them.
+--
+-- IF EXISTS because a database that ran an earlier build of this migration set already
+-- had the column dropped by a 0008 that has since become a check.
+--
+-- What actually goes away here is the last credential material this service stores: after
+-- this, the only thing that authenticates anybody is an Apple identity plus a refresh
+-- token row, and neither is a secret of ours to leak.
+
+ALTER TABLE user_accounts DROP COLUMN IF EXISTS password_hash;
