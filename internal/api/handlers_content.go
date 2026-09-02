@@ -8,6 +8,7 @@ import (
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
 
+	"github.com/monsoudz/soccerkit-api/internal/authz"
 	"github.com/monsoudz/soccerkit-api/internal/store"
 )
 
@@ -19,7 +20,7 @@ type createDrillRequest struct {
 }
 
 func (s *Server) handleCreateDrill(w http.ResponseWriter, r *http.Request) {
-	oc, err := s.requireCoach(r)
+	oc, err := s.requireCapability(r, authz.CapDrillWrite, "you cannot add drills in this organization")
 	if err != nil {
 		writeError(w, err)
 		return
@@ -45,7 +46,7 @@ func (s *Server) handleCreateDrill(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleListDrills(w http.ResponseWriter, r *http.Request) {
-	oc, err := s.resolveOrg(r)
+	oc, err := s.requireCapability(r, authz.CapDrillRead, "you cannot see this organization's drills")
 	if err != nil {
 		writeError(w, err)
 		return
@@ -78,7 +79,7 @@ type createSessionRequest struct {
 }
 
 func (s *Server) handleCreateSession(w http.ResponseWriter, r *http.Request) {
-	oc, err := s.requireCoach(r)
+	oc, err := s.requireCapability(r, authz.CapSessionWrite, "you cannot plan sessions in this organization")
 	if err != nil {
 		writeError(w, err)
 		return
@@ -170,7 +171,7 @@ func (s *Server) handleCreateSession(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleListSessions(w http.ResponseWriter, r *http.Request) {
-	oc, err := s.resolveOrg(r)
+	oc, err := s.requireCapability(r, authz.CapSessionRead, "you cannot see this organization's sessions")
 	if err != nil {
 		writeError(w, err)
 		return
@@ -199,7 +200,7 @@ func (s *Server) handleListSessions(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleGetSession(w http.ResponseWriter, r *http.Request) {
-	oc, err := s.resolveOrg(r)
+	oc, err := s.requireCapability(r, authz.CapSessionRead, "you cannot see this organization's sessions")
 	if err != nil {
 		writeError(w, err)
 		return
@@ -234,7 +235,7 @@ func (s *Server) handleGetSession(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleDeleteSession(w http.ResponseWriter, r *http.Request) {
-	oc, err := s.requireCoach(r)
+	oc, err := s.requireCapability(r, authz.CapSessionWrite, "you cannot delete sessions in this organization")
 	if err != nil {
 		writeError(w, err)
 		return

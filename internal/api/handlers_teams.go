@@ -8,6 +8,7 @@ import (
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
 
+	"github.com/monsoudz/soccerkit-api/internal/authz"
 	"github.com/monsoudz/soccerkit-api/internal/store"
 )
 
@@ -18,7 +19,7 @@ type createTeamRequest struct {
 }
 
 func (s *Server) handleCreateTeam(w http.ResponseWriter, r *http.Request) {
-	oc, err := s.requireCoach(r)
+	oc, err := s.requireCapability(r, authz.CapTeamCreate, "you cannot create teams in this organization")
 	if err != nil {
 		writeError(w, err)
 		return
@@ -42,29 +43,51 @@ func (s *Server) handleCreateTeam(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusCreated, teamDTO(team, 0))
 }
 
+// handleListTeams answers with the teams this caller may see, which is not the same
+// list for everyone: staff get the organization's teams, a parent or player gets the
+// teams their own household is actually rostered on. Same endpoint, same capability,
+// different reach — see authz.DataScope.
 func (s *Server) handleListTeams(w http.ResponseWriter, r *http.Request) {
-	oc, err := s.resolveOrg(r)
+	oc, err := s.requireCapability(r, authz.CapTeamRead, "you cannot see teams in this organization")
 	if err != nil {
 		writeError(w, err)
 		return
 	}
-	rows, err := s.store.ListTeamsInOrg(r.Context(), oc.orgID)
-	if err != nil {
-		writeError(w, err)
-		return
-	}
-	out := make([]Team, len(rows))
-	for i, t := range rows {
-		out[i] = teamDTO(store.Team{
-			ID: t.ID, OrganizationID: t.OrganizationID, Name: t.Name, AgeGroup: t.AgeGroup,
-			Season: t.Season, CreatedAt: t.CreatedAt, UpdatedAt: t.UpdatedAt,
-		}, t.ActiveRosterCount)
+	var out []Team
+	if oc.scope() == authz.ScopeOrg {
+		rows, lerr := s.store.ListTeamsInOrg(r.Context(), oc.orgID)
+		if lerr != nil {
+			writeError(w, lerr)
+			return
+		}
+		out = make([]Team, len(rows))
+		for i, t := range rows {
+			out[i] = teamDTO(store.Team{
+				ID: t.ID, OrganizationID: t.OrganizationID, Name: t.Name, AgeGroup: t.AgeGroup,
+				Season: t.Season, CreatedAt: t.CreatedAt, UpdatedAt: t.UpdatedAt,
+			}, t.ActiveRosterCount)
+		}
+	} else {
+		rows, lerr := s.store.ListTeamsForHouseholdInOrg(r.Context(), store.ListTeamsForHouseholdInOrgParams{
+			OrganizationID: oc.orgID, PersonID: personIDFrom(r.Context()),
+		})
+		if lerr != nil {
+			writeError(w, lerr)
+			return
+		}
+		out = make([]Team, len(rows))
+		for i, t := range rows {
+			out[i] = teamDTO(store.Team{
+				ID: t.ID, OrganizationID: t.OrganizationID, Name: t.Name, AgeGroup: t.AgeGroup,
+				Season: t.Season, CreatedAt: t.CreatedAt, UpdatedAt: t.UpdatedAt,
+			}, t.ActiveRosterCount)
+		}
 	}
 	writeJSON(w, http.StatusOK, out)
 }
 
 func (s *Server) handleGetTeam(w http.ResponseWriter, r *http.Request) {
-	oc, err := s.resolveOrg(r)
+	oc, err := s.requireCapability(r, authz.CapTeamRead, "you cannot see teams in this organization")
 	if err != nil {
 		writeError(w, err)
 		return
@@ -79,12 +102,23 @@ func (s *Server) handleGetTeam(w http.ResponseWriter, r *http.Request) {
 		writeError(w, err)
 		return
 	}
-	entries := make([]RosterEntry, len(roster))
-	for i, row := range roster {
-		entries[i] = rosterRowDTO(row)
+	// The roster carries every teammate's name, address and birthdate. A coach is
+	// meant to have it; a parent is not — their child being on the team is not a
+	// reason to hand them the other families' details — so a scoped caller sees the
+	// team, its size, and their own household's entries in it.
+	visible, err := s.rosterVisibleTo(r.Context(), oc)
+	if err != nil {
+		writeError(w, err)
+		return
+	}
+	entries := make([]RosterEntry, 0, len(roster))
+	for _, row := range roster {
+		if visible == nil || visible[row.PersonID] {
+			entries = append(entries, rosterRowDTO(row))
+		}
 	}
 	writeJSON(w, http.StatusOK, map[string]any{
-		"team":   teamDTO(team, int64(len(entries))),
+		"team":   teamDTO(team, int64(len(roster))),
 		"roster": entries,
 	})
 }
@@ -97,7 +131,7 @@ type addRosterRequest struct {
 }
 
 func (s *Server) handleAddRoster(w http.ResponseWriter, r *http.Request) {
-	oc, err := s.requireCoach(r)
+	oc, err := s.requireCapability(r, authz.CapRosterManage, "you cannot change a roster in this organization")
 	if err != nil {
 		writeError(w, err)
 		return
@@ -152,7 +186,7 @@ func (s *Server) handleAddRoster(w http.ResponseWriter, r *http.Request) {
 // handleEndRoster closes a player's active membership (they left the team, or
 // are being moved — the caller opens a new membership elsewhere).
 func (s *Server) handleEndRoster(w http.ResponseWriter, r *http.Request) {
-	oc, err := s.requireCoach(r)
+	oc, err := s.requireCapability(r, authz.CapRosterManage, "you cannot change a roster in this organization")
 	if err != nil {
 		writeError(w, err)
 		return
@@ -185,7 +219,7 @@ func (s *Server) handleEndRoster(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleDeleteTeam(w http.ResponseWriter, r *http.Request) {
-	oc, err := s.requireCoach(r)
+	oc, err := s.requireCapability(r, authz.CapTeamDelete, "you cannot delete teams in this organization")
 	if err != nil {
 		writeError(w, err)
 		return
@@ -203,17 +237,6 @@ func (s *Server) handleDeleteTeam(w http.ResponseWriter, r *http.Request) {
 }
 
 // --- shared authorization helpers -----------------------------------------
-
-func (s *Server) requireCoach(r *http.Request) (orgContext, error) {
-	oc, err := s.resolveOrg(r)
-	if err != nil {
-		return orgContext{}, err
-	}
-	if !oc.hasAnyRole("admin", "director", "coach") {
-		return orgContext{}, errForbidden("only coaches can do that")
-	}
-	return oc, nil
-}
 
 // teamInOrg loads the team named in the path and verifies it belongs to the
 // caller's active organization.
@@ -237,6 +260,20 @@ func (s *Server) teamByIDInOrg(ctx context.Context, oc orgContext, id uuid.UUID)
 	if team.OrganizationID != oc.orgID {
 		return store.Team{}, errForbidden("that team is not in your organization")
 	}
+	// Being in the org is the staff test. For a parent or player, the team must also be
+	// one their household is on: without this, every team id in the club is readable by
+	// anyone who holds the humblest membership in it.
+	if oc.scope() == authz.ScopeOwn {
+		ok, verr := s.store.TeamVisibleToHousehold(ctx, store.TeamVisibleToHouseholdParams{
+			TeamID: team.ID, PersonID: personIDFrom(ctx),
+		})
+		if verr != nil {
+			return store.Team{}, verr
+		}
+		if !ok {
+			return store.Team{}, errNotFound("team not found")
+		}
+	}
 	return team, nil
 }
 
@@ -251,9 +288,24 @@ func (s *Server) personVisibleTo(ctx context.Context, oc orgContext, personID uu
 	if personID == personIDFrom(ctx) {
 		return nil
 	}
-	visible, err := s.store.PersonVisibleInOrg(ctx, store.PersonVisibleInOrgParams{
-		PersonID: personID, OrganizationID: oc.orgID,
-	})
+	var visible bool
+	var err error
+	switch oc.scope() {
+	case authz.ScopeOrg:
+		visible, err = s.store.PersonVisibleInOrg(ctx, store.PersonVisibleInOrgParams{
+			PersonID: personID, OrganizationID: oc.orgID,
+		})
+	case authz.ScopeOwn:
+		// A parent reaches their own children and stops there. Membership of the org is
+		// what a coach's reach is built on and is exactly the wrong test here: every
+		// parent in a club passes it, and these reads return other people's minors'
+		// birthdates, contact details and medical notes.
+		visible, err = s.store.PersonVisibleToGuardian(ctx, store.PersonVisibleToGuardianParams{
+			PersonID: personID, GuardianPersonID: personIDFrom(ctx), OrganizationID: oc.orgID,
+		})
+	default:
+		return errNotFound("person not found")
+	}
 	if err != nil {
 		return err
 	}
@@ -261,4 +313,25 @@ func (s *Server) personVisibleTo(ctx context.Context, oc orgContext, personID uu
 		return errNotFound("person not found")
 	}
 	return nil
+}
+
+// rosterVisibleTo returns the set of person ids a caller may see inside a list they are
+// already allowed to open, or nil when they may see all of it. Filtering a list in one
+// pass beats a visibility query per row, and returning nil for staff keeps the common
+// case free.
+func (s *Server) rosterVisibleTo(ctx context.Context, oc orgContext) (map[uuid.UUID]bool, error) {
+	if oc.scope() != authz.ScopeOwn {
+		return nil, nil
+	}
+	self := personIDFrom(ctx)
+	children, err := s.store.ListChildPersonIDs(ctx, self)
+	if err != nil {
+		return nil, err
+	}
+	allowed := make(map[uuid.UUID]bool, len(children)+1)
+	allowed[self] = true
+	for _, id := range children {
+		allowed[id] = true
+	}
+	return allowed, nil
 }

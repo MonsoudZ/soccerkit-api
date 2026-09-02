@@ -11,6 +11,8 @@ import (
 
 	"github.com/golang-jwt/jwt/v5"
 	"github.com/google/uuid"
+
+	"github.com/monsoudz/soccerkit-api/internal/authz"
 )
 
 type ctxKey string
@@ -105,17 +107,18 @@ func personIDFrom(ctx context.Context) uuid.UUID {
 // back to the caller's single/first org — the common solo-coach case.
 type orgContext struct {
 	orgID uuid.UUID
-	roles map[string]bool
+	roles authz.Set
 }
 
-func (o orgContext) hasAnyRole(roles ...string) bool {
-	for _, r := range roles {
-		if o.roles[r] {
-			return true
-		}
-	}
-	return false
-}
+// can is the authorization question every handler asks. It is deliberately about a
+// capability rather than a role name: "may you put someone on a roster" survives a
+// sixth role being added, and a handler that asks by name does not.
+func (o orgContext) can(c authz.Capability) bool { return o.roles.Can(c) }
+
+// scope says how wide this caller's reads reach — the whole organization for staff,
+// their own household for a parent or player. A capability check alone is not enough
+// for a read: see authz.DataScope.
+func (o orgContext) scope() authz.DataScope { return o.roles.Scope() }
 
 func (s *Server) resolveOrg(r *http.Request) (orgContext, error) {
 	personID := personIDFrom(r.Context())
@@ -138,16 +141,29 @@ func (s *Server) resolveOrg(r *http.Request) (orgContext, error) {
 		chosen = memberships[0].OrganizationID
 	}
 
-	roles := map[string]bool{}
-	found := false
+	var names []string
 	for _, m := range memberships {
 		if m.OrganizationID == chosen {
-			roles[m.Role] = true
-			found = true
+			names = append(names, m.Role)
 		}
 	}
-	if !found {
+	if names == nil {
 		return orgContext{}, errForbidden("you are not a member of that organization")
 	}
-	return orgContext{orgID: chosen, roles: roles}, nil
+	return orgContext{orgID: chosen, roles: authz.NewSet(names...)}, nil
+}
+
+// requireCapability is resolveOrg plus one permission check — the opening two lines of
+// almost every handler. deniedMsg is what the caller is told on a 403, so it should say
+// what they cannot do, not which role they lack: role names are an implementation
+// detail of the answer, and a club may hand the same capability to a different tier.
+func (s *Server) requireCapability(r *http.Request, c authz.Capability, deniedMsg string) (orgContext, error) {
+	oc, err := s.resolveOrg(r)
+	if err != nil {
+		return orgContext{}, err
+	}
+	if !oc.can(c) {
+		return orgContext{}, errForbidden(deniedMsg)
+	}
+	return oc, nil
 }

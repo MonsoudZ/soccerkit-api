@@ -11,6 +11,7 @@ import (
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
 
+	"github.com/monsoudz/soccerkit-api/internal/authz"
 	"github.com/monsoudz/soccerkit-api/internal/store"
 )
 
@@ -68,7 +69,7 @@ func seedDefaultTemplates(ctx context.Context, q *store.Queries, orgID, authorID
 }
 
 func (s *Server) handleListTemplates(w http.ResponseWriter, r *http.Request) {
-	oc, err := s.resolveOrg(r)
+	oc, err := s.requireCapability(r, authz.CapTemplateRead, "you cannot see this organization's evaluation templates")
 	if err != nil {
 		writeError(w, err)
 		return
@@ -142,8 +143,8 @@ func (s *Server) handleCreateTemplate(w http.ResponseWriter, r *http.Request) {
 		writeError(w, err)
 		return
 	}
-	if !oc.hasAnyRole("admin", "director", "coach") {
-		writeError(w, errForbidden("only coaches can create templates"))
+	if !oc.can(authz.CapTemplateWrite) {
+		writeError(w, errForbidden("you cannot create evaluation templates in this organization"))
 		return
 	}
 	var req createTemplateRequest
@@ -241,8 +242,8 @@ func (s *Server) handleSubmitInstance(w http.ResponseWriter, r *http.Request) {
 		writeError(w, err)
 		return
 	}
-	if !oc.hasAnyRole("admin", "director", "coach", "parent", "player") {
-		writeError(w, errForbidden("not permitted"))
+	if !oc.can(authz.CapEvaluationSubmit) {
+		writeError(w, errForbidden("you cannot submit evaluations in this organization"))
 		return
 	}
 	var req submitInstanceRequest
@@ -390,7 +391,7 @@ func (s *Server) handleGetInstance(w http.ResponseWriter, r *http.Request) {
 		writeError(w, err)
 		return
 	}
-	oc, err := s.resolveOrg(r)
+	oc, err := s.requireCapability(r, authz.CapEvaluationRead, "you cannot read evaluations in this organization")
 	if err != nil {
 		writeError(w, err)
 		return

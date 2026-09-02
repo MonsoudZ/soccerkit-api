@@ -14,6 +14,7 @@ servers:
 tags:
   - name: auth
   - name: me
+  - name: roles
   - name: persons
   - name: teams
   - name: evaluation
@@ -247,6 +248,148 @@ paths:
       responses:
         "204": { description: Account deleted (or already absent) }
         "401": { $ref: "#/components/responses/Error" }
+
+  /api/v1/roles:
+    get:
+      tags: [roles]
+      summary: The role catalogue — every role and exactly what it may do
+      description: >
+        The permission model the server enforces, published so a client can gate its UI
+        on the same table rather than a second copy of it that drifts. Capabilities are
+        strings ("roster.manage", "evaluation.submit"): treat an unrecognized one as a
+        capability this client does not use yet, never as an error.
+      security: [{ bearerAuth: [] }]
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema: { type: array, items: { $ref: "#/components/schemas/RoleInfo" } }
+        "401": { $ref: "#/components/responses/Error" }
+
+  /api/v1/me/access:
+    get:
+      tags: [me]
+      summary: What the caller may do in the organization they are acting in
+      description: >
+        The union of the caller's roles in one organization (X-Organization-ID, or their
+        default org) with the capabilities those roles carry, the reach of their reads
+        ("org" for staff, "own" for a parent or player), and the roles they may hand out.
+        Roles are resolved per request rather than baked into the access token, so a role
+        granted a moment ago shows up here without signing in again.
+      security: [{ bearerAuth: [] }]
+      parameters: [{ $ref: "#/components/parameters/OrgHeader" }]
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Access" }
+        "403": { $ref: "#/components/responses/Error" }
+
+  /api/v1/me/children:
+    get:
+      tags: [me]
+      summary: The children the caller is the registered guardian of
+      description: >
+        The parent app's first call: everything else it shows hangs off these ids. Needs
+        no organization — it is the caller's own household.
+      security: [{ bearerAuth: [] }]
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema: { type: array, items: { $ref: "#/components/schemas/Person" } }
+        "401": { $ref: "#/components/responses/Error" }
+
+  /api/v1/members:
+    get:
+      tags: [roles]
+      summary: Who belongs to the organization, and as what
+      description: >
+        One row per person with every role they hold here — the solo coach holds admin,
+        director and coach and is one member, not three. Requires member.read.
+      security: [{ bearerAuth: [] }]
+      parameters: [{ $ref: "#/components/parameters/OrgHeader" }]
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema: { type: array, items: { $ref: "#/components/schemas/OrgMember" } }
+        "403": { $ref: "#/components/responses/Error" }
+    post:
+      tags: [roles]
+      summary: Grant a role to someone already in the organization
+      description: >
+        Requires member.grant AND that the role be no higher than the caller's own: a
+        director cannot mint an admin. The target must already be linked to this
+        organization (POST /persons puts them there) — an id is not consent, so this is
+        not a way to enrol a stranger. Idempotent: re-granting a held role succeeds.
+      security: [{ bearerAuth: [] }]
+      parameters: [{ $ref: "#/components/parameters/OrgHeader" }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/GrantRoleRequest" }
+      responses:
+        "201":
+          description: The person's roles as they now stand
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/MemberRoles" }
+        "400": { $ref: "#/components/responses/Error" }
+        "403": { $ref: "#/components/responses/Error" }
+        "404": { $ref: "#/components/responses/Error" }
+
+  /api/v1/members/{personId}/roles/{role}:
+    delete:
+      tags: [roles]
+      summary: Take one role away from someone
+      description: >
+        Removes a role, never the person: someone who is no longer a coach is usually
+        still a parent, and their records survive the demotion. Requires member.revoke
+        and the same rank ceiling as granting. Revoking the organization's last admin is
+        refused with 409 — nobody left could grant it back.
+      security: [{ bearerAuth: [] }]
+      parameters:
+        - { $ref: "#/components/parameters/OrgHeader" }
+        - { name: personId, in: path, required: true, schema: { type: string, format: uuid } }
+        - { name: role, in: path, required: true, schema: { $ref: "#/components/schemas/Role" } }
+      responses:
+        "200":
+          description: The person's remaining roles
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/MemberRoles" }
+        "403": { $ref: "#/components/responses/Error" }
+        "404": { description: They do not hold that role here }
+        "409": { description: An organization must keep at least one admin }
+
+  /api/v1/persons/{id}/guardians:
+    post:
+      tags: [persons]
+      summary: Link a parent to a child
+      description: >
+        The join the parent tier stands on: a parent's reads are scoped to the children
+        linked here, so a parent membership with no link sees nothing. Staff only
+        (guardian.link); both people must already be visible in the organization.
+      security: [{ bearerAuth: [] }]
+      parameters:
+        - { $ref: "#/components/parameters/OrgHeader" }
+        - { $ref: "#/components/parameters/Id" }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/LinkGuardianRequest" }
+      responses:
+        "201": { description: Linked (idempotent) }
+        "400": { $ref: "#/components/responses/Error" }
+        "403": { $ref: "#/components/responses/Error" }
+        "404": { $ref: "#/components/responses/Error" }
 
   /api/v1/persons:
     post:
@@ -722,6 +865,78 @@ components:
     Role:
       type: string
       enum: [admin, director, coach, parent, player]
+      description: >
+        A person's standing in ONE organization, never a property of the person: the
+        same human is a director at their club and a parent at their child's. A person
+        holds several at once (a solo coach signs up as admin + director + coach), and
+        permissions are the union.
+    Capability:
+      type: string
+      description: >
+        One thing a person may do, named for the product verb rather than the endpoint
+        ("roster.manage", "evaluation.submit", "member.grant"). The full list per role is
+        at GET /roles; treat an unknown value as one this client does not use yet.
+      example: roster.manage
+    RoleInfo:
+      type: object
+      properties:
+        role: { $ref: "#/components/schemas/Role" }
+        label: { type: string, description: "Human name, e.g. Director" }
+        description: { type: string }
+        rank:
+          type: integer
+          description: >
+            Authority, for one question only — may this caller hand out that role? A
+            parent outranks a player and neither can touch a team.
+        capabilities: { type: array, items: { $ref: "#/components/schemas/Capability" } }
+    Access:
+      type: object
+      properties:
+        organizationId: { type: string, format: uuid }
+        roles:
+          type: array
+          description: Every role the caller holds here, most privileged first.
+          items: { $ref: "#/components/schemas/Role" }
+        capabilities:
+          type: array
+          description: The union of those roles' capabilities.
+          items: { $ref: "#/components/schemas/Capability" }
+        scope:
+          type: string
+          enum: [none, own, org]
+          description: >
+            How far the caller's reads over people, teams and evaluations reach. Staff
+            get "org"; a parent or player gets "own" — themselves and the children they
+            are guardian of.
+        grantableRoles:
+          type: array
+          description: The roles this caller may hand out — populate a role picker from this.
+          items: { $ref: "#/components/schemas/Role" }
+    OrgMember:
+      type: object
+      properties:
+        personId: { type: string, format: uuid }
+        displayName: { type: string }
+        email: { type: string, nullable: true }
+        roles: { type: array, items: { $ref: "#/components/schemas/Role" } }
+        joinedAt: { type: string, format: date-time }
+    MemberRoles:
+      type: object
+      properties:
+        personId: { type: string, format: uuid }
+        organizationId: { type: string, format: uuid }
+        roles: { type: array, items: { $ref: "#/components/schemas/Role" } }
+    GrantRoleRequest:
+      type: object
+      required: [personId, role]
+      properties:
+        personId: { type: string, format: uuid }
+        role: { $ref: "#/components/schemas/Role" }
+    LinkGuardianRequest:
+      type: object
+      required: [guardianPersonId]
+      properties:
+        guardianPersonId: { type: string, format: uuid }
     FormContext:
       type: string
       enum: [tryout, pre_game, post_game, development, movement, coach_review]

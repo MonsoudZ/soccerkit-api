@@ -7,6 +7,7 @@ import (
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
 
+	"github.com/monsoudz/soccerkit-api/internal/authz"
 	"github.com/monsoudz/soccerkit-api/internal/store"
 )
 
@@ -52,8 +53,10 @@ type createPersonRequest struct {
 }
 
 // personRoles are the roles POST /persons may grant. The endpoint creates Persons with
-// no login, so it deliberately cannot mint the privileged admin/director/coach roles.
-var personRoles = map[string]bool{"player": true, "parent": true}
+// no login, so it deliberately cannot mint the privileged admin/director/coach roles —
+// those are handed out at POST /members, where the rank ceiling applies. Staffing a club
+// through the endpoint that creates login-less athlete records would be a way around it.
+var personRoles = map[authz.Role]bool{authz.RolePlayer: true, authz.RoleParent: true}
 
 // handleCreatePerson creates an athlete (a Person, usually with no login) in the
 // coach's organization.
@@ -63,8 +66,8 @@ func (s *Server) handleCreatePerson(w http.ResponseWriter, r *http.Request) {
 		writeError(w, err)
 		return
 	}
-	if !oc.hasAnyRole("admin", "director", "coach") {
-		writeError(w, errForbidden("only coaches can add people"))
+	if !oc.can(authz.CapPersonCreate) {
+		writeError(w, errForbidden("you cannot add people to this organization"))
 		return
 	}
 	var req createPersonRequest
@@ -85,7 +88,7 @@ func (s *Server) handleCreatePerson(w http.ResponseWriter, r *http.Request) {
 	if req.Role != nil {
 		role = *req.Role
 	}
-	if !personRoles[role] {
+	if !personRoles[authz.Role(role)] {
 		writeError(w, errValidation("role must be player or parent"))
 		return
 	}
@@ -139,9 +142,13 @@ func (s *Server) handleGetPerson(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleListPersonInstances(w http.ResponseWriter, r *http.Request) {
-	id, _, err := s.visiblePersonFromPath(r)
+	id, oc, err := s.visiblePersonFromPath(r)
 	if err != nil {
 		writeError(w, err)
+		return
+	}
+	if !oc.can(authz.CapEvaluationRead) {
+		writeError(w, errForbidden("you cannot read evaluations in this organization"))
 		return
 	}
 	rows, err := s.store.ListInstancesForPerson(r.Context(), store.ListInstancesForPersonParams{
@@ -164,9 +171,13 @@ func (s *Server) handleListPersonInstances(w http.ResponseWriter, r *http.Reques
 // handlePersonAggregate returns cross-instance score averages for an athlete —
 // the readiness-mean / effort-trend query that is the product's analytical core.
 func (s *Server) handlePersonAggregate(w http.ResponseWriter, r *http.Request) {
-	id, _, err := s.visiblePersonFromPath(r)
+	id, oc, err := s.visiblePersonFromPath(r)
 	if err != nil {
 		writeError(w, err)
+		return
+	}
+	if !oc.can(authz.CapEvaluationRead) {
+		writeError(w, errForbidden("you cannot read evaluations in this organization"))
 		return
 	}
 	rows, err := s.store.AggregateScoresForPerson(r.Context(), store.AggregateScoresForPersonParams{
@@ -193,7 +204,7 @@ func (s *Server) visiblePersonFromPath(r *http.Request) (uuid.UUID, orgContext, 
 	if err != nil {
 		return uuid.Nil, orgContext{}, err
 	}
-	oc, err := s.resolveOrg(r)
+	oc, err := s.requireCapability(r, authz.CapPersonRead, "you cannot look up people in this organization")
 	if err != nil {
 		return uuid.Nil, orgContext{}, err
 	}

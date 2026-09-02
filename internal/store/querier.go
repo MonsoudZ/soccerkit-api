@@ -70,6 +70,9 @@ type Querier interface {
 	// Sign in with Apple is the only path that creates an account, so an account is born
 	// with its Apple subject and there is no credential of ours to store alongside it.
 	CreateUserAccount(ctx context.Context, arg CreateUserAccountParams) (UserAccount, error)
+	// Revoke one role from one person in one org. :execrows so the handler can tell
+	// "they did not hold it" (404) from "revoked" (200) without a read-then-write race.
+	DeleteMembership(ctx context.Context, arg DeleteMembershipParams) (int64, error)
 	DeleteOrganizationsByIDs(ctx context.Context, ids []uuid.UUID) error
 	DeletePersonByID(ctx context.Context, id uuid.UUID) error
 	DeletePersonsByIDs(ctx context.Context, ids []uuid.UUID) error
@@ -103,6 +106,9 @@ type Querier interface {
 	HasMembership(ctx context.Context, arg HasMembershipParams) (bool, error)
 	ListActiveRoster(ctx context.Context, teamID uuid.UUID) ([]ListActiveRosterRow, error)
 	ListAnswersForInstance(ctx context.Context, instanceID uuid.UUID) ([]ListAnswersForInstanceRow, error)
+	// The ids a guardian's reads are allowed to reach, for filtering a list in one pass
+	// rather than a visibility query per row.
+	ListChildPersonIDs(ctx context.Context, guardianPersonID uuid.UUID) ([]uuid.UUID, error)
 	ListChildren(ctx context.Context, guardianPersonID uuid.UUID) ([]Person, error)
 	ListDrillsInOrg(ctx context.Context, organizationID uuid.UUID) ([]Drill, error)
 	ListFormFields(ctx context.Context, templateID uuid.UUID) ([]FormField, error)
@@ -113,6 +119,11 @@ type Querier interface {
 	// resolveOrg takes the first row as the caller's default org when no X-Organization-ID
 	// is sent. Without the tie-break that default is whatever Postgres happens to return.
 	ListMembershipsForPerson(ctx context.Context, personID uuid.UUID) ([]ListMembershipsForPersonRow, error)
+	// Everyone who holds a role in one organization, one row per person with their roles
+	// collected. A person holding three roles (the solo coach) is one member with three
+	// roles, not three members — the client renders a person, and the join is an
+	// implementation detail of how roles are stored.
+	ListOrgMembers(ctx context.Context, organizationID uuid.UUID) ([]ListOrgMembersRow, error)
 	// The personal org(s) this person owns, selected on organizations.owner_person_id.
 	//
 	// This used to select on membership and argue that the two were the same thing —
@@ -156,13 +167,36 @@ type Querier interface {
 	// tail. That is cheap at any size a coach will reach and it is where to look first if a
 	// full resync ever gets slow rather than merely large.
 	ListSyncChangesSince(ctx context.Context, arg ListSyncChangesSinceParams) ([]ListSyncChangesSinceRow, error)
+	// The teams a parent or player may see: those in this organization that they, or a
+	// child they are the guardian of, are actively rostered on. It is GET /teams for a
+	// scoped caller — the org-wide ListTeamsInOrg is a staff query, and answering it for a
+	// parent would hand them the club's whole team list.
+	ListTeamsForHouseholdInOrg(ctx context.Context, arg ListTeamsForHouseholdInOrgParams) ([]ListTeamsForHouseholdInOrgRow, error)
 	ListTeamsForPerson(ctx context.Context, personID uuid.UUID) ([]ListTeamsForPersonRow, error)
 	ListTeamsInOrg(ctx context.Context, organizationID uuid.UUID) ([]ListTeamsInOrgRow, error)
+	// The organization's admin memberships, locked for the rest of the transaction.
+	//
+	// Counting admins and then deleting one is a check-then-act, and the thing it is
+	// checking is the one an organization cannot recover from: two concurrent revokes of
+	// two different admins both read "there are 2" and both commit, and the org is left with
+	// none — member.grant is an admin/director capability, so nobody remaining can hand the
+	// role back. FOR UPDATE serializes those revokes: the second one blocks, re-reads after
+	// the first commits, sees one admin left, and refuses.
+	LockAdminMembershipIDs(ctx context.Context, organizationID uuid.UUID) ([]uuid.UUID, error)
 	// Whether an organization may see a Person at all: they are not tombstoned, and they
 	// either hold a membership in the org or are rostered on one of its live teams. The
 	// roster arm matters because an athlete can be added to a team without a membership
 	// row of their own.
 	PersonVisibleInOrg(ctx context.Context, arg PersonVisibleInOrgParams) (bool, error)
+	// Whether a parent may see a Person: it is a child they are the registered guardian of,
+	// AND that child is linked to the organization being acted in.
+	//
+	// The guardianship arm is the whole point. PersonVisibleInOrg answers a staff question —
+	// "is this person in my club?" — and every member of an org passes it, which is correct
+	// for a coach and a disclosure for a parent: these endpoints return birthdate, contact
+	// details and medical notes, so a parent passing the org-wide check would read every
+	// other family's minor's PII.
+	PersonVisibleToGuardian(ctx context.Context, arg PersonVisibleToGuardianParams) (bool, error)
 	// Rotation's single-use guard, not a follow-up to one. handleRefresh used to read the
 	// row, decide it was live, and then revoke it unconditionally — a check-then-act with
 	// nothing between the two statements, so concurrent presentations of one token all read
@@ -217,6 +251,8 @@ type Querier interface {
 	// Ownership never transfers on update, so the SET clauses do not reassign
 	// sync_account_id; SyncUpsertPerson is the one exception, see its comment.
 	SyncUpsertTeam(ctx context.Context, arg SyncUpsertTeamParams) (int64, error)
+	// The single-team form of ListTeamsForHouseholdInOrg, for reads keyed on a team id.
+	TeamVisibleToHousehold(ctx context.Context, arg TeamVisibleToHouseholdParams) (bool, error)
 	UpdateGame(ctx context.Context, arg UpdateGameParams) (Game, error)
 	UpdatePerson(ctx context.Context, arg UpdatePersonParams) (Person, error)
 	UpdateTeam(ctx context.Context, arg UpdateTeamParams) (Team, error)

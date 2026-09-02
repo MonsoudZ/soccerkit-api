@@ -9,6 +9,7 @@ import (
 
 	"github.com/jackc/pgx/v5"
 
+	"github.com/monsoudz/soccerkit-api/internal/authz"
 	"github.com/monsoudz/soccerkit-api/internal/store"
 )
 
@@ -24,7 +25,7 @@ type createGameRequest struct {
 }
 
 func (s *Server) handleCreateGame(w http.ResponseWriter, r *http.Request) {
-	oc, err := s.requireCoach(r)
+	oc, err := s.requireCapability(r, authz.CapGameWrite, "you cannot schedule games in this organization")
 	if err != nil {
 		writeError(w, err)
 		return
@@ -64,7 +65,7 @@ func (s *Server) handleCreateGame(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleListGames(w http.ResponseWriter, r *http.Request) {
-	oc, err := s.resolveOrg(r)
+	oc, err := s.requireCapability(r, authz.CapGameRead, "you cannot see this organization's games")
 	if err != nil {
 		writeError(w, err)
 		return
@@ -112,7 +113,7 @@ func (s *Server) gameInOrg(r *http.Request, oc orgContext) (store.Game, error) {
 }
 
 func (s *Server) handleGetGame(w http.ResponseWriter, r *http.Request) {
-	oc, err := s.resolveOrg(r)
+	oc, err := s.requireCapability(r, authz.CapGameRead, "you cannot see this organization's games")
 	if err != nil {
 		writeError(w, err)
 		return
@@ -134,7 +135,7 @@ func (s *Server) handleGetGame(w http.ResponseWriter, r *http.Request) {
 // skipped its own validation. `{"homeAway": true}` returned 200 and erased the result
 // of a match.
 func (s *Server) handleUpdateGame(w http.ResponseWriter, r *http.Request) {
-	oc, err := s.requireCoach(r)
+	oc, err := s.requireCapability(r, authz.CapGameWrite, "you cannot record game results in this organization")
 	if err != nil {
 		writeError(w, err)
 		return

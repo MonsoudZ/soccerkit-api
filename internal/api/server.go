@@ -96,6 +96,21 @@ func (s *Server) Router() http.Handler {
 
 			r.Get("/me", s.handleGetMe)
 			r.Delete("/me", s.handleDeleteMe)
+			// What this caller may do in the org they are acting in, and the children
+			// they are guardian of — the two calls the parent app opens with.
+			r.Get("/me/access", s.handleGetMyAccess)
+			r.Get("/me/children", s.handleListMyChildren)
+
+			// The role catalogue: the same matrix the server enforces, published so a
+			// client gates its UI on it instead of on a second copy that drifts.
+			r.Get("/roles", s.handleListRoles)
+
+			// Who belongs to the organization, and who may do what in it.
+			r.Route("/members", func(r chi.Router) {
+				r.Get("/", s.handleListMembers)
+				r.Post("/", s.handleGrantRole)
+				r.Delete("/{personId}/roles/{role}", s.handleRevokeRole)
+			})
 
 			// iOS opaque delta-sync (projection over the domain tables).
 			r.Get("/sync", s.handleSyncPull)
@@ -107,6 +122,8 @@ func (s *Server) Router() http.Handler {
 				r.Get("/{id}", s.handleGetPerson)
 				r.Get("/{id}/instances", s.handleListPersonInstances)
 				r.Get("/{id}/aggregate", s.handlePersonAggregate)
+				// The parent tier's join: a parent sees exactly the children linked here.
+				r.Post("/{id}/guardians", s.handleLinkGuardian)
 			})
 
 			// Teams & time-bounded roster

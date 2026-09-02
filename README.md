@@ -48,7 +48,8 @@ exist in the schema now:
 | **iOS sync** | `GET/POST /sync` — opaque `{type,id,payload}` delta-sync for the offline-first app. A **projection over the domain tables**: projected types (`Team`, `Drill`, `Session`) land in their real table (columns projected from the payload, full payload retained); other types round-trip losslessly via a generic `sync_documents` store until they graduate. A shared `seq` sequence is the cursor; rows are scoped per account (Person) |
 
 **Next up (schema already present):** `ShareGrant` scopes (coach-to-coach +
-club library), the director tier, and parent/player self-service.
+club library), an invitation flow so a signed-in account can join someone else's
+club, and the per-role surfaces the roles below now have a place to hang from.
 
 ### The moat, concretely
 
@@ -67,9 +68,55 @@ That readiness-mean / effort-trend query is a single normalized aggregation over
 
 Every write is scoped to an organization resolved from the caller's memberships.
 Send `X-Organization-ID` to act in a specific org; it defaults to your single
-org (the solo-coach case). Roles are checked per request against the permission
-matrix (admin/director/coach can manage; parent/player are read/self — dark
-until those tiers ship).
+org (the solo-coach case).
+
+## Roles & capabilities
+
+`internal/authz` is the permission model: **roles are sets of capabilities**, and
+handlers ask *"can you do this?"* rather than *"who are you?"*. A capability is a
+product verb (`roster.manage`, `evaluation.submit`, `member.grant`), not an
+endpoint, so adding a route does not mean inventing a new rule — and adding a
+role is a row in one table instead of a hunt through twenty `if` statements.
+
+A person holds roles **per organization**, and often several at once: signing up
+as a solo coach creates a personal org with admin + director + coach, and the
+same human is a parent at their child's club. Permissions are the union.
+
+| Role | Runs | Cannot |
+|------|------|--------|
+| **admin** | Everything, including who else holds which role | — |
+| **director** | The sporting side: staffing, teams across age groups, club reporting, coach reviews | Delete the org; appoint an admin |
+| **coach** | Their teams: roster, sessions, game day, athlete evaluation | Staff the club; review coaches; org settings |
+| **parent** | Their own children: schedule, evaluations, the forms asked of a parent | See any other family, any staff surface |
+| **player** | Themselves: their schedule, self-assessments, history | Anything about anyone else |
+
+Two rules do the work, and both are load-bearing:
+
+- **Capability** — *may you do this at all?* (`authz.Set.Can`)
+- **Scope** — *to whose rows?* (`authz.Set.Scope`) — `org` for staff, `own` for a
+  parent or player. A parent and a coach both hold `person.read`; without scope
+  a parent would read every other family's minor's medical notes.
+
+The client does not need a copy of any of this:
+
+```
+GET /api/v1/roles       → the whole matrix: every role, label, rank, capabilities
+GET /api/v1/me/access   → your roles, capabilities, scope and grantable roles here
+GET /api/v1/members     → who belongs to this org and as what
+POST /api/v1/members    → { personId, role }   (member.grant, capped by your own rank)
+DELETE /api/v1/members/{personId}/roles/{role}
+POST /api/v1/persons/{id}/guardians  → link a parent to a child (the parent tier's join)
+GET /api/v1/me/children → your own household
+```
+
+Guards worth knowing: a director cannot grant or revoke `admin` (the rank
+ceiling — otherwise `member.grant` is a ladder to the top of the org), an
+organization cannot lose its last admin (nobody left could grant one back), and
+`POST /members` only changes what someone **already in the org** may do. Bringing
+an account that signed in on its own into somebody else's club is an
+**invitation flow, and there is not one yet** — it has to be tied to Sign in with
+Apple rather than to an address someone typed. That is the next piece of the
+parent tier.
 
 ## Quick start
 
@@ -94,6 +141,7 @@ cmd/
   api/main.go              # entrypoint: config, migrate, serve, graceful shutdown
   seed/main.go             # sample coach/team/roster/evaluations
 internal/
+  authz/                   # roles, capabilities, the permission matrix (pure, no DB)
   config/                  # env configuration
   database/
     database.go            # pgx pool + embedded migration runner
@@ -101,9 +149,9 @@ internal/
   store/                   # sqlc-generated queries & models (DO NOT EDIT)
   api/
     server.go              # chi router, middleware, route mounting
-    auth.go                # JWT, bcrypt, auth middleware, org/role resolution
+    auth.go                # JWT, auth middleware, org/role resolution, capability checks
     dto.go                 # API response types + mapping from store models
-    handlers_*.go          # auth · people · teams · forms (the engine)
+    handlers_*.go          # auth · people · teams · forms (the engine) · members (roles)
     openapi.yaml           # served at /openapi.yaml, embedded in the binary
     *_test.go              # httptest integration tests
 db/queries/*.sql           # sqlc query definitions

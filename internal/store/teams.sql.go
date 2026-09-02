@@ -256,6 +256,80 @@ func (q *Queries) ListActiveRoster(ctx context.Context, teamID uuid.UUID) ([]Lis
 	return items, nil
 }
 
+const listTeamsForHouseholdInOrg = `-- name: ListTeamsForHouseholdInOrg :many
+SELECT t.id, t.organization_id, t.name, t.age_group, t.season, t.created_at, t.updated_at, t.sync_account_id, t.payload, t.deleted, t.seq,
+    (SELECT count(*) FROM roster_memberships r WHERE r.team_id = t.id AND r.left_on IS NULL)::bigint AS active_roster_count
+FROM teams t
+WHERE t.organization_id = $1
+  AND t.deleted = false
+  AND EXISTS (
+      SELECT 1 FROM roster_memberships r
+       WHERE r.team_id = t.id
+         AND r.left_on IS NULL
+         AND (r.person_id = $2
+              OR r.person_id IN (SELECT g.child_person_id FROM guardianships g
+                                  WHERE g.guardian_person_id = $2))
+  )
+ORDER BY t.name ASC
+`
+
+type ListTeamsForHouseholdInOrgParams struct {
+	OrganizationID uuid.UUID `json:"organization_id"`
+	PersonID       uuid.UUID `json:"person_id"`
+}
+
+type ListTeamsForHouseholdInOrgRow struct {
+	ID                uuid.UUID          `json:"id"`
+	OrganizationID    uuid.UUID          `json:"organization_id"`
+	Name              string             `json:"name"`
+	AgeGroup          *string            `json:"age_group"`
+	Season            *string            `json:"season"`
+	CreatedAt         pgtype.Timestamptz `json:"created_at"`
+	UpdatedAt         pgtype.Timestamptz `json:"updated_at"`
+	SyncAccountID     *uuid.UUID         `json:"sync_account_id"`
+	Payload           []byte             `json:"payload"`
+	Deleted           bool               `json:"deleted"`
+	Seq               *int64             `json:"seq"`
+	ActiveRosterCount int64              `json:"active_roster_count"`
+}
+
+// The teams a parent or player may see: those in this organization that they, or a
+// child they are the guardian of, are actively rostered on. It is GET /teams for a
+// scoped caller — the org-wide ListTeamsInOrg is a staff query, and answering it for a
+// parent would hand them the club's whole team list.
+func (q *Queries) ListTeamsForHouseholdInOrg(ctx context.Context, arg ListTeamsForHouseholdInOrgParams) ([]ListTeamsForHouseholdInOrgRow, error) {
+	rows, err := q.db.Query(ctx, listTeamsForHouseholdInOrg, arg.OrganizationID, arg.PersonID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []ListTeamsForHouseholdInOrgRow
+	for rows.Next() {
+		var i ListTeamsForHouseholdInOrgRow
+		if err := rows.Scan(
+			&i.ID,
+			&i.OrganizationID,
+			&i.Name,
+			&i.AgeGroup,
+			&i.Season,
+			&i.CreatedAt,
+			&i.UpdatedAt,
+			&i.SyncAccountID,
+			&i.Payload,
+			&i.Deleted,
+			&i.Seq,
+			&i.ActiveRosterCount,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
 const listTeamsForPerson = `-- name: ListTeamsForPerson :many
 SELECT t.id AS team_id, t.name AS team_name, r.jersey_number, r.position, r.joined_on, r.left_on
 FROM roster_memberships r
@@ -354,6 +428,30 @@ func (q *Queries) ListTeamsInOrg(ctx context.Context, organizationID uuid.UUID) 
 		return nil, err
 	}
 	return items, nil
+}
+
+const teamVisibleToHousehold = `-- name: TeamVisibleToHousehold :one
+SELECT EXISTS (
+    SELECT 1 FROM roster_memberships r
+     WHERE r.team_id = $1
+       AND r.left_on IS NULL
+       AND (r.person_id = $2
+            OR r.person_id IN (SELECT g.child_person_id FROM guardianships g
+                                WHERE g.guardian_person_id = $2))
+)
+`
+
+type TeamVisibleToHouseholdParams struct {
+	TeamID   uuid.UUID `json:"team_id"`
+	PersonID uuid.UUID `json:"person_id"`
+}
+
+// The single-team form of ListTeamsForHouseholdInOrg, for reads keyed on a team id.
+func (q *Queries) TeamVisibleToHousehold(ctx context.Context, arg TeamVisibleToHouseholdParams) (bool, error) {
+	row := q.db.QueryRow(ctx, teamVisibleToHousehold, arg.TeamID, arg.PersonID)
+	var exists bool
+	err := row.Scan(&exists)
+	return exists, err
 }
 
 const updateTeam = `-- name: UpdateTeam :one

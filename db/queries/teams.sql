@@ -63,3 +63,34 @@ FROM roster_memberships r
 JOIN teams t ON t.id = r.team_id
 WHERE r.person_id = $1
 ORDER BY r.joined_on DESC;
+
+-- name: ListTeamsForHouseholdInOrg :many
+-- The teams a parent or player may see: those in this organization that they, or a
+-- child they are the guardian of, are actively rostered on. It is GET /teams for a
+-- scoped caller — the org-wide ListTeamsInOrg is a staff query, and answering it for a
+-- parent would hand them the club's whole team list.
+SELECT t.*,
+    (SELECT count(*) FROM roster_memberships r WHERE r.team_id = t.id AND r.left_on IS NULL)::bigint AS active_roster_count
+FROM teams t
+WHERE t.organization_id = @organization_id
+  AND t.deleted = false
+  AND EXISTS (
+      SELECT 1 FROM roster_memberships r
+       WHERE r.team_id = t.id
+         AND r.left_on IS NULL
+         AND (r.person_id = @person_id
+              OR r.person_id IN (SELECT g.child_person_id FROM guardianships g
+                                  WHERE g.guardian_person_id = @person_id))
+  )
+ORDER BY t.name ASC;
+
+-- name: TeamVisibleToHousehold :one
+-- The single-team form of ListTeamsForHouseholdInOrg, for reads keyed on a team id.
+SELECT EXISTS (
+    SELECT 1 FROM roster_memberships r
+     WHERE r.team_id = @team_id
+       AND r.left_on IS NULL
+       AND (r.person_id = @person_id
+            OR r.person_id IN (SELECT g.child_person_id FROM guardianships g
+                                WHERE g.guardian_person_id = @person_id))
+);

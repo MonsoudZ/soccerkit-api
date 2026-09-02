@@ -6,6 +6,7 @@ import (
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5/pgtype"
 
+	"github.com/monsoudz/soccerkit-api/internal/authz"
 	"github.com/monsoudz/soccerkit-api/internal/store"
 )
 
@@ -54,6 +55,93 @@ type MembershipView struct {
 	OrganizationName string    `json:"organizationName"`
 	OrganizationKind string    `json:"organizationKind"`
 	Role             string    `json:"role"`
+}
+
+// ---- roles & access ------------------------------------------------------
+
+// RoleInfo is one row of the published role catalogue (GET /roles): what the role is
+// called, what it means, and the exact capabilities it carries. Capabilities are sent
+// as strings rather than a fixed set of booleans so a new one appears in the client's
+// hands the day it is defined, without a wire change.
+type RoleInfo struct {
+	Role         string   `json:"role"`
+	Label        string   `json:"label"`
+	Description  string   `json:"description"`
+	Rank         int      `json:"rank"`
+	Capabilities []string `json:"capabilities"`
+}
+
+func roleInfoDTO(r authz.Role) RoleInfo {
+	return RoleInfo{
+		Role: string(r), Label: r.Label(), Description: r.Description(), Rank: r.Rank(),
+		Capabilities: capabilityNames(r.Capabilities()),
+	}
+}
+
+// Access is what the caller may do in the organization they are acting in — the union
+// of their roles there, not one role. `scope` says how far their reads reach: "org" for
+// staff, "own" for a parent or player, who see their own household only.
+type Access struct {
+	OrganizationID uuid.UUID `json:"organizationId"`
+	Roles          []string  `json:"roles"`
+	Capabilities   []string  `json:"capabilities"`
+	Scope          string    `json:"scope"`
+	GrantableRoles []string  `json:"grantableRoles"`
+}
+
+func accessDTO(oc orgContext) Access {
+	return Access{
+		OrganizationID: oc.orgID,
+		Roles:          roleNames(oc.roles.Roles()),
+		Capabilities:   capabilityNames(oc.roles.Capabilities()),
+		Scope:          string(oc.scope()),
+		GrantableRoles: roleNames(oc.roles.GrantableRoles()),
+	}
+}
+
+// OrgMember is one person in an organization with every role they hold there. The solo
+// coach holds three and is one member, not three rows.
+type OrgMember struct {
+	PersonID    uuid.UUID `json:"personId"`
+	DisplayName string    `json:"displayName"`
+	Email       *string   `json:"email"`
+	Roles       []string  `json:"roles"`
+	JoinedAt    string    `json:"joinedAt"`
+}
+
+func memberDTO(m store.ListOrgMembersRow) OrgMember {
+	return OrgMember{
+		PersonID: m.PersonID, DisplayName: m.DisplayName, Email: m.Email,
+		Roles:    roleNames(authz.NewSet(m.Roles...).Roles()),
+		JoinedAt: rfc3339(m.JoinedAt),
+	}
+}
+
+// MemberRoles is what a grant or revoke answers with: the person's roles as they stand
+// after the write.
+type MemberRoles struct {
+	PersonID       uuid.UUID `json:"personId"`
+	OrganizationID uuid.UUID `json:"organizationId"`
+	Roles          []string  `json:"roles"`
+}
+
+// roleNames and capabilityNames render the typed values onto the wire. Both always
+// produce an array, never null: a client that has to distinguish "no roles" from
+// "missing" has been handed a bug rather than a value.
+func roleNames(roles []authz.Role) []string {
+	out := make([]string, 0, len(roles))
+	for _, r := range roles {
+		out = append(out, string(r))
+	}
+	return out
+}
+
+func capabilityNames(caps []authz.Capability) []string {
+	out := make([]string, 0, len(caps))
+	for _, c := range caps {
+		out = append(out, string(c))
+	}
+	return out
 }
 
 // Me bundles the authenticated person with their memberships (orgs + roles).
