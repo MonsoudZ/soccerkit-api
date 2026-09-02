@@ -120,6 +120,10 @@ func do(t *testing.T, method, path, token string, payload any) resp {
 	return out
 }
 
+// newRecorder is httptest's recorder, used by the few tests that drive the router
+// directly rather than through the shared test server.
+func newRecorder() *httptest.ResponseRecorder { return httptest.NewRecorder() }
+
 // signInCoach creates (or resumes) a coach the only way anyone gets an account — Sign
 // in with Apple — and returns (accessToken, personID). The Apple subject is derived from
 // the address so each test coach is distinct and stable across calls, and the identity

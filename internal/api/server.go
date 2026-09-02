@@ -2,6 +2,7 @@
 package api
 
 import (
+	"context"
 	"log"
 	"net/http"
 	"strings"
@@ -66,6 +67,7 @@ func (s *Server) Router() http.Handler {
 	}))
 
 	r.Get("/health", s.handleHealth)
+	r.Get("/ready", s.handleReady)
 	r.Get("/openapi.yaml", s.handleOpenAPISpec)
 	r.Get("/docs", s.handleDocs)
 
@@ -179,8 +181,36 @@ func (s *Server) clientIP() func(http.Handler) http.Handler {
 	return middleware.ClientIPFromXFF(s.cfg.TrustedProxies...)
 }
 
+// handleHealth answers whether this process is running. It deliberately touches
+// nothing: a liveness check that can fail on a dependency asks a supervisor to restart a
+// process over a problem restarting will not fix.
 func (s *Server) handleHealth(w http.ResponseWriter, _ *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})
+}
+
+// handleReady answers whether this process can serve a request, which is the question a
+// load balancer is really asking and the one /health cannot answer.
+//
+// database.Connect pings at boot, so an unreachable database used to stop a process from
+// starting — and that was the whole of it. A database that went away afterwards (a
+// failover, a rotated credential, an exhausted pool) left /health saying "ok" while every
+// request returned 500, with nothing in the platform's control loop able to tell.
+//
+// The timeout is short and separate from the request's: a readiness probe that hangs is
+// a readiness probe that has already failed, and it must not sit in the pool's queue
+// behind the very saturation it is meant to report.
+func (s *Server) handleReady(w http.ResponseWriter, r *http.Request) {
+	ctx, cancel := context.WithTimeout(r.Context(), 2*time.Second)
+	defer cancel()
+
+	if err := s.pool.Ping(ctx); err != nil {
+		log.Printf("readiness: database unreachable: %v", err)
+		writeJSON(w, http.StatusServiceUnavailable, map[string]string{
+			"status": "unavailable", "reason": "database",
+		})
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]string{"status": "ready"})
 }
 
 func splitTrim(s string) []string {

@@ -23,8 +23,32 @@ paths:
   /health:
     get:
       tags: [system]
-      summary: Liveness probe
+      summary: Liveness probe — is this process running?
+      description: >
+        Touches nothing and always answers 200 while the process is up. Use it for a
+        supervisor's restart decision. Do NOT use it for load-balancer membership: it
+        cannot tell you whether the process can serve a request, and a database that
+        goes away after boot leaves it answering OK while every request fails.
       responses: { "200": { description: OK } }
+
+  /ready:
+    get:
+      tags: [system]
+      summary: Readiness probe — can this process serve a request?
+      description: >
+        Pings the database under a short timeout. This is the one a load balancer should
+        use to decide whether to send traffic here.
+      responses:
+        "200": { description: Ready }
+        "503":
+          description: A dependency is unreachable; do not route traffic here
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  status: { type: string }
+                  reason: { type: string }
 
   /api/v1/auth/refresh:
     post:
