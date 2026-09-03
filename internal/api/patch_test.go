@@ -247,3 +247,70 @@ func TestOrganizationRename(t *testing.T) {
 		t.Fatalf("renaming someone else's org must be refused, got 200 %s", s.raw)
 	}
 }
+
+// TestTeamCreatedOverRESTReachesTheApp is the create-side counterpart to
+// TestTeamEditReachesTheApp. A REST insert used to leave sync_account_id NULL, and
+// ListSyncChangesSince scopes every branch to an account, so a team made this way never
+// reached a phone at all.
+//
+// The payload assertions are the load-bearing part. Swift's Codable throws on a missing
+// required key and loses the whole record, so a team that syncs but cannot be decoded is
+// no better than one that never arrives -- and worse, because the failure surfaces on the
+// device as "Unexpected server response". The keys below are what Models/Team.swift
+// decodes with `decode` rather than `decodeIfPresent`.
+func TestTeamCreatedOverRESTReachesTheApp(t *testing.T) {
+	resetDB(t)
+	coach, _ := signInCoach(t, "restcreate@e.com")
+
+	created := do(t, http.MethodPost, "/api/v1/teams", coach, map[string]any{
+		"name": "U11 Rovers", "ageGroup": "U11", "season": "2026",
+	})
+	if created.status != http.StatusCreated {
+		t.Fatalf("create team: %d %s", created.status, created.raw)
+	}
+	teamID := created.body["id"].(string)
+
+	payload := payloadOf(t, pullSync(t, coach, ""), "Team", teamID)
+
+	// Every key Team's decoder requires, or the app loses the record.
+	for _, key := range []string{"id", "name", "ageGroup", "season", "accentName"} {
+		if _, ok := payload[key]; !ok {
+			t.Errorf("Team requires %q; the payload has %v", key, payload)
+		}
+	}
+	if payload["id"] != teamID {
+		t.Errorf("the payload id must match the record id: %v vs %s", payload["id"], teamID)
+	}
+	if payload["name"] != "U11 Rovers" || payload["ageGroup"] != "U11" || payload["season"] != "2026" {
+		t.Errorf("payload does not carry what was created: %v", payload)
+	}
+	if payload["accentName"] == "" || payload["accentName"] == nil {
+		t.Errorf("accentName has no default in the app's decoder, so it must be set: %v", payload)
+	}
+}
+
+// TestTeamCreatedWithoutOptionalsIsStillDecodable covers the nullable columns. ageGroup
+// and season are optional over REST and required by the app, so they are written as ""
+// rather than omitted -- a missing key throws on the far side, and null fails to decode
+// into a non-optional String.
+func TestTeamCreatedWithoutOptionalsIsStillDecodable(t *testing.T) {
+	resetDB(t)
+	coach, _ := signInCoach(t, "restcreatebare@e.com")
+
+	created := do(t, http.MethodPost, "/api/v1/teams", coach, map[string]any{"name": "Bare"})
+	if created.status != http.StatusCreated {
+		t.Fatalf("create team: %d %s", created.status, created.raw)
+	}
+	payload := payloadOf(t, pullSync(t, coach, ""), "Team", created.body["id"].(string))
+
+	for _, key := range []string{"ageGroup", "season"} {
+		v, ok := payload[key]
+		if !ok {
+			t.Errorf("%q must be present even when unset, or the app throws: %v", key, payload)
+			continue
+		}
+		if _, isString := v.(string); !isString {
+			t.Errorf("%q must be a string, not %#v — null fails a non-optional String", key, v)
+		}
+	}
+}

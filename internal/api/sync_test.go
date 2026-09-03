@@ -290,34 +290,79 @@ func TestSyncTombstoneCannotDeleteAnotherAccountsRow(t *testing.T) {
 	}
 }
 
-// TestSyncCannotAdoptRESTCreatedRow guards the separation 0002_sync.sql describes:
-// rows written through the REST API have a NULL sync_account_id and sync may not
-// claim them.
-func TestSyncCannotAdoptRESTCreatedRow(t *testing.T) {
+// TestRESTCreatedTeamIsOwnedByItsCreator replaces an earlier test that asserted a
+// REST-created row could not be adopted by anyone, its creator included.
+//
+// That assertion was right while the two write paths were separate: a REST insert left
+// sync_account_id NULL, the row was invisible to sync, and any push naming its id
+// conflicted. Creating over REST now puts the row in the creator's own stream so their
+// app can go on editing it, which is the point of the change -- so the old assertion is
+// wrong now rather than broken.
+//
+// The half that still has to hold, and that now carries the weight, is ownership: an id
+// belonging to one account is not writable by another. That was only tested for
+// sync-created rows (TestSyncPushCannotWriteAnotherAccountsRow), and a REST-created row
+// is a second way to reach the same guard -- one that did not need guarding while those
+// rows had no owner at all.
+func TestRESTCreatedTeamIsOwnedByItsCreator(t *testing.T) {
 	resetDB(t)
 	ctx := context.Background()
-	coach, _ := signInCoach(t, "rest-owner@e.com")
+	coach, coachPerson := signInCoach(t, "rest-owner@e.com")
+	stranger := appleToken(t, "sub-rest-stranger", "rest-stranger@example.com")
 
-	team := do(t, http.MethodPost, "/api/v1/teams", coach, map[string]any{"name": "REST Team"})
+	team := do(t, http.MethodPost, "/api/v1/teams", coach, map[string]any{
+		"name": "REST Team", "ageGroup": "U12", "season": "2026",
+	})
+	if team.status != http.StatusCreated {
+		t.Fatalf("create team: %d %s", team.status, team.raw)
+	}
 	teamID, _ := team.body["id"].(string)
 
-	push := do(t, http.MethodPost, "/api/v1/sync", coach, map[string]any{
-		"upserts": []map[string]any{
-			{"type": "Team", "id": teamID, "payload": map[string]any{"name": "Claimed"}},
-		},
-	})
-	if conflicts, _ := push.body["conflicts"].([]any); len(conflicts) != 1 {
-		t.Fatalf("REST-created row should not be adoptable, conflicts=%v", push.body["conflicts"])
-	}
-
-	var name string
 	var owner *string
 	if err := testPool.QueryRow(ctx,
-		`SELECT name, sync_account_id::text FROM teams WHERE id = $1`, teamID).Scan(&name, &owner); err != nil {
+		`SELECT sync_account_id::text FROM teams WHERE id = $1`, teamID).Scan(&owner); err != nil {
 		t.Fatal(err)
 	}
-	if name != "REST Team" || owner != nil {
-		t.Errorf("REST row changed: name=%q owner=%v", name, owner)
+	if owner == nil || *owner != coachPerson {
+		t.Fatalf("a REST-created team belongs to its creator's stream; sync_account_id is %v", owner)
+	}
+
+	// A stranger naming the id is refused and told, exactly as for a synced row.
+	push := do(t, http.MethodPost, "/api/v1/sync", stranger, map[string]any{
+		"upserts": []map[string]any{
+			{"type": "Team", "id": teamID, "payload": map[string]any{"name": "PWNED"}},
+		},
+	})
+	if push.status != http.StatusOK {
+		t.Fatalf("stranger push: %d %s", push.status, push.raw)
+	}
+	if conflicts, _ := push.body["conflicts"].([]any); len(conflicts) != 1 {
+		t.Fatalf("a stranger must not claim a REST-created row, conflicts=%v", push.body["conflicts"])
+	}
+	var name string
+	if err := testPool.QueryRow(ctx,
+		`SELECT name FROM teams WHERE id = $1`, teamID).Scan(&name); err != nil {
+		t.Fatal(err)
+	}
+	if name != "REST Team" {
+		t.Errorf("the row was changed by a stranger: name=%q", name)
+	}
+
+	// The creator's own device may go on editing it -- the convergence this enables.
+	own := do(t, http.MethodPost, "/api/v1/sync", coach, map[string]any{
+		"upserts": []map[string]any{
+			{"type": "Team", "id": teamID, "payload": map[string]any{"name": "Renamed On Phone"}},
+		},
+	})
+	if conflicts, _ := own.body["conflicts"].([]any); len(conflicts) != 0 {
+		t.Fatalf("the creator's own push should apply, conflicts=%v", own.body["conflicts"])
+	}
+	if err := testPool.QueryRow(ctx,
+		`SELECT name FROM teams WHERE id = $1`, teamID).Scan(&name); err != nil {
+		t.Fatal(err)
+	}
+	if name != "Renamed On Phone" {
+		t.Errorf("the creator's push did not apply: name=%q", name)
 	}
 }
 

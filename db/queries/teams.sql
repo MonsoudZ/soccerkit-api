@@ -1,6 +1,24 @@
 -- name: CreateTeam :one
-INSERT INTO teams (organization_id, name, age_group, season)
-VALUES ($1, $2, $3, $4)
+-- A team created here is a team the app can see. It used to be invisible: a REST insert
+-- left sync_account_id NULL, and ListSyncChangesSince scopes every branch to an account,
+-- so nothing this endpoint made ever reached a phone. Editing converged before creating
+-- did, which left the odd state where a web client could rename a team the app owned but
+-- not create one of its own.
+--
+-- Three columns make it visible, and all three are needed. sync_account_id puts the row
+-- in the caller's stream; seq gives a cursor something to deliver; payload is what a pull
+-- actually returns, so a row without one arrives as a null record the client cannot
+-- decode.
+--
+-- The payload is built here rather than defaulted, because Swift's Codable throws on a
+-- missing required key and takes the whole record with it. Team's decoder requires id,
+-- name, ageGroup, season and accentName -- see Models/Team.swift in the app -- so all
+-- five are written. organizationID is deliberately left out: the app reads it with
+-- decodeIfPresent and falls back to its own personal-org constant, which is the right
+-- answer for a solo coach and better than asserting a server org id the app has never
+-- seen.
+INSERT INTO teams (id, organization_id, sync_account_id, name, age_group, season, payload, seq)
+VALUES ($1, $2, $3, $4, $5, $6, $7, nextval('sync_seq'))
 RETURNING *;
 
 -- name: GetTeam :one

@@ -2,6 +2,7 @@ package api
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"net/http"
 
@@ -32,8 +33,14 @@ func (s *Server) handleCreateTeam(w http.ResponseWriter, r *http.Request) {
 		writeError(w, errValidation("name is required"))
 		return
 	}
+	// The id is minted here rather than by the column default, because the payload has
+	// to carry it and the app requires it. See CreateTeam in db/queries/teams.sql.
+	teamID := uuid.New()
+	account := personIDFrom(r.Context())
 	team, err := s.store.CreateTeam(r.Context(), store.CreateTeamParams{
-		OrganizationID: oc.orgID, Name: req.Name, AgeGroup: req.AgeGroup, Season: req.Season,
+		ID: teamID, OrganizationID: oc.orgID, SyncAccountID: &account,
+		Name: req.Name, AgeGroup: req.AgeGroup, Season: req.Season,
+		Payload: newTeamPayload(teamID, req.Name, req.AgeGroup, req.Season),
 	})
 	if err != nil {
 		writeError(w, err)
@@ -337,4 +344,35 @@ func (s *Server) handleUpdateTeam(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusOK, teamDTO(updated, int64(len(roster))))
+}
+
+// defaultTeamAccent is what the app itself gives a new team (AppStore+Entities.swift and
+// TeamFormViewModel both settle on "Teal"), so a team created over REST looks like one
+// created on the phone rather than announcing where it came from. accentName is a
+// required key on the app's side with no default in its decoder, which is why the server
+// has to have an answer at all.
+const defaultTeamAccent = "Teal"
+
+// newTeamPayload builds the record the app will decode for a team created over REST.
+//
+// It writes exactly the keys Team's decoder requires -- id, name, ageGroup, season,
+// accentName -- because Codable throws on a missing one and loses the whole team. The
+// two nullable columns are written as "" rather than null for the reason syncString
+// gives: "" is the app's spelling of empty, and null would fail to decode into a
+// non-optional String. An empty ageGroup is understood on the far side, which resolves
+// an unrecognised value to the nearest band it knows rather than throwing.
+func newTeamPayload(id uuid.UUID, name string, ageGroup, season *string) []byte {
+	payload, err := json.Marshal(map[string]any{
+		"id":         id.String(),
+		"name":       name,
+		"ageGroup":   syncString(ageGroup),
+		"season":     syncString(season),
+		"accentName": defaultTeamAccent,
+	})
+	if err != nil {
+		// Four strings and a UUID cannot fail to marshal. A nil payload would still
+		// insert; it would just pull as a record the client discards.
+		return nil
+	}
+	return payload
 }
