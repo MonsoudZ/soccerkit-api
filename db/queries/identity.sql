@@ -16,6 +16,16 @@ RETURNING *;
 SELECT * FROM persons WHERE id = $1;
 
 -- name: UpdatePerson :one
+-- Writes the record twice, for the reason UpdateTeam spells out: a pull returns
+-- `payload`, so a column-only edit never reaches the phone and is overwritten by its
+-- next push.
+--
+-- Only four of these columns are in the sync contract -- display_name, the two emergency
+-- contact fields and medical_notes are what SyncUpsertPerson projects, so they are what
+-- payload_patch may carry. given_name, family_name, birthdate, email and phone are REST's
+-- alone: no push writes them and SyncTombstonePerson deliberately spares them, so they
+-- need no propagation and must not be invented into a payload the app would not
+-- recognise.
 UPDATE persons
 SET display_name            = COALESCE(sqlc.narg('display_name'), display_name),
     given_name              = CASE WHEN sqlc.arg('set_given_name')::bool THEN sqlc.narg('given_name') ELSE given_name END,
@@ -26,6 +36,10 @@ SET display_name            = COALESCE(sqlc.narg('display_name'), display_name),
     emergency_contact_name  = CASE WHEN sqlc.arg('set_ec_name')::bool THEN sqlc.narg('ec_name') ELSE emergency_contact_name END,
     emergency_contact_phone = CASE WHEN sqlc.arg('set_ec_phone')::bool THEN sqlc.narg('ec_phone') ELSE emergency_contact_phone END,
     medical_notes           = CASE WHEN sqlc.arg('set_medical')::bool THEN sqlc.narg('medical') ELSE medical_notes END,
+    payload                 = CASE WHEN sqlc.arg('patch_payload')::bool
+                                   THEN COALESCE(payload, '{}'::jsonb) || sqlc.arg('payload_patch')::jsonb
+                                   ELSE payload END,
+    seq                     = nextval('sync_seq'),
     updated_at              = now()
 WHERE id = sqlc.arg('id')
 RETURNING *;
@@ -59,12 +73,23 @@ WHERE m.person_id = $1
 -- is sent. Without the tie-break that default is whatever Postgres happens to return.
 ORDER BY o.created_at ASC, o.id ASC;
 
--- name: ListRolesInOrg :many
-SELECT role FROM memberships WHERE person_id = $1 AND organization_id = $2;
+-- name: UpdateOrganization :one
+-- Only the name. `kind` is deliberately not editable here: handleDeleteMe deletes the
+-- caller's *personal* orgs and orphans their clubs, so flipping kind would quietly
+-- change what account deletion destroys. That is a product decision with a data-loss
+-- edge, not a field on a PATCH body.
+UPDATE organizations
+SET name = COALESCE(sqlc.narg('name'), name),
+    updated_at = now()
+WHERE id = sqlc.arg('id')
+RETURNING *;
 
--- name: HasMembership :one
+-- name: PersonHasUserAccount :one
+-- Whether this Person can sign in. PATCH /persons/{id} uses it to keep a coach's edit
+-- rights to the loginless athletes they manage, the same population POST /persons can
+-- create -- someone with an account edits their own row.
 SELECT EXISTS (
-    SELECT 1 FROM memberships WHERE person_id = $1 AND organization_id = $2
+    SELECT 1 FROM user_accounts WHERE person_id = $1
 );
 
 -- name: CreateRefreshToken :one
@@ -221,10 +246,23 @@ ON CONFLICT (id) DO NOTHING
 RETURNING *;
 
 -- name: PersonVisibleInOrg :one
--- Whether an organization may see a Person at all: they are not tombstoned, and they
--- either hold a membership in the org or are rostered on one of its live teams. The
--- roster arm matters because an athlete can be added to a team without a membership
--- row of their own.
+-- Whether the caller may see a Person at all: they are not tombstoned, and one of three
+-- things is true -- they hold a membership in the caller's org, they are rostered on one
+-- of its live teams, or the caller pushed them through sync themselves. The roster arm
+-- matters because an athlete can be added to a team without a membership row of their
+-- own.
+--
+-- The third arm was added with PATCH /persons/{id}. An athlete the app creates arrives
+-- over /v1/sync carrying no membership and no roster row -- the app keeps that structure
+-- on the phone -- so the first two arms do not see them, and every REST route keyed on a
+-- person id answered 404 for the athletes a coach actually has. That made the person
+-- endpoints reachable only for rows REST itself created.
+--
+-- It discloses nothing new: sync_account_id is set to the account that pushed the row,
+-- so this arm matches only rows the caller wrote and already holds on their own device.
+-- It is deliberately an ownership test, not an org test -- sync streams are per-account,
+-- so a second coach in the same club does not see the first coach's un-rostered
+-- athletes through it.
 SELECT EXISTS (
     SELECT 1 FROM persons p
      WHERE p.id = sqlc.arg('person_id')
@@ -236,5 +274,6 @@ SELECT EXISTS (
                       JOIN teams t ON t.id = rm.team_id
                      WHERE rm.person_id = p.id
                        AND t.organization_id = sqlc.arg('organization_id')
-                       AND t.deleted = false))
+                       AND t.deleted = false)
+         OR p.sync_account_id = sqlc.arg('viewer_person_id'))
 );

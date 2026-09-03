@@ -251,8 +251,12 @@ func (s *Server) personVisibleTo(ctx context.Context, oc orgContext, personID uu
 	if personID == personIDFrom(ctx) {
 		return nil
 	}
+	// sync_account_id is nullable, so the comparison column is a pointer. The caller is
+	// always authenticated here, so this is never the nil UUID in practice -- and a nil
+	// UUID would match no row anyway, since no account has that id.
+	viewer := personIDFrom(ctx)
 	visible, err := s.store.PersonVisibleInOrg(ctx, store.PersonVisibleInOrgParams{
-		PersonID: personID, OrganizationID: oc.orgID,
+		PersonID: personID, OrganizationID: oc.orgID, ViewerPersonID: &viewer,
 	})
 	if err != nil {
 		return err
@@ -261,4 +265,76 @@ func (s *Server) personVisibleTo(ctx context.Context, oc orgContext, personID uu
 		return errNotFound("person not found")
 	}
 	return nil
+}
+
+// updatableTeamFields is the set PATCH /teams/{id} accepts.
+var updatableTeamFields = map[string]bool{"name": true, "ageGroup": true, "season": true}
+
+// handleUpdateTeam renames a team and edits its age group and season. Teams could be
+// created and deleted over REST but never edited, so a coach who mistyped a team name
+// had to delete the team -- and its roster, games and sessions -- to fix it.
+//
+// All three fields are in the sync contract: SyncUpsertTeam projects exactly these out
+// of the app's payload. So each one is written twice, into the column this API reads and
+// into the payload a pull returns, which is what carries the edit to the phone. See
+// UpdateTeam in db/queries/teams.sql for what a column-only write would lose.
+func (s *Server) handleUpdateTeam(w http.ResponseWriter, r *http.Request) {
+	oc, err := s.requireCoach(r)
+	if err != nil {
+		writeError(w, err)
+		return
+	}
+	team, err := s.teamInOrg(r, oc)
+	if err != nil {
+		writeError(w, err)
+		return
+	}
+	raw, err := decodePatch(r, updatableTeamFields)
+	if err != nil {
+		writeError(w, err)
+		return
+	}
+
+	params := store.UpdateTeamParams{ID: team.ID}
+	patch := syncPatch{}
+	if v, ok := raw["name"]; ok {
+		name, verr := requiredString(v, "name")
+		if verr != nil {
+			writeError(w, verr)
+			return
+		}
+		params.Name = &name
+		patch.set("name", name)
+	}
+	if v, ok := raw["ageGroup"]; ok {
+		ageGroup, verr := optionalString(v, "ageGroup")
+		if verr != nil {
+			writeError(w, verr)
+			return
+		}
+		params.SetAgeGroup, params.AgeGroup = true, ageGroup
+		patch.set("ageGroup", syncString(ageGroup))
+	}
+	if v, ok := raw["season"]; ok {
+		season, verr := optionalString(v, "season")
+		if verr != nil {
+			writeError(w, verr)
+			return
+		}
+		params.SetSeason, params.Season = true, season
+		patch.set("season", syncString(season))
+	}
+	params.PayloadPatch, params.PatchPayload = patch.marshal()
+
+	updated, err := s.store.UpdateTeam(r.Context(), params)
+	if err != nil {
+		writeError(w, err)
+		return
+	}
+	roster, err := s.store.ListActiveRoster(r.Context(), updated.ID)
+	if err != nil {
+		writeError(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, teamDTO(updated, int64(len(roster))))
 }

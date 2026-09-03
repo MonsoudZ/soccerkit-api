@@ -351,16 +351,52 @@ func (s *Server) validateSyncPayload(account uuid.UUID, rec syncRecord) error {
 	return nil
 }
 
+// projectedSyncTypes are the record types this service projects into a domain table of
+// its own, with columns pulled out of the payload. Everything else rides in
+// sync_documents as an opaque document, on purpose — see validateSyncKey — so this is
+// the one place "the seven projected types" is written down rather than left implied by
+// the case labels below.
+//
+// All seven key their table on a UUID, which is what lets applyUpsert and applyDelete
+// parse the id once before routing rather than repeating the same four lines in every
+// branch. The two must agree: a type listed here that no branch handles would otherwise
+// fall through to sync_documents and split that type's records across two tables, so
+// both functions end by returning an error instead of routing it anywhere.
+var projectedSyncTypes = map[string]bool{
+	"Team": true, "Drill": true, "Session": true, "Person": true,
+	"Player": true, "Event": true, "Diagram": true,
+}
+
+// syncUUID parses the id of a projected record, naming its type in the error. The
+// message says which record was rejected for the same reason syncRecordError's does: an
+// offline-first client retries the batch it failed to push, so an error it cannot
+// attribute to one record stops that device syncing with nothing to act on.
+func syncUUID(recType, id string) (uuid.UUID, error) {
+	parsed, err := uuid.Parse(id)
+	if err != nil {
+		return uuid.Nil, errValidation(recType + " id must be a UUID")
+	}
+	return parsed, nil
+}
+
 // applyUpsert routes one record to its projected table, or to sync_documents. It
 // reports whether the write landed: an upsert against a row owned by another account
 // matches nothing and returns false.
 func (s *Server) applyUpsert(ctx context.Context, q *store.Queries, account, orgID uuid.UUID, rec syncRecord) (bool, error) {
+	// Documents first: sync_documents keys on the client's string id exactly as it
+	// arrives, so it is the one route that neither needs nor may be made to parse a UUID.
+	if !projectedSyncTypes[rec.Type] {
+		return applied(q.SyncUpsertDocument(ctx, store.SyncUpsertDocumentParams{
+			SyncAccountID: account, Type: rec.Type, ID: rec.ID, Payload: rec.Payload,
+		}))
+	}
+	id, err := syncUUID(rec.Type, rec.ID)
+	if err != nil {
+		return false, err
+	}
+
 	switch rec.Type {
 	case "Team":
-		id, err := uuid.Parse(rec.ID)
-		if err != nil {
-			return false, errValidation("Team id must be a UUID")
-		}
 		var p struct {
 			Name     string `json:"name"`
 			AgeGroup string `json:"ageGroup"`
@@ -373,10 +409,6 @@ func (s *Server) applyUpsert(ctx context.Context, q *store.Queries, account, org
 			Payload: rec.Payload,
 		}))
 	case "Drill":
-		id, err := uuid.Parse(rec.ID)
-		if err != nil {
-			return false, errValidation("Drill id must be a UUID")
-		}
 		var p struct {
 			Title      string `json:"title"`
 			FieldSetup string `json:"fieldSetup"`
@@ -387,10 +419,6 @@ func (s *Server) applyUpsert(ctx context.Context, q *store.Queries, account, org
 			Name: p.Title, Description: nilIfEmpty(p.FieldSetup), Payload: rec.Payload,
 		}))
 	case "Session":
-		id, err := uuid.Parse(rec.ID)
-		if err != nil {
-			return false, errValidation("Session id must be a UUID")
-		}
 		var p struct {
 			Title     string `json:"title"`
 			Objective string `json:"objective"`
@@ -401,10 +429,6 @@ func (s *Server) applyUpsert(ctx context.Context, q *store.Queries, account, org
 			Title: p.Title, Notes: nilIfEmpty(p.Objective), Payload: rec.Payload,
 		}))
 	case "Person":
-		id, err := uuid.Parse(rec.ID)
-		if err != nil {
-			return false, errValidation("Person id must be a UUID")
-		}
 		var p struct {
 			Name                  string `json:"name"`
 			EmergencyContactName  string `json:"emergencyContactName"`
@@ -419,10 +443,6 @@ func (s *Server) applyUpsert(ctx context.Context, q *store.Queries, account, org
 			MedicalNotes:          nilIfEmpty(p.MedicalNotes), Payload: rec.Payload,
 		}))
 	case "Player":
-		id, err := uuid.Parse(rec.ID)
-		if err != nil {
-			return false, errValidation("Player id must be a UUID")
-		}
 		var p struct {
 			PersonID string `json:"personID"`
 			Name     string `json:"name"`
@@ -436,10 +456,6 @@ func (s *Server) applyUpsert(ctx context.Context, q *store.Queries, account, org
 			Payload: rec.Payload,
 		}))
 	case "Event":
-		id, err := uuid.Parse(rec.ID)
-		if err != nil {
-			return false, errValidation("Event id must be a UUID")
-		}
 		var p struct {
 			TeamID string `json:"teamID"`
 			Title  string `json:"title"`
@@ -451,10 +467,6 @@ func (s *Server) applyUpsert(ctx context.Context, q *store.Queries, account, org
 			Title: nilIfEmpty(p.Title), Kind: nilIfEmpty(p.Kind), Payload: rec.Payload,
 		}))
 	case "Diagram":
-		id, err := uuid.Parse(rec.ID)
-		if err != nil {
-			return false, errValidation("Diagram id must be a UUID")
-		}
 		var p struct {
 			TeamID string `json:"teamID"`
 			Title  string `json:"title"`
@@ -464,64 +476,41 @@ func (s *Server) applyUpsert(ctx context.Context, q *store.Queries, account, org
 			ID: id, SyncAccountID: &account, TeamID: parseUUIDPtr(p.TeamID),
 			Title: nilIfEmpty(p.Title), Payload: rec.Payload,
 		}))
-	default:
-		return applied(q.SyncUpsertDocument(ctx, store.SyncUpsertDocumentParams{
-			SyncAccountID: account, Type: rec.Type, ID: rec.ID, Payload: rec.Payload,
-		}))
 	}
+	return false, fmt.Errorf("sync: %q is listed as a projected type but has no upsert route", rec.Type)
 }
 
 // applyDelete tombstones one key in its projected table, or in sync_documents. Like
-// applyUpsert it reports whether the row was actually tombstoned.
+// applyUpsert it reports whether the row was actually tombstoned, and routes the same
+// way — see projectedSyncTypes.
 func (s *Server) applyDelete(ctx context.Context, q *store.Queries, account uuid.UUID, key syncKey) (bool, error) {
-	switch key.Type {
-	case "Team":
-		id, err := uuid.Parse(key.ID)
-		if err != nil {
-			return false, errValidation("Team id must be a UUID")
-		}
-		return applied(q.SyncTombstoneTeam(ctx, store.SyncTombstoneTeamParams{ID: id, SyncAccountID: &account}))
-	case "Drill":
-		id, err := uuid.Parse(key.ID)
-		if err != nil {
-			return false, errValidation("Drill id must be a UUID")
-		}
-		return applied(q.SyncTombstoneDrill(ctx, store.SyncTombstoneDrillParams{ID: id, SyncAccountID: &account}))
-	case "Session":
-		id, err := uuid.Parse(key.ID)
-		if err != nil {
-			return false, errValidation("Session id must be a UUID")
-		}
-		return applied(q.SyncTombstoneSession(ctx, store.SyncTombstoneSessionParams{ID: id, SyncAccountID: &account}))
-	case "Person":
-		id, err := uuid.Parse(key.ID)
-		if err != nil {
-			return false, errValidation("Person id must be a UUID")
-		}
-		return applied(q.SyncTombstonePerson(ctx, store.SyncTombstonePersonParams{ID: id, SyncAccountID: &account}))
-	case "Player":
-		id, err := uuid.Parse(key.ID)
-		if err != nil {
-			return false, errValidation("Player id must be a UUID")
-		}
-		return applied(q.SyncTombstonePlayer(ctx, store.SyncTombstonePlayerParams{ID: id, SyncAccountID: &account}))
-	case "Event":
-		id, err := uuid.Parse(key.ID)
-		if err != nil {
-			return false, errValidation("Event id must be a UUID")
-		}
-		return applied(q.SyncTombstoneEvent(ctx, store.SyncTombstoneEventParams{ID: id, SyncAccountID: &account}))
-	case "Diagram":
-		id, err := uuid.Parse(key.ID)
-		if err != nil {
-			return false, errValidation("Diagram id must be a UUID")
-		}
-		return applied(q.SyncTombstoneDiagram(ctx, store.SyncTombstoneDiagramParams{ID: id, SyncAccountID: &account}))
-	default:
+	if !projectedSyncTypes[key.Type] {
 		return applied(q.SyncTombstoneDocument(ctx, store.SyncTombstoneDocumentParams{
 			SyncAccountID: account, Type: key.Type, ID: key.ID,
 		}))
 	}
+	id, err := syncUUID(key.Type, key.ID)
+	if err != nil {
+		return false, err
+	}
+
+	switch key.Type {
+	case "Team":
+		return applied(q.SyncTombstoneTeam(ctx, store.SyncTombstoneTeamParams{ID: id, SyncAccountID: &account}))
+	case "Drill":
+		return applied(q.SyncTombstoneDrill(ctx, store.SyncTombstoneDrillParams{ID: id, SyncAccountID: &account}))
+	case "Session":
+		return applied(q.SyncTombstoneSession(ctx, store.SyncTombstoneSessionParams{ID: id, SyncAccountID: &account}))
+	case "Person":
+		return applied(q.SyncTombstonePerson(ctx, store.SyncTombstonePersonParams{ID: id, SyncAccountID: &account}))
+	case "Player":
+		return applied(q.SyncTombstonePlayer(ctx, store.SyncTombstonePlayerParams{ID: id, SyncAccountID: &account}))
+	case "Event":
+		return applied(q.SyncTombstoneEvent(ctx, store.SyncTombstoneEventParams{ID: id, SyncAccountID: &account}))
+	case "Diagram":
+		return applied(q.SyncTombstoneDiagram(ctx, store.SyncTombstoneDiagramParams{ID: id, SyncAccountID: &account}))
+	}
+	return false, fmt.Errorf("sync: %q is listed as a projected type but has no delete route", key.Type)
 }
 
 // syncRecordError names the record a failed statement was applying, and turns the one

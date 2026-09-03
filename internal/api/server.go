@@ -105,6 +105,7 @@ func (s *Server) Router() http.Handler {
 			r.Route("/persons", func(r chi.Router) {
 				r.Post("/", s.handleCreatePerson)
 				r.Get("/{id}", s.handleGetPerson)
+				r.Patch("/{id}", s.handleUpdatePerson)
 				r.Get("/{id}/instances", s.handleListPersonInstances)
 				r.Get("/{id}/aggregate", s.handlePersonAggregate)
 			})
@@ -114,6 +115,7 @@ func (s *Server) Router() http.Handler {
 				r.Get("/", s.handleListTeams)
 				r.Post("/", s.handleCreateTeam)
 				r.Get("/{id}", s.handleGetTeam)
+				r.Patch("/{id}", s.handleUpdateTeam)
 				r.Delete("/{id}", s.handleDeleteTeam)
 				r.Post("/{id}/roster", s.handleAddRoster)
 				r.Delete("/{id}/roster/{personId}", s.handleEndRoster)
@@ -124,6 +126,11 @@ func (s *Server) Router() http.Handler {
 			r.Route("/games", func(r chi.Router) {
 				r.Get("/{id}", s.handleGetGame)
 				r.Patch("/{id}", s.handleUpdateGame)
+			})
+
+			// The club itself (rename only -- see updatableOrganizationFields).
+			r.Route("/organizations", func(r chi.Router) {
+				r.Patch("/{id}", s.handleUpdateOrganization)
 			})
 
 			// Training content

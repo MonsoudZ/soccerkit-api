@@ -106,22 +106,42 @@ func (s *Server) handleCreateSession(w http.ResponseWriter, r *http.Request) {
 		}
 		scheduled = timestamptz(t)
 	}
-	// Pre-validate any referenced drills belong to the org.
-	for _, b := range req.Blocks {
-		if b.DrillID != nil {
-			id, perr := parseUUIDParam(*b.DrillID, "drillId")
-			if perr != nil {
-				writeError(w, perr)
-				return
-			}
-			drill, gerr := s.store.GetDrill(r.Context(), id)
-			if errors.Is(gerr, pgx.ErrNoRows) || (gerr == nil && drill.OrganizationID != oc.orgID) {
-				writeError(w, errBadRequest("drillId does not reference a drill in your organization"))
-				return
-			} else if gerr != nil {
-				writeError(w, gerr)
-				return
-			}
+	// Parse each block's drill id once, here, and carry the result to the insert below.
+	// That insert used to re-parse the same string and drop the error, which was only
+	// safe because of this loop thirty lines earlier — a correctness argument that had
+	// to be reconstructed from two places to be checked.
+	blockDrillIDs := make([]*uuid.UUID, len(req.Blocks))
+	seen := make(map[uuid.UUID]bool, len(req.Blocks))
+	var referenced []uuid.UUID
+	for i, b := range req.Blocks {
+		if b.DrillID == nil {
+			continue
+		}
+		id, perr := parseUUIDParam(*b.DrillID, "drillId")
+		if perr != nil {
+			writeError(w, perr)
+			return
+		}
+		blockDrillIDs[i] = &id
+		if !seen[id] {
+			seen[id] = true
+			referenced = append(referenced, id)
+		}
+	}
+	// Every referenced drill has to belong to the org, asked in one round trip rather
+	// than one GetDrill per block: a ten-block session was ten queries before the
+	// transaction even opened, and the answer is the same for all of them.
+	if len(referenced) > 0 {
+		found, cerr := s.store.CountDrillsInOrgByIDs(r.Context(), store.CountDrillsInOrgByIDsParams{
+			Ids: referenced, OrganizationID: oc.orgID,
+		})
+		if cerr != nil {
+			writeError(w, cerr)
+			return
+		}
+		if int(found) != len(referenced) {
+			writeError(w, errBadRequest("drillId does not reference a drill in your organization"))
+			return
 		}
 	}
 
@@ -144,13 +164,8 @@ func (s *Server) handleCreateSession(w http.ResponseWriter, r *http.Request) {
 	}
 	blocks := make([]SessionBlock, 0, len(req.Blocks))
 	for i, b := range req.Blocks {
-		var drillID *uuid.UUID
-		if b.DrillID != nil {
-			id, _ := uuid.Parse(*b.DrillID)
-			drillID = &id
-		}
 		created, berr := q.CreateSessionBlock(r.Context(), store.CreateSessionBlockParams{
-			SessionID: session.ID, DrillID: drillID, Title: b.Title,
+			SessionID: session.ID, DrillID: blockDrillIDs[i], Title: b.Title,
 			DurationMin: b.DurationMin, Position: int32(i), Notes: b.Notes,
 		})
 		if berr != nil {
@@ -204,24 +219,12 @@ func (s *Server) handleGetSession(w http.ResponseWriter, r *http.Request) {
 		writeError(w, err)
 		return
 	}
-	id, err := pathUUID(r, "id")
+	session, err := s.sessionInOrg(r, oc)
 	if err != nil {
 		writeError(w, err)
 		return
 	}
-	session, err := s.store.GetSession(r.Context(), id)
-	if errors.Is(err, pgx.ErrNoRows) {
-		writeError(w, errNotFound("session not found"))
-		return
-	} else if err != nil {
-		writeError(w, err)
-		return
-	}
-	if session.OrganizationID != oc.orgID {
-		writeError(w, errForbidden("that session is not in your organization"))
-		return
-	}
-	blockRows, err := s.store.ListSessionBlocks(r.Context(), id)
+	blockRows, err := s.store.ListSessionBlocks(r.Context(), session.ID)
 	if err != nil {
 		writeError(w, err)
 		return
@@ -239,28 +242,37 @@ func (s *Server) handleDeleteSession(w http.ResponseWriter, r *http.Request) {
 		writeError(w, err)
 		return
 	}
-	id, err := pathUUID(r, "id")
+	session, err := s.sessionInOrg(r, oc)
 	if err != nil {
 		writeError(w, err)
 		return
 	}
-	session, err := s.store.GetSession(r.Context(), id)
-	if errors.Is(err, pgx.ErrNoRows) {
-		writeError(w, errNotFound("session not found"))
-		return
-	} else if err != nil {
-		writeError(w, err)
-		return
-	}
-	if session.OrganizationID != oc.orgID {
-		writeError(w, errForbidden("that session is not in your organization"))
-		return
-	}
-	if err := s.store.DeleteSession(r.Context(), id); err != nil {
+	if err := s.store.DeleteSession(r.Context(), session.ID); err != nil {
 		writeError(w, err)
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]bool{"ok": true})
+}
+
+// sessionInOrg loads the session named in the path and verifies it belongs to the
+// caller's active organization. Sessions were the one resource without such a helper,
+// so both routes that read one made the load / 404 / org-compare by hand; teams have
+// teamInOrg, games gameInOrg and templates templateFor.
+func (s *Server) sessionInOrg(r *http.Request, oc orgContext) (store.Session, error) {
+	id, err := pathUUID(r, "id")
+	if err != nil {
+		return store.Session{}, err
+	}
+	session, err := s.store.GetSession(r.Context(), id)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return store.Session{}, errNotFound("session not found")
+	} else if err != nil {
+		return store.Session{}, err
+	}
+	if session.OrganizationID != oc.orgID {
+		return store.Session{}, errForbidden("that session is not in your organization")
+	}
+	return session, nil
 }
 
 // optionalTeamInOrg parses an optional team id and verifies org ownership.

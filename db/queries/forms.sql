@@ -22,9 +22,6 @@ RETURNING *;
 -- name: ListFormFields :many
 SELECT * FROM form_fields WHERE template_id = $1 ORDER BY position, key;
 
--- name: GetFormFieldByKey :one
-SELECT * FROM form_fields WHERE template_id = $1 AND key = $2;
-
 -- Instances & answers -------------------------------------------------------
 
 -- name: CreateFormInstance :one

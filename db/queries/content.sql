@@ -8,6 +8,16 @@ RETURNING *;
 -- name: GetDrill :one
 SELECT * FROM drills WHERE id = $1 AND deleted = false;
 
+-- name: CountDrillsInOrgByIDs :one
+-- How many of these ids are live drills in this organization. handleCreateSession asks
+-- once for every drill its blocks reference and compares the answer with the number of
+-- distinct ids it asked about; fewer means at least one block points at a drill that is
+-- deleted, missing, or another org's. Counting rather than returning the rows is enough
+-- because the request is rejected as a whole, and it keeps the check to one round trip
+-- however many blocks the session has.
+SELECT count(*) FROM drills
+WHERE id = ANY(@ids::uuid[]) AND organization_id = @organization_id AND deleted = false;
+
 -- name: ListDrillsInOrg :many
 SELECT * FROM drills WHERE organization_id = $1 AND deleted = false ORDER BY name ASC;
 

@@ -117,6 +117,12 @@ func (o orgContext) hasAnyRole(roles ...string) bool {
 	return false
 }
 
+// resolveOrg answers both questions a request has — is this caller a member of the org
+// they are acting in, and what roles do they hold there — from the single
+// ListMembershipsForPerson read below. Separate HasMembership and ListRolesInOrg queries
+// existed for those two questions and were removed rather than wired: either one here
+// would be a second round-trip for rows already in hand, and a membership check that can
+// disagree with the roles it was checked alongside is worse than no second check.
 func (s *Server) resolveOrg(r *http.Request) (orgContext, error) {
 	personID := personIDFrom(r.Context())
 	memberships, err := s.store.ListMembershipsForPerson(r.Context(), personID)

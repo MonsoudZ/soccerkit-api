@@ -40,12 +40,13 @@ exist in the schema now:
 |------|-----------|
 | **auth** | `POST /auth/apple` — Sign in with Apple, the only way into an account; a first sign-in provisions Person + UserAccount + personal Org + admin/director/coach memberships + seeded templates, and it returns `{ token, refreshToken, personID }` for the iOS app. `/auth/refresh` (rotating), `/auth/logout`. There is no registration or password login: nothing shipped used them, and they let anyone create an account at an address nobody verified (see `docs/AUDIT-3.md`). |
 | **me** | `GET /me` — the authenticated person + their org memberships, `DELETE /me` (full account erasure) |
-| **persons** | `POST /persons` (add an athlete), `GET /persons/:id`, `GET /persons/:id/instances`, `GET /persons/:id/aggregate` |
-| **teams** | `GET/POST /teams`, `GET/DELETE /teams/:id`, `POST /teams/:id/roster`, `DELETE /teams/:id/roster/:personId` |
+| **persons** | `POST /persons` (add an athlete), `GET/PATCH /persons/:id`, `GET /persons/:id/instances`, `GET /persons/:id/aggregate` |
+| **teams** | `GET/POST /teams`, `GET/PATCH/DELETE /teams/:id`, `POST /teams/:id/roster`, `DELETE /teams/:id/roster/:personId` |
+| **organizations** | `PATCH /organizations/:id` — rename the club you are acting in. `kind` is not editable: it decides whether account deletion destroys the org or orphans it |
 | **evaluation** | `GET/POST /templates`, `GET /templates/:id`, `POST /form-instances`, `GET /form-instances/:id` |
 | **content** | `GET/POST /drills`, `GET/POST /sessions`, `GET/DELETE /sessions/:id` (sessions carry ordered blocks that can reference drills) |
 | **game day** | `GET/POST /teams/:id/games`, `GET/PATCH /games/:id` (record kickoff, status, and result); post-game reports attach via a form instance's `contextRef` |
-| **iOS sync** | `GET/POST /sync` — opaque `{type,id,payload}` delta-sync for the offline-first app. A **projection over the domain tables**: projected types (`Team`, `Drill`, `Session`) land in their real table (columns projected from the payload, full payload retained); other types round-trip losslessly via a generic `sync_documents` store until they graduate. A shared `seq` sequence is the cursor; rows are scoped per account (Person) |
+| **iOS sync** | `GET/POST /sync` — opaque `{type,id,payload}` delta-sync for the offline-first app. A **projection over the domain tables**: projected types (`Team`, `Drill`, `Session`) land in their real table (columns projected from the payload, full payload retained); other types round-trip losslessly via a generic `sync_documents` store until they graduate. A shared `seq` sequence is the cursor; rows are scoped per account (Person). **Edits made over REST are written twice** — into the projected columns and into the `payload` a pull returns — so a `PATCH` from a web client reaches the phone instead of being overwritten by its next push |
 
 **Next up (schema already present):** `ShareGrant` scopes (coach-to-coach +
 club library), the director tier, and parent/player self-service.

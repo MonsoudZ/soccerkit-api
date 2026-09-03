@@ -1046,3 +1046,147 @@ func TestSyncBoundsTypeAndIDAndPayload(t *testing.T) {
 		t.Errorf("a delete's type should be bounded too, got %d", st)
 	}
 }
+
+// TestSyncEveryProjectedTypeRoutes pushes and pulls one record of each of the seven
+// projected types.
+//
+// It exists to pin the agreement applyUpsert and applyDelete now depend on: both read
+// projectedSyncTypes to decide whether a record needs a UUID before routing it, so a
+// type listed there but missing from a switch would answer "no upsert route", and a type
+// in a switch but missing from the map would silently be filed as a document instead —
+// splitting that type's records across two tables. Neither is reachable through the
+// wire format, so only a test that walks the whole list can see it.
+func TestSyncEveryProjectedTypeRoutes(t *testing.T) {
+	resetDB(t)
+	token := appleToken(t, "sub-routing", "routing@e.com")
+
+	// One payload per projected type, carrying the fields its table projects out, and
+	// the table it must land in. The table is the half that matters: a record routed to
+	// sync_documents by mistake still pulls back under its own type name, because
+	// sync_documents stores the client's type verbatim — so the wire cannot tell the two
+	// apart and only the database can.
+	types := []struct {
+		name    string
+		table   string
+		payload map[string]any
+	}{
+		{"Team", "teams", map[string]any{"name": "U11", "ageGroup": "U11", "season": "2027"}},
+		{"Drill", "drills", map[string]any{"title": "Rondo", "fieldSetup": "5v2"}},
+		{"Session", "sessions", map[string]any{"title": "Tuesday", "objective": "Pressing"}},
+		{"Person", "persons", map[string]any{"name": "Alex Kim", "medicalNotes": "none"}},
+		{"Player", "players", map[string]any{"name": "Alex Kim", "number": 9, "position": "ST"}},
+		{"Event", "events", map[string]any{"title": "Match", "kind": "game"}},
+		{"Diagram", "diagrams", map[string]any{"title": "Shape"}},
+	}
+
+	ids := make(map[string]string, len(types))
+	upserts := make([]map[string]any, 0, len(types))
+	for _, ty := range types {
+		id := uuid.NewString()
+		ids[ty.name] = id
+		upserts = append(upserts, map[string]any{"type": ty.name, "id": id, "payload": ty.payload})
+	}
+
+	push := do(t, http.MethodPost, "/api/v1/sync", token, map[string]any{"upserts": upserts})
+	if push.status != http.StatusOK {
+		t.Fatalf("push: status %d body %s", push.status, push.raw)
+	}
+	if conflicts, _ := push.body["conflicts"].([]any); len(conflicts) != 0 {
+		t.Fatalf("push reported conflicts on fresh ids: %s", push.raw)
+	}
+
+	pulled := pullSync(t, token, "")
+	got := make(map[string]string, len(pulled.Records))
+	for _, rec := range pulled.Records {
+		got[rec.Type] = rec.ID
+	}
+	for _, ty := range types {
+		if got[ty.name] != ids[ty.name] {
+			t.Errorf("%s did not round-trip: wanted id %s, pull returned %q",
+				ty.name, ids[ty.name], got[ty.name])
+		}
+		var inTable, asDocument int
+		if err := testPool.QueryRow(context.Background(),
+			"SELECT count(*) FROM "+ty.table+" WHERE id = $1", ids[ty.name],
+		).Scan(&inTable); err != nil {
+			t.Fatalf("count %s rows: %v", ty.table, err)
+		}
+		if err := testPool.QueryRow(context.Background(),
+			"SELECT count(*) FROM sync_documents WHERE type = $1 AND id = $2",
+			ty.name, ids[ty.name],
+		).Scan(&asDocument); err != nil {
+			t.Fatalf("count sync_documents rows: %v", err)
+		}
+		if inTable != 1 || asDocument != 0 {
+			t.Errorf("%s landed in the wrong place: %d row(s) in %s, %d in sync_documents "+
+				"(want 1 and 0) — check that projectedSyncTypes and the applyUpsert switch "+
+				"still list the same types", ty.name, inTable, ty.table, asDocument)
+		}
+	}
+
+	// And the same list through the delete route, which shares the routing.
+	deletes := make([]map[string]any, 0, len(types))
+	for _, ty := range types {
+		deletes = append(deletes, map[string]any{"type": ty.name, "id": ids[ty.name]})
+	}
+	del := do(t, http.MethodPost, "/api/v1/sync", token, map[string]any{"deletes": deletes})
+	if del.status != http.StatusOK {
+		t.Fatalf("delete push: status %d body %s", del.status, del.raw)
+	}
+	if conflicts, _ := del.body["conflicts"].([]any); len(conflicts) != 0 {
+		t.Fatalf("tombstoning rows this account owns reported conflicts: %s", del.raw)
+	}
+
+	after := pullSync(t, token, "")
+	tombstoned := make(map[string]bool, len(after.Deletes))
+	for _, d := range after.Deletes {
+		tombstoned[d.Type] = true
+	}
+	for _, ty := range types {
+		if !tombstoned[ty.name] {
+			t.Errorf("%s was not tombstoned by its delete route", ty.name)
+		}
+	}
+}
+
+// TestSyncIDShapeFollowsTheRoute pins the asymmetry the routing rests on: a projected
+// type is keyed by a UUID column and must reject anything else, while sync_documents
+// keys on the client's string exactly as it arrives and must accept it. Collapsing the
+// per-branch UUID parse into one call before the switch is only safe while documents
+// stay outside it.
+func TestSyncIDShapeFollowsTheRoute(t *testing.T) {
+	resetDB(t)
+	token := appleToken(t, "sub-idshape", "idshape@e.com")
+
+	bad := do(t, http.MethodPost, "/api/v1/sync", token, map[string]any{
+		"upserts": []map[string]any{
+			{"type": "Team", "id": "not-a-uuid", "payload": map[string]any{"name": "U11"}},
+		},
+	})
+	if bad.status != http.StatusBadRequest {
+		t.Fatalf("projected type with a non-UUID id: status %d body %s", bad.status, bad.raw)
+	}
+	if !strings.Contains(string(bad.raw), "Team id must be a UUID") {
+		t.Errorf("the error should name the offending type so the client can act on it, got %s", bad.raw)
+	}
+
+	// The same id on an unprojected type is a legitimate document key.
+	ok := do(t, http.MethodPost, "/api/v1/sync", token, map[string]any{
+		"upserts": []map[string]any{
+			{"type": "Prefs", "id": "prefs", "payload": map[string]any{"theme": "dark"}},
+		},
+	})
+	if ok.status != http.StatusOK {
+		t.Fatalf("document type with a non-UUID id should be accepted: status %d body %s", ok.status, ok.raw)
+	}
+	pulled := pullSync(t, token, "")
+	found := false
+	for _, rec := range pulled.Records {
+		if rec.Type == "Prefs" && rec.ID == "prefs" {
+			found = true
+		}
+	}
+	if !found {
+		t.Errorf("the document did not round-trip: %+v", pulled.Records)
+	}
+}

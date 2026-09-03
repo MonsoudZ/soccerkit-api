@@ -312,6 +312,9 @@ func (s *Server) handleSubmitInstance(w http.ResponseWriter, r *http.Request) {
 		writeError(w, err)
 		return
 	}
+	// Indexed in memory from the one read above: every answer is validated against its
+	// field below, so a per-key lookup would be a query per answer. A GetFormFieldByKey
+	// query existed for that shape and was removed rather than used.
 	fieldByKey := make(map[string]store.FormField, len(fields))
 	for _, f := range fields {
 		fieldByKey[f.Key] = f

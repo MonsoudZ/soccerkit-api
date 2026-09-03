@@ -21,6 +21,9 @@ import (
 var (
 	testServer *httptest.Server
 	testPool   *pgxpool.Pool
+	// testRouter is the same handler testServer wraps, kept as a chi router so
+	// TestOpenAPISpecMatchesTheRouter can walk the routes it mounts.
+	testRouter http.Handler
 )
 
 func TestMain(m *testing.M) {
@@ -48,7 +51,8 @@ func TestMain(m *testing.M) {
 	}
 
 	srv := api.NewServer(cfg, testPool)
-	testServer = httptest.NewServer(srv.Router())
+	testRouter = srv.Router()
+	testServer = httptest.NewServer(testRouter)
 
 	code := m.Run()
 

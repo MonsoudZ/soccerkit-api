@@ -163,28 +163,6 @@ func (q *Queries) GetActiveRosterMembership(ctx context.Context, arg GetActiveRo
 	return i, err
 }
 
-const getRosterMembership = `-- name: GetRosterMembership :one
-SELECT id, person_id, team_id, jersey_number, position, joined_on, left_on, status, created_at, updated_at FROM roster_memberships WHERE id = $1
-`
-
-func (q *Queries) GetRosterMembership(ctx context.Context, id uuid.UUID) (RosterMembership, error) {
-	row := q.db.QueryRow(ctx, getRosterMembership, id)
-	var i RosterMembership
-	err := row.Scan(
-		&i.ID,
-		&i.PersonID,
-		&i.TeamID,
-		&i.JerseyNumber,
-		&i.Position,
-		&i.JoinedOn,
-		&i.LeftOn,
-		&i.Status,
-		&i.CreatedAt,
-		&i.UpdatedAt,
-	)
-	return i, err
-}
-
 const getTeam = `-- name: GetTeam :one
 SELECT id, organization_id, name, age_group, season, created_at, updated_at, sync_account_id, payload, deleted, seq FROM teams WHERE id = $1 AND deleted = false
 `
@@ -364,20 +342,42 @@ UPDATE teams
 SET name       = COALESCE($1, name),
     age_group  = CASE WHEN $2::bool THEN $3 ELSE age_group END,
     season     = CASE WHEN $4::bool THEN $5 ELSE season END,
+    payload    = CASE WHEN $6::bool
+                      THEN COALESCE(payload, '{}'::jsonb) || $7::jsonb
+                      ELSE payload END,
+    seq        = nextval('sync_seq'),
     updated_at = now()
-WHERE id = $6
+WHERE id = $8
 RETURNING id, organization_id, name, age_group, season, created_at, updated_at, sync_account_id, payload, deleted, seq
 `
 
 type UpdateTeamParams struct {
-	Name        *string   `json:"name"`
-	SetAgeGroup bool      `json:"set_age_group"`
-	AgeGroup    *string   `json:"age_group"`
-	SetSeason   bool      `json:"set_season"`
-	Season      *string   `json:"season"`
-	ID          uuid.UUID `json:"id"`
+	Name         *string   `json:"name"`
+	SetAgeGroup  bool      `json:"set_age_group"`
+	AgeGroup     *string   `json:"age_group"`
+	SetSeason    bool      `json:"set_season"`
+	Season       *string   `json:"season"`
+	PatchPayload bool      `json:"patch_payload"`
+	PayloadPatch []byte    `json:"payload_patch"`
+	ID           uuid.UUID `json:"id"`
 }
 
+// A REST edit has to reach the app, which is why this writes the record twice.
+//
+// A sync pull returns `payload`, not these columns, so updating the columns alone would
+// leave the edit invisible on the phone -- and the app's next push, built from its own
+// unchanged copy, would write the old values straight back over it. The change would
+// disappear with nothing logged and nobody told.
+//
+// So the caller passes `payload_patch`: the same fields, keyed the way the app's own
+// record keys them, merged over whatever payload is already there. `||` merges only the
+// keys present, so an untouched field keeps its value and a field the server does not
+// project is preserved rather than dropped -- which is what keeps a newer app's extra
+// fields alive across an edit made by an older server.
+//
+// seq is bumped unconditionally. A row with a NULL sync_account_id is invisible to sync
+// and the new seq is simply unread; for a synced row, an edit that did not move the
+// cursor is an edit no device would ever ask for.
 func (q *Queries) UpdateTeam(ctx context.Context, arg UpdateTeamParams) (Team, error) {
 	row := q.db.QueryRow(ctx, updateTeam,
 		arg.Name,
@@ -385,6 +385,8 @@ func (q *Queries) UpdateTeam(ctx context.Context, arg UpdateTeamParams) (Team, e
 		arg.AgeGroup,
 		arg.SetSeason,
 		arg.Season,
+		arg.PatchPayload,
+		arg.PayloadPatch,
 		arg.ID,
 	)
 	var i Team

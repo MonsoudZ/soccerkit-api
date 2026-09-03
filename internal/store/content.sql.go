@@ -12,6 +12,29 @@ import (
 	"github.com/jackc/pgx/v5/pgtype"
 )
 
+const countDrillsInOrgByIDs = `-- name: CountDrillsInOrgByIDs :one
+SELECT count(*) FROM drills
+WHERE id = ANY($1::uuid[]) AND organization_id = $2 AND deleted = false
+`
+
+type CountDrillsInOrgByIDsParams struct {
+	Ids            []uuid.UUID `json:"ids"`
+	OrganizationID uuid.UUID   `json:"organization_id"`
+}
+
+// How many of these ids are live drills in this organization. handleCreateSession asks
+// once for every drill its blocks reference and compares the answer with the number of
+// distinct ids it asked about; fewer means at least one block points at a drill that is
+// deleted, missing, or another org's. Counting rather than returning the rows is enough
+// because the request is rejected as a whole, and it keeps the check to one round trip
+// however many blocks the session has.
+func (q *Queries) CountDrillsInOrgByIDs(ctx context.Context, arg CountDrillsInOrgByIDsParams) (int64, error) {
+	row := q.db.QueryRow(ctx, countDrillsInOrgByIDs, arg.Ids, arg.OrganizationID)
+	var count int64
+	err := row.Scan(&count)
+	return count, err
+}
+
 const createDrill = `-- name: CreateDrill :one
 
 INSERT INTO drills (organization_id, author_person_id, name, description)

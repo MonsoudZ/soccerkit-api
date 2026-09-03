@@ -209,3 +209,90 @@ func TestGameKickoffCanBeCleared(t *testing.T) {
 		t.Errorf("kickoffAt should be null after clearing, got %v", got.body["kickoffAt"])
 	}
 }
+
+// TestSessionRepeatsOneDrillAcrossBlocks covers a session whose blocks point at the
+// same drill twice. The org check asks about each *distinct* drill once and compares
+// the count it gets back with the number it asked about, so counting the references
+// instead of the distinct ids would reject this perfectly ordinary session.
+func TestSessionRepeatsOneDrillAcrossBlocks(t *testing.T) {
+	resetDB(t)
+	coach, _ := signInCoach(t, "repeatdrill@e.com")
+
+	drill := do(t, http.MethodPost, "/api/v1/drills", coach, map[string]any{"name": "Rondo"})
+	if drill.status != http.StatusCreated {
+		t.Fatalf("create drill: %d %s", drill.status, drill.raw)
+	}
+	drillID := drill.body["id"].(string)
+
+	sess := do(t, http.MethodPost, "/api/v1/sessions", coach, map[string]any{
+		"title": "Rondo Twice",
+		"blocks": []map[string]any{
+			{"title": "First rondo", "drillId": drillID, "durationMin": 10},
+			{"title": "Water", "durationMin": 5},
+			{"title": "Second rondo", "drillId": drillID, "durationMin": 10},
+		},
+	})
+	if sess.status != http.StatusCreated {
+		t.Fatalf("a session may use one drill in two blocks: %d %s", sess.status, sess.raw)
+	}
+
+	// Each block must carry the drill it was given — the ids are parsed once now and
+	// carried to the insert by position, so an off-by-one would show up here.
+	got := do(t, http.MethodGet, "/api/v1/sessions/"+sess.body["id"].(string), coach, nil)
+	if got.status != http.StatusOK {
+		t.Fatalf("get session: %d %s", got.status, got.raw)
+	}
+	blocks := got.body["blocks"].([]any)
+	if len(blocks) != 3 {
+		t.Fatalf("expected 3 blocks, got %d: %s", len(blocks), got.raw)
+	}
+	want := []string{drillID, "", drillID}
+	for i, b := range blocks {
+		block := b.(map[string]any)
+		id, _ := block["drillId"].(string)
+		if id != want[i] {
+			t.Errorf("block %d (%v) has drillId %q, want %q", i, block["title"], id, want[i])
+		}
+	}
+}
+
+// TestSessionRejectsDrillFromAnotherOrg is the negative half of the same check: the
+// single count query replaced a per-block GetDrill, and it has to keep rejecting a
+// drill id that resolves to a row in someone else's organization.
+func TestSessionRejectsDrillFromAnotherOrg(t *testing.T) {
+	resetDB(t)
+	mine, _ := signInCoach(t, "mine@e.com")
+	theirs, _ := signInCoach(t, "theirs@e.com")
+
+	foreign := do(t, http.MethodPost, "/api/v1/drills", theirs, map[string]any{"name": "Their Drill"})
+	if foreign.status != http.StatusCreated {
+		t.Fatalf("create foreign drill: %d %s", foreign.status, foreign.raw)
+	}
+	foreignID := foreign.body["id"].(string)
+
+	sess := do(t, http.MethodPost, "/api/v1/sessions", mine, map[string]any{
+		"title":  "Borrowed",
+		"blocks": []map[string]any{{"title": "Nope", "drillId": foreignID}},
+	})
+	if sess.status != http.StatusBadRequest {
+		t.Fatalf("another org's drill should be rejected, got %d %s", sess.status, sess.raw)
+	}
+
+	// A mix of one valid and one foreign drill is rejected as a whole, so a session is
+	// never half-created around a reference it was not allowed to make.
+	ownDrill := do(t, http.MethodPost, "/api/v1/drills", mine, map[string]any{"name": "My Drill"})
+	mixed := do(t, http.MethodPost, "/api/v1/sessions", mine, map[string]any{
+		"title": "Mixed",
+		"blocks": []map[string]any{
+			{"title": "Fine", "drillId": ownDrill.body["id"].(string)},
+			{"title": "Nope", "drillId": foreignID},
+		},
+	})
+	if mixed.status != http.StatusBadRequest {
+		t.Fatalf("a batch containing a foreign drill should be rejected, got %d %s", mixed.status, mixed.raw)
+	}
+	list := do(t, http.MethodGet, "/api/v1/sessions", mine, nil)
+	if n := len(list.arr()); n != 0 {
+		t.Errorf("no session should have been created, found %d", n)
+	}
+}

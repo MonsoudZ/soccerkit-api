@@ -30,6 +30,13 @@ type Querier interface {
 	// with a permanently 500ing aggregate. numeric has no such ceiling, and the average of
 	// values that each fit in float8 always fits in float8 on the way back out.
 	AggregateScoresForPerson(ctx context.Context, arg AggregateScoresForPersonParams) ([]AggregateScoresForPersonRow, error)
+	// How many of these ids are live drills in this organization. handleCreateSession asks
+	// once for every drill its blocks reference and compares the answer with the number of
+	// distinct ids it asked about; fewer means at least one block points at a drill that is
+	// deleted, missing, or another org's. Counting rather than returning the rows is enough
+	// because the request is rejected as a whole, and it keeps the check to one round trip
+	// however many blocks the session has.
+	CountDrillsInOrgByIDs(ctx context.Context, arg CountDrillsInOrgByIDsParams) (int64, error)
 	// Drills --------------------------------------------------------------------
 	CreateDrill(ctx context.Context, arg CreateDrillParams) (Drill, error)
 	CreateFormAnswer(ctx context.Context, arg CreateFormAnswerParams) (FormAnswer, error)
@@ -112,20 +119,17 @@ type Querier interface {
 	EndRosterMembership(ctx context.Context, arg EndRosterMembershipParams) (RosterMembership, error)
 	GetActiveRosterMembership(ctx context.Context, arg GetActiveRosterMembershipParams) (RosterMembership, error)
 	GetDrill(ctx context.Context, id uuid.UUID) (Drill, error)
-	GetFormFieldByKey(ctx context.Context, arg GetFormFieldByKeyParams) (FormField, error)
 	GetFormInstance(ctx context.Context, id uuid.UUID) (FormInstance, error)
 	GetFormTemplate(ctx context.Context, id uuid.UUID) (FormTemplate, error)
 	GetGame(ctx context.Context, id uuid.UUID) (Game, error)
 	GetOrganization(ctx context.Context, id uuid.UUID) (Organization, error)
 	GetPerson(ctx context.Context, id uuid.UUID) (Person, error)
 	GetRefreshToken(ctx context.Context, tokenHash string) (RefreshToken, error)
-	GetRosterMembership(ctx context.Context, id uuid.UUID) (RosterMembership, error)
 	GetSession(ctx context.Context, id uuid.UUID) (Session, error)
 	GetTeam(ctx context.Context, id uuid.UUID) (Team, error)
 	GetUserAccountByAppleSub(ctx context.Context, appleSub *string) (UserAccount, error)
 	GetUserAccountByEmail(ctx context.Context, email string) (UserAccount, error)
 	GetUserAccountByID(ctx context.Context, id uuid.UUID) (UserAccount, error)
-	HasMembership(ctx context.Context, arg HasMembershipParams) (bool, error)
 	ListActiveRoster(ctx context.Context, teamID uuid.UUID) ([]ListActiveRosterRow, error)
 	ListAnswersForInstance(ctx context.Context, instanceID uuid.UUID) ([]ListAnswersForInstanceRow, error)
 	// p.deleted = false for the same reason every other person read has it: a tombstoned
@@ -155,7 +159,6 @@ type Querier interface {
 	// owner's account should destroy the club is a product decision that has not been made,
 	// and the conservative answer — orphan it, leave the data — matches today's behaviour.
 	ListOwnedPersonalOrgIDsForPerson(ctx context.Context, ownerPersonID *uuid.UUID) ([]uuid.UUID, error)
-	ListRolesInOrg(ctx context.Context, arg ListRolesInOrgParams) ([]string, error)
 	ListSessionBlocks(ctx context.Context, sessionID uuid.UUID) ([]ListSessionBlocksRow, error)
 	ListSessionsInOrg(ctx context.Context, arg ListSessionsInOrgParams) ([]Session, error)
 	// The delta an account hasn't seen: synced rows across every source, ordered by
@@ -207,10 +210,27 @@ type Querier interface {
 	ListSyncChangesSince(ctx context.Context, arg ListSyncChangesSinceParams) ([]ListSyncChangesSinceRow, error)
 	ListTeamsForPerson(ctx context.Context, personID uuid.UUID) ([]ListTeamsForPersonRow, error)
 	ListTeamsInOrg(ctx context.Context, organizationID uuid.UUID) ([]ListTeamsInOrgRow, error)
-	// Whether an organization may see a Person at all: they are not tombstoned, and they
-	// either hold a membership in the org or are rostered on one of its live teams. The
-	// roster arm matters because an athlete can be added to a team without a membership
-	// row of their own.
+	// Whether this Person can sign in. PATCH /persons/{id} uses it to keep a coach's edit
+	// rights to the loginless athletes they manage, the same population POST /persons can
+	// create -- someone with an account edits their own row.
+	PersonHasUserAccount(ctx context.Context, personID uuid.UUID) (bool, error)
+	// Whether the caller may see a Person at all: they are not tombstoned, and one of three
+	// things is true -- they hold a membership in the caller's org, they are rostered on one
+	// of its live teams, or the caller pushed them through sync themselves. The roster arm
+	// matters because an athlete can be added to a team without a membership row of their
+	// own.
+	//
+	// The third arm was added with PATCH /persons/{id}. An athlete the app creates arrives
+	// over /v1/sync carrying no membership and no roster row -- the app keeps that structure
+	// on the phone -- so the first two arms do not see them, and every REST route keyed on a
+	// person id answered 404 for the athletes a coach actually has. That made the person
+	// endpoints reachable only for rows REST itself created.
+	//
+	// It discloses nothing new: sync_account_id is set to the account that pushed the row,
+	// so this arm matches only rows the caller wrote and already holds on their own device.
+	// It is deliberately an ownership test, not an org test -- sync streams are per-account,
+	// so a second coach in the same club does not see the first coach's un-rostered
+	// athletes through it.
 	PersonVisibleInOrg(ctx context.Context, arg PersonVisibleInOrgParams) (bool, error)
 	// Delete refresh tokens that expired long enough ago to be of no further use.
 	//
@@ -311,7 +331,38 @@ type Querier interface {
 	// leaves no value that means "clear it": a cancelled fixture's kickoff time could not be
 	// unset. See docs/AUDIT-2.md L3.
 	UpdateGame(ctx context.Context, arg UpdateGameParams) (Game, error)
+	// Only the name. `kind` is deliberately not editable here: handleDeleteMe deletes the
+	// caller's *personal* orgs and orphans their clubs, so flipping kind would quietly
+	// change what account deletion destroys. That is a product decision with a data-loss
+	// edge, not a field on a PATCH body.
+	UpdateOrganization(ctx context.Context, arg UpdateOrganizationParams) (Organization, error)
+	// Writes the record twice, for the reason UpdateTeam spells out: a pull returns
+	// `payload`, so a column-only edit never reaches the phone and is overwritten by its
+	// next push.
+	//
+	// Only four of these columns are in the sync contract -- display_name, the two emergency
+	// contact fields and medical_notes are what SyncUpsertPerson projects, so they are what
+	// payload_patch may carry. given_name, family_name, birthdate, email and phone are REST's
+	// alone: no push writes them and SyncTombstonePerson deliberately spares them, so they
+	// need no propagation and must not be invented into a payload the app would not
+	// recognise.
 	UpdatePerson(ctx context.Context, arg UpdatePersonParams) (Person, error)
+	// A REST edit has to reach the app, which is why this writes the record twice.
+	//
+	// A sync pull returns `payload`, not these columns, so updating the columns alone would
+	// leave the edit invisible on the phone -- and the app's next push, built from its own
+	// unchanged copy, would write the old values straight back over it. The change would
+	// disappear with nothing logged and nobody told.
+	//
+	// So the caller passes `payload_patch`: the same fields, keyed the way the app's own
+	// record keys them, merged over whatever payload is already there. `||` merges only the
+	// keys present, so an untouched field keeps its value and a field the server does not
+	// project is preserved rather than dropped -- which is what keeps a newer app's extra
+	// fields alive across an edit made by an older server.
+	//
+	// seq is bumped unconditionally. A row with a NULL sync_account_id is invisible to sync
+	// and the new seq is simply unread; for a synced row, an edit that did not move the
+	// cursor is an edit no device would ever ask for.
 	UpdateTeam(ctx context.Context, arg UpdateTeamParams) (Team, error)
 }
 

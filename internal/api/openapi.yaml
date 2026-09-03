@@ -292,6 +292,47 @@ paths:
             application/json:
               schema: { $ref: "#/components/schemas/Person" }
         "404": { $ref: "#/components/responses/Error" }
+    patch:
+      tags: [persons]
+      summary: Edit a person
+      description: >
+        Partial update: an absent field is left alone and an explicit null clears a
+        nullable one. displayName, emergencyContactName, emergencyContactPhone and
+        medicalNotes are part of the sync contract, so an edit to any of them is
+        propagated into the record /api/v1/sync returns and reaches the app. givenName,
+        familyName, birthdate, email and phone exist only on this API and are not
+        synced. email is contact information, not a credential -- sign-in matches on the
+        verified Apple address, which is not reachable from here. You may always edit
+        yourself; a coach may edit a person in their organization who has no account of
+        their own.
+      security: [{ bearerAuth: [] }]
+      parameters: [{ $ref: "#/components/parameters/Id" }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+              properties:
+                displayName: { type: string, minLength: 1 }
+                givenName: { type: string, nullable: true }
+                familyName: { type: string, nullable: true }
+                birthdate: { type: string, format: date, nullable: true, example: "2013-04-02" }
+                email: { type: string, nullable: true }
+                phone: { type: string, nullable: true }
+                emergencyContactName: { type: string, nullable: true }
+                emergencyContactPhone: { type: string, nullable: true }
+                medicalNotes: { type: string, nullable: true }
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Person" }
+        "400": { $ref: "#/components/responses/Error" }
+        "403": { $ref: "#/components/responses/Error" }
+        "404": { $ref: "#/components/responses/Error" }
   /api/v1/persons/{id}/instances:
     get:
       tags: [persons, evaluation]
@@ -323,6 +364,35 @@ paths:
             application/json:
               schema: { type: array, items: { $ref: "#/components/schemas/ScoreAggregate" } }
 
+  /api/v1/organizations/{id}:
+    patch:
+      tags: [organizations]
+      summary: Rename the organization you are acting in
+      description: >
+        Only the name may be changed. `kind` is deliberately not editable: it decides
+        whether account deletion destroys the organization or orphans it. The id must be
+        the organization you are acting in -- set X-Organization-ID if you belong to
+        more than one. Organizations carry no sync record, so nothing is propagated.
+      security: [{ bearerAuth: [] }]
+      parameters: [{ $ref: "#/components/parameters/Id" }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+              properties:
+                name: { type: string, minLength: 1 }
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Organization" }
+        "400": { $ref: "#/components/responses/Error" }
+        "403": { $ref: "#/components/responses/Error" }
+        "404": { $ref: "#/components/responses/Error" }
   /api/v1/teams:
     get:
       tags: [teams]
@@ -367,6 +437,36 @@ paths:
                 properties:
                   team: { $ref: "#/components/schemas/Team" }
                   roster: { type: array, items: { $ref: "#/components/schemas/RosterEntry" } }
+        "403": { $ref: "#/components/responses/Error" }
+        "404": { $ref: "#/components/responses/Error" }
+    patch:
+      tags: [teams]
+      summary: Edit a team
+      description: >
+        Partial update: an absent field is left alone and an explicit null clears a
+        nullable one. All three fields are part of the sync contract, so an edit is
+        propagated into the record /api/v1/sync returns and reaches the app; fields the
+        server does not project are preserved rather than dropped.
+      security: [{ bearerAuth: [] }]
+      parameters: [{ $ref: "#/components/parameters/Id" }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+              properties:
+                name: { type: string, minLength: 1 }
+                ageGroup: { type: string, nullable: true }
+                season: { type: string, nullable: true }
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Team" }
+        "400": { $ref: "#/components/responses/Error" }
         "403": { $ref: "#/components/responses/Error" }
         "404": { $ref: "#/components/responses/Error" }
     delete:
@@ -805,6 +905,13 @@ components:
             enrolled in it — a person with no organizational linkage would be visible to
             nobody, including you. Only the unprivileged roles can be granted this way,
             because the person has no login.
+    Organization:
+      type: object
+      properties:
+        id: { type: string, format: uuid }
+        name: { type: string }
+        kind: { type: string, enum: [personal, club] }
+        createdAt: { type: string, format: date-time }
     Team:
       type: object
       properties:

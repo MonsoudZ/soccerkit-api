@@ -3,7 +3,6 @@ package api
 import (
 	"encoding/json"
 	"errors"
-	"math"
 	"net/http"
 	"time"
 
@@ -144,18 +143,10 @@ func (s *Server) handleUpdateGame(w http.ResponseWriter, r *http.Request) {
 		writeError(w, err)
 		return
 	}
-	var raw map[string]json.RawMessage
-	if err := decodeJSON(r, &raw); err != nil {
+	raw, err := decodePatch(r, updatableGameFields)
+	if err != nil {
 		writeError(w, err)
 		return
-	}
-	// decodeJSON's DisallowUnknownFields is a no-op against a map, so unknown keys are
-	// rejected here instead — every other endpoint in this API decodes strictly.
-	for key := range raw {
-		if !updatableGameFields[key] {
-			writeError(w, errValidation("unknown field: "+key))
-			return
-		}
 	}
 
 	params := store.UpdateGameParams{ID: game.ID, KickoffAt: nullTimestamptz()}
@@ -245,34 +236,4 @@ func (s *Server) handleUpdateGame(w http.ResponseWriter, r *http.Request) {
 var updatableGameFields = map[string]bool{
 	"opponent": true, "kickoffAt": true, "homeAway": true,
 	"ourScore": true, "opponentScore": true, "status": true,
-}
-
-// optionalString decodes a JSON string or an explicit null, rejecting any other type.
-// Null is meaningful here: it is how a caller clears a nullable column.
-func optionalString(raw json.RawMessage, field string) (*string, error) {
-	if string(raw) == "null" {
-		return nil, nil
-	}
-	var v string
-	if err := json.Unmarshal(raw, &v); err != nil {
-		return nil, errValidation(field + " must be a string or null")
-	}
-	return &v, nil
-}
-
-// optionalInt32 decodes a JSON integer or an explicit null, rejecting any other type
-// and any number with a fractional part.
-func optionalInt32(raw json.RawMessage, field string) (*int32, error) {
-	if string(raw) == "null" {
-		return nil, nil
-	}
-	var v float64
-	if err := json.Unmarshal(raw, &v); err != nil || v != math.Trunc(v) {
-		return nil, errValidation(field + " must be a whole number or null")
-	}
-	if v < math.MinInt32 || v > math.MaxInt32 {
-		return nil, errValidation(field + " is out of range")
-	}
-	n := int32(v)
-	return &n, nil
 }

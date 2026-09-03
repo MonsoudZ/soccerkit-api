@@ -247,30 +247,6 @@ func (q *Queries) CreateFormTemplate(ctx context.Context, arg CreateFormTemplate
 	return i, err
 }
 
-const getFormFieldByKey = `-- name: GetFormFieldByKey :one
-SELECT id, template_id, key, label, kind, position, config FROM form_fields WHERE template_id = $1 AND key = $2
-`
-
-type GetFormFieldByKeyParams struct {
-	TemplateID uuid.UUID `json:"template_id"`
-	Key        string    `json:"key"`
-}
-
-func (q *Queries) GetFormFieldByKey(ctx context.Context, arg GetFormFieldByKeyParams) (FormField, error) {
-	row := q.db.QueryRow(ctx, getFormFieldByKey, arg.TemplateID, arg.Key)
-	var i FormField
-	err := row.Scan(
-		&i.ID,
-		&i.TemplateID,
-		&i.Key,
-		&i.Label,
-		&i.Kind,
-		&i.Position,
-		&i.Config,
-	)
-	return i, err
-}
-
 const getFormInstance = `-- name: GetFormInstance :one
 SELECT id, template_id, subject_person_id, subject_team_id, context_ref_type, context_ref_id, submitted_by_person_id, submitted_at, extra, created_at FROM form_instances WHERE id = $1
 `
