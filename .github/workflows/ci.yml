@@ -34,6 +34,14 @@ jobs:
           go-version-file: go.mod
           cache: true
       - name: Verify sqlc output is up to date
+        env:
+          # setup-go v7 exports GOTOOLCHAIN=local; v5 left it at auto. sqlc is built with
+          # a newer Go than this module pins, so `go install` has to fetch that toolchain
+          # to compile the tool -- which "local" forbids, and the step failed on a line
+          # nobody had touched. Scoped to this step on purpose: installing a tool is the
+          # one place a different toolchain is wanted, and the project's own build and
+          # test below stay pinned to what go.mod asks for.
+          GOTOOLCHAIN: auto
         run: |
           go install github.com/sqlc-dev/sqlc/cmd/sqlc@v1.31.1
           sqlc generate
@@ -41,9 +49,9 @@ jobs:
       - run: go vet ./...
       - run: go build ./...
       - run: go test ./...
-      # The Dockerfile pins its own Go image, so a pin that has drifted behind
-      # go.mod is invisible to every step above: setup-go leaves GOTOOLCHAIN at
-      # "auto" and quietly downloads whatever go.mod asks for, while the golang
-      # image sets GOTOOLCHAIN=local and fails outright. Building the image is
-      # what turns that into a red check instead of a broken deploy.
+      # The Dockerfile pins its own Go image, so a pin that has drifted behind go.mod
+      # would otherwise surface only at deploy time. Both sides are strict now --
+      # setup-go v7 exports GOTOOLCHAIN=local, and the golang image sets it too -- so a
+      # drifted pin fails here rather than downloading its way past the problem.
+      # Building the image is what turns that into a red check instead of a broken deploy.
       - run: docker build -t soccerkit-api:ci .
