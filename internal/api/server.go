@@ -107,6 +107,10 @@ func (s *Server) Router() http.Handler {
 				r.Get("/{id}", s.handleGetPerson)
 				r.Patch("/{id}", s.handleUpdatePerson)
 				r.Get("/{id}/instances", s.handleListPersonInstances)
+				// Guardianships: what makes the parent role narrower than the club.
+				r.Get("/{id}/guardians", s.handleListGuardians)
+				r.Post("/{id}/guardians", s.handleAddGuardian)
+				r.Delete("/{id}/guardians/{personId}", s.handleRemoveGuardian)
 				r.Get("/{id}/aggregate", s.handlePersonAggregate)
 			})
 
@@ -131,6 +135,11 @@ func (s *Server) Router() http.Handler {
 			// The club itself (rename only -- see updatableOrganizationFields).
 			r.Route("/organizations", func(r chi.Router) {
 				r.Patch("/{id}", s.handleUpdateOrganization)
+				// Who is in the club, and what they may do.
+				r.Get("/{id}/members", s.handleListMembers)
+				r.Post("/{id}/members", s.handleAddMember)
+				r.Patch("/{id}/members/{personId}", s.handleSetMemberRoles)
+				r.Delete("/{id}/members/{personId}", s.handleRemoveMember)
 			})
 
 			// Training content

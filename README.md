@@ -40,9 +40,10 @@ exist in the schema now:
 |------|-----------|
 | **auth** | `POST /auth/apple` — Sign in with Apple, the only way into an account; a first sign-in provisions Person + UserAccount + personal Org + admin/director/coach memberships + seeded templates, and it returns `{ token, refreshToken, personID }` for the iOS app. `/auth/refresh` (rotating), `/auth/logout`. There is no registration or password login: nothing shipped used them, and they let anyone create an account at an address nobody verified (see `docs/AUDIT-3.md`). |
 | **me** | `GET /me` — the authenticated person + their org memberships, `DELETE /me` (full account erasure) |
-| **persons** | `POST /persons` (add an athlete), `GET/PATCH /persons/:id`, `GET /persons/:id/instances`, `GET /persons/:id/aggregate` |
+| **persons** | `POST /persons` (add an athlete), `GET/PATCH /persons/:id`, `GET /persons/:id/instances`, `GET /persons/:id/aggregate`, `GET/POST /persons/:id/guardians`, `DELETE /persons/:id/guardians/:personId` |
 | **teams** | `GET/POST /teams`, `GET/PATCH/DELETE /teams/:id`, `POST /teams/:id/roster`, `DELETE /teams/:id/roster/:personId` |
-| **organizations** | `PATCH /organizations/:id` — rename the club you are acting in. `kind` is not editable: it decides whether account deletion destroys the org or orphans it |
+| **organizations** | `PATCH /organizations/:id` — rename the club you are acting in. `kind` is not editable: it decides whether account deletion destroys the org or orphans it. `GET/POST /organizations/:id/members`, `PATCH/DELETE /organizations/:id/members/:personId` — who is in the club and what they hold |
+| **roles** | `admin`, `director`, `coach`, `parent`, `player`, stored one per membership row so a person may hold several. **Staff** (admin/director/coach) see the whole organization; a **parent** sees only the children they are a recorded guardian of; a **player** sees only themselves. Granting is capped at your own highest role, you cannot change someone who outranks you, and an org can never be left without an admin. Adding a member is by sign-in email — there is no acceptance step yet |
 | **evaluation** | `GET/POST /templates`, `GET /templates/:id`, `POST /form-instances`, `GET /form-instances/:id` |
 | **content** | `GET/POST /drills`, `GET/POST /sessions`, `GET/DELETE /sessions/:id` (sessions carry ordered blocks that can reference drills) |
 | **game day** | `GET/POST /teams/:id/games`, `GET/PATCH /games/:id` (record kickoff, status, and result); post-game reports attach via a form instance's `contextRef` |

@@ -333,6 +333,65 @@ paths:
         "400": { $ref: "#/components/responses/Error" }
         "403": { $ref: "#/components/responses/Error" }
         "404": { $ref: "#/components/responses/Error" }
+  /api/v1/persons/{id}/guardians:
+    get:
+      tags: [persons]
+      summary: List a child's recorded guardians
+      security: [{ bearerAuth: [] }]
+      parameters: [{ $ref: "#/components/parameters/Id" }]
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema: { type: array, items: { $ref: "#/components/schemas/Person" } }
+        "403": { $ref: "#/components/responses/Error" }
+        "404": { $ref: "#/components/responses/Error" }
+    post:
+      tags: [persons]
+      summary: Record a guardian for this child
+      description: >
+        Staff only, and both people must already be visible in the organization. This is
+        what narrows the parent role: a parent sees the children they are a guardian of
+        and no others, so being able to attach yourself to an arbitrary id would be a
+        one-call escalation.
+      security: [{ bearerAuth: [] }]
+      parameters: [{ $ref: "#/components/parameters/Id" }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [personId]
+              properties:
+                personId: { type: string, format: uuid }
+      responses:
+        "201":
+          description: Created
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  childPersonId: { type: string, format: uuid }
+                  guardianPersonId: { type: string, format: uuid }
+        "400": { $ref: "#/components/responses/Error" }
+        "403": { $ref: "#/components/responses/Error" }
+        "404": { $ref: "#/components/responses/Error" }
+  /api/v1/persons/{id}/guardians/{personId}:
+    delete:
+      tags: [persons]
+      summary: Remove a guardian from this child
+      description: Idempotent — removing a link that is already gone succeeds.
+      security: [{ bearerAuth: [] }]
+      parameters:
+        - { $ref: "#/components/parameters/Id" }
+        - { $ref: "#/components/parameters/PersonId" }
+      responses:
+        "200": { $ref: "#/components/responses/Ok" }
+        "403": { $ref: "#/components/responses/Error" }
+        "404": { $ref: "#/components/responses/Error" }
   /api/v1/persons/{id}/instances:
     get:
       tags: [persons, evaluation]
@@ -393,6 +452,115 @@ paths:
         "400": { $ref: "#/components/responses/Error" }
         "403": { $ref: "#/components/responses/Error" }
         "404": { $ref: "#/components/responses/Error" }
+  /api/v1/organizations/{id}/members:
+    get:
+      tags: [organizations]
+      summary: List the organization's members and their roles
+      description: >
+        Staff only (admin, director or coach). The list carries names and sign-in
+        addresses, which is a club directory rather than something every family is owed
+        about the others. Roles are stored one per row, so a person holding two comes
+        back once with both.
+      security: [{ bearerAuth: [] }]
+      parameters: [{ $ref: "#/components/parameters/Id" }]
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema: { type: array, items: { $ref: "#/components/schemas/Member" } }
+        "403": { $ref: "#/components/responses/Error" }
+    post:
+      tags: [organizations]
+      summary: Add an existing account holder to the organization
+      description: >
+        Addressed by sign-in email rather than person id: knowing someone's address is
+        the ordinary evidence you know them, while an id says nothing about whether you
+        should be adding its owner. Requires admin, director or the owner, and you cannot
+        grant a role above your own. There is no acceptance step yet -- the person is
+        added when the call succeeds and learns of it from GET /me.
+      security: [{ bearerAuth: [] }]
+      parameters: [{ $ref: "#/components/parameters/Id" }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [email, roles]
+              properties:
+                email: { type: string }
+                roles:
+                  type: array
+                  minItems: 1
+                  items: { $ref: "#/components/schemas/Role" }
+      responses:
+        "201":
+          description: Created
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  personId: { type: string, format: uuid }
+                  roles: { type: array, items: { $ref: "#/components/schemas/Role" } }
+        "400": { $ref: "#/components/responses/Error" }
+        "403": { $ref: "#/components/responses/Error" }
+        "404": { $ref: "#/components/responses/Error" }
+        "409": { $ref: "#/components/responses/Error" }
+  /api/v1/organizations/{id}/members/{personId}:
+    patch:
+      tags: [organizations]
+      summary: Replace a member's roles
+      description: >
+        Replaces the whole set. You cannot grant a role above your own, cannot change
+        someone who outranks you, and cannot leave the organization without an admin or
+        strip the owner's admin role -- there is no endpoint that could put either back.
+      security: [{ bearerAuth: [] }]
+      parameters:
+        - { $ref: "#/components/parameters/Id" }
+        - { $ref: "#/components/parameters/PersonId" }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [roles]
+              properties:
+                roles:
+                  type: array
+                  minItems: 1
+                  items: { $ref: "#/components/schemas/Role" }
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  personId: { type: string, format: uuid }
+                  roles: { type: array, items: { $ref: "#/components/schemas/Role" } }
+        "400": { $ref: "#/components/responses/Error" }
+        "403": { $ref: "#/components/responses/Error" }
+        "404": { $ref: "#/components/responses/Error" }
+        "409": { $ref: "#/components/responses/Error" }
+    delete:
+      tags: [organizations]
+      summary: Remove a member from the organization
+      description: >
+        Removes every role they hold in it. Subject to the same guards as a role change:
+        not someone who outranks you, not the owner, and not the last admin.
+      security: [{ bearerAuth: [] }]
+      parameters:
+        - { $ref: "#/components/parameters/Id" }
+        - { $ref: "#/components/parameters/PersonId" }
+      responses:
+        "200": { $ref: "#/components/responses/Ok" }
+        "403": { $ref: "#/components/responses/Error" }
+        "404": { $ref: "#/components/responses/Error" }
+        "409": { $ref: "#/components/responses/Error" }
   /api/v1/teams:
     get:
       tags: [teams]
@@ -502,7 +670,7 @@ paths:
       security: [{ bearerAuth: [] }]
       parameters:
         - { $ref: "#/components/parameters/Id" }
-        - { in: path, name: personId, required: true, schema: { type: string, format: uuid } }
+        - { $ref: "#/components/parameters/PersonId" }
       responses:
         "200": { $ref: "#/components/responses/Ok" }
         "404": { $ref: "#/components/responses/Error" }
@@ -736,6 +904,11 @@ components:
       name: id
       required: true
       schema: { type: string, format: uuid }
+    PersonId:
+      in: path
+      name: personId
+      required: true
+      schema: { type: string, format: uuid }
     OrgHeader:
       in: header
       name: X-Organization-ID
@@ -840,6 +1013,10 @@ components:
     Role:
       type: string
       enum: [admin, director, coach, parent, player]
+      description: >
+        Roles are stored one per membership row, so a person may hold several in the same
+        organization. admin, director and coach are staff and see the whole club; parent
+        sees only their recorded children, and player only themselves.
     FormContext:
       type: string
       enum: [tryout, pre_game, post_game, development, movement, coach_review]
@@ -905,6 +1082,14 @@ components:
             enrolled in it — a person with no organizational linkage would be visible to
             nobody, including you. Only the unprivileged roles can be granted this way,
             because the person has no login.
+    Member:
+      type: object
+      properties:
+        personId: { type: string, format: uuid }
+        displayName: { type: string }
+        email: { type: string, nullable: true }
+        roles: { type: array, items: { $ref: "#/components/schemas/Role" } }
+        isOwner: { type: boolean }
     Organization:
       type: object
       properties:

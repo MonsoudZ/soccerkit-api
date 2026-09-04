@@ -73,6 +73,77 @@ WHERE m.person_id = $1
 -- is sent. Without the tie-break that default is whatever Postgres happens to return.
 ORDER BY o.created_at ASC, o.id ASC;
 
+-- name: ListOrganizationMembers :many
+-- Everyone in an organization, one row per person with their roles gathered into an
+-- array. Roles are rows -- UNIQUE (person_id, organization_id, role) -- so a person
+-- holding both coach and parent is two memberships, and listing them unaggregated would
+-- show that person twice with no way to tell it was one human.
+--
+-- Deliberately not a person read: display_name and email are what a member list needs,
+-- and birthdate, phone and medical notes are not. Someone who may manage members is not
+-- thereby entitled to every athlete's medical history.
+SELECT p.id AS person_id, p.display_name, p.email,
+       array_agg(m.role ORDER BY m.role)::text[] AS roles,
+       bool_or(o.owner_person_id = p.id) AS is_owner
+FROM memberships m
+JOIN persons p ON p.id = m.person_id
+JOIN organizations o ON o.id = m.organization_id
+WHERE m.organization_id = $1 AND p.deleted = false
+GROUP BY p.id, p.display_name, p.email
+ORDER BY p.display_name ASC, p.id ASC;
+
+-- name: ListRolesForPersonInOrg :many
+-- One person's roles in one organization. Used before a role change, so the handler can
+-- say what it is replacing and refuse to strip the last admin.
+SELECT role FROM memberships
+WHERE person_id = $1 AND organization_id = $2
+ORDER BY role;
+
+-- name: DeleteMembershipsForPersonInOrg :exec
+-- Removes a person from an organization outright, every role at once. Roles are rows, so
+-- "remove this member" is a delete of the set rather than of one of them.
+DELETE FROM memberships WHERE person_id = $1 AND organization_id = $2;
+
+-- name: CountOtherAdminsInOrg :one
+-- How many admins an organization would still have without this person. The guard against
+-- the one mistake that cannot be undone through the API: an org whose last admin demotes
+-- or removes themselves has nobody left who can manage members, and no endpoint that can
+-- put one back.
+SELECT count(*) FROM memberships
+WHERE organization_id = $1 AND role = 'admin' AND person_id <> $2;
+
+-- name: GetPersonIDByAccountEmail :one
+-- Resolves the address a member is invited by to the Person it belongs to.
+--
+-- Addressing by email rather than by person id is the authorization: a person id is an
+-- opaque handle that says nothing about whether the caller has any business adding its
+-- owner, whereas knowing someone's sign-in address is the ordinary evidence that you
+-- know them. It also keeps this endpoint from becoming a way to sweep person ids and
+-- pull each one into an org to read it.
+--
+-- user_accounts.email, not persons.email: the former is the verified Apple claim and is
+-- UNIQUE, the latter is editable contact information and neither.
+SELECT ua.person_id FROM user_accounts ua WHERE ua.email = $1;
+
+-- name: IsGuardianOf :one
+-- Whether one person is a recorded guardian of another. This is what makes the parent
+-- role mean something narrower than "member of the org": a parent sees their own
+-- children and nobody else's.
+SELECT EXISTS (
+    SELECT 1 FROM guardianships
+     WHERE guardian_person_id = $1 AND child_person_id = $2
+);
+
+-- name: ListGuardiansForChild :many
+SELECT p.* FROM guardianships g
+JOIN persons p ON p.id = g.guardian_person_id
+WHERE g.child_person_id = $1 AND p.deleted = false
+ORDER BY p.display_name ASC;
+
+-- name: DeleteGuardianship :exec
+DELETE FROM guardianships
+WHERE guardian_person_id = $1 AND child_person_id = $2;
+
 -- name: UpdateOrganization :one
 -- Only the name. `kind` is deliberately not editable here: handleDeleteMe deletes the
 -- caller's *personal* orgs and orphans their clubs, so flipping kind would quietly
@@ -252,17 +323,11 @@ RETURNING *;
 -- matters because an athlete can be added to a team without a membership row of their
 -- own.
 --
--- The third arm was added with PATCH /persons/{id}. An athlete the app creates arrives
--- over /v1/sync carrying no membership and no roster row -- the app keeps that structure
--- on the phone -- so the first two arms do not see them, and every REST route keyed on a
--- person id answered 404 for the athletes a coach actually has. That made the person
--- endpoints reachable only for rows REST itself created.
---
--- It discloses nothing new: sync_account_id is set to the account that pushed the row,
--- so this arm matches only rows the caller wrote and already holds on their own device.
--- It is deliberately an ownership test, not an org test -- sync streams are per-account,
--- so a second coach in the same club does not see the first coach's un-rostered
--- athletes through it.
+-- This is the *organization* arm only. Sync ownership used to be a third disjunct here;
+-- it is PersonOwnedBySyncAccount now, because the two answer different questions and the
+-- role rules ask them of different callers. Staff get this one -- they run the club, so
+-- they see everyone in it. A parent does not, and would have been handed the whole club
+-- by the membership arm.
 SELECT EXISTS (
     SELECT 1 FROM persons p
      WHERE p.id = sqlc.arg('person_id')
@@ -274,6 +339,20 @@ SELECT EXISTS (
                       JOIN teams t ON t.id = rm.team_id
                      WHERE rm.person_id = p.id
                        AND t.organization_id = sqlc.arg('organization_id')
-                       AND t.deleted = false)
-         OR p.sync_account_id = sqlc.arg('viewer_person_id'))
+                       AND t.deleted = false))
+);
+
+-- name: PersonOwnedBySyncAccount :one
+-- Whether this Person is a row the caller pushed through sync themselves.
+--
+-- Separate from the org arms and available to every role, because it is not a claim
+-- about the organization: sync streams are per-account, so this matches only rows the
+-- caller wrote and already holds on their own device. An athlete the app creates arrives
+-- carrying no membership and no roster row, so without this the person endpoints answer
+-- 404 for the athletes a coach actually has.
+SELECT EXISTS (
+    SELECT 1 FROM persons p
+     WHERE p.id = sqlc.arg('person_id')
+       AND p.deleted = false
+       AND p.sync_account_id = sqlc.arg('viewer_person_id')
 );

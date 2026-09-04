@@ -12,6 +12,27 @@ import (
 	"github.com/jackc/pgx/v5/pgtype"
 )
 
+const countOtherAdminsInOrg = `-- name: CountOtherAdminsInOrg :one
+SELECT count(*) FROM memberships
+WHERE organization_id = $1 AND role = 'admin' AND person_id <> $2
+`
+
+type CountOtherAdminsInOrgParams struct {
+	OrganizationID uuid.UUID `json:"organization_id"`
+	PersonID       uuid.UUID `json:"person_id"`
+}
+
+// How many admins an organization would still have without this person. The guard against
+// the one mistake that cannot be undone through the API: an org whose last admin demotes
+// or removes themselves has nobody left who can manage members, and no endpoint that can
+// put one back.
+func (q *Queries) CountOtherAdminsInOrg(ctx context.Context, arg CountOtherAdminsInOrgParams) (int64, error) {
+	row := q.db.QueryRow(ctx, countOtherAdminsInOrg, arg.OrganizationID, arg.PersonID)
+	var count int64
+	err := row.Scan(&count)
+	return count, err
+}
+
 const createGuardianship = `-- name: CreateGuardianship :one
 INSERT INTO guardianships (guardian_person_id, child_person_id)
 VALUES ($1, $2)
@@ -248,6 +269,37 @@ func (q *Queries) CreateUserAccount(ctx context.Context, arg CreateUserAccountPa
 	return i, err
 }
 
+const deleteGuardianship = `-- name: DeleteGuardianship :exec
+DELETE FROM guardianships
+WHERE guardian_person_id = $1 AND child_person_id = $2
+`
+
+type DeleteGuardianshipParams struct {
+	GuardianPersonID uuid.UUID `json:"guardian_person_id"`
+	ChildPersonID    uuid.UUID `json:"child_person_id"`
+}
+
+func (q *Queries) DeleteGuardianship(ctx context.Context, arg DeleteGuardianshipParams) error {
+	_, err := q.db.Exec(ctx, deleteGuardianship, arg.GuardianPersonID, arg.ChildPersonID)
+	return err
+}
+
+const deleteMembershipsForPersonInOrg = `-- name: DeleteMembershipsForPersonInOrg :exec
+DELETE FROM memberships WHERE person_id = $1 AND organization_id = $2
+`
+
+type DeleteMembershipsForPersonInOrgParams struct {
+	PersonID       uuid.UUID `json:"person_id"`
+	OrganizationID uuid.UUID `json:"organization_id"`
+}
+
+// Removes a person from an organization outright, every role at once. Roles are rows, so
+// "remove this member" is a delete of the set rather than of one of them.
+func (q *Queries) DeleteMembershipsForPersonInOrg(ctx context.Context, arg DeleteMembershipsForPersonInOrgParams) error {
+	_, err := q.db.Exec(ctx, deleteMembershipsForPersonInOrg, arg.PersonID, arg.OrganizationID)
+	return err
+}
+
 const deleteOrganizationsByIDs = `-- name: DeleteOrganizationsByIDs :exec
 DELETE FROM organizations WHERE id = ANY($1::uuid[])
 `
@@ -334,6 +386,27 @@ func (q *Queries) GetPerson(ctx context.Context, id uuid.UUID) (Person, error) {
 	return i, err
 }
 
+const getPersonIDByAccountEmail = `-- name: GetPersonIDByAccountEmail :one
+SELECT ua.person_id FROM user_accounts ua WHERE ua.email = $1
+`
+
+// Resolves the address a member is invited by to the Person it belongs to.
+//
+// Addressing by email rather than by person id is the authorization: a person id is an
+// opaque handle that says nothing about whether the caller has any business adding its
+// owner, whereas knowing someone's sign-in address is the ordinary evidence that you
+// know them. It also keeps this endpoint from becoming a way to sweep person ids and
+// pull each one into an org to read it.
+//
+// user_accounts.email, not persons.email: the former is the verified Apple claim and is
+// UNIQUE, the latter is editable contact information and neither.
+func (q *Queries) GetPersonIDByAccountEmail(ctx context.Context, email string) (uuid.UUID, error) {
+	row := q.db.QueryRow(ctx, getPersonIDByAccountEmail, email)
+	var person_id uuid.UUID
+	err := row.Scan(&person_id)
+	return person_id, err
+}
+
 const getRefreshToken = `-- name: GetRefreshToken :one
 SELECT id, token_hash, user_account_id, expires_at, revoked_at, created_at FROM refresh_tokens WHERE token_hash = $1
 `
@@ -406,6 +479,28 @@ func (q *Queries) GetUserAccountByID(ctx context.Context, id uuid.UUID) (UserAcc
 	return i, err
 }
 
+const isGuardianOf = `-- name: IsGuardianOf :one
+SELECT EXISTS (
+    SELECT 1 FROM guardianships
+     WHERE guardian_person_id = $1 AND child_person_id = $2
+)
+`
+
+type IsGuardianOfParams struct {
+	GuardianPersonID uuid.UUID `json:"guardian_person_id"`
+	ChildPersonID    uuid.UUID `json:"child_person_id"`
+}
+
+// Whether one person is a recorded guardian of another. This is what makes the parent
+// role mean something narrower than "member of the org": a parent sees their own
+// children and nobody else's.
+func (q *Queries) IsGuardianOf(ctx context.Context, arg IsGuardianOfParams) (bool, error) {
+	row := q.db.QueryRow(ctx, isGuardianOf, arg.GuardianPersonID, arg.ChildPersonID)
+	var exists bool
+	err := row.Scan(&exists)
+	return exists, err
+}
+
 const listChildren = `-- name: ListChildren :many
 SELECT p.id, p.display_name, p.given_name, p.family_name, p.birthdate, p.email, p.phone, p.emergency_contact_name, p.emergency_contact_phone, p.medical_notes, p.created_at, p.updated_at, p.sync_account_id, p.payload, p.deleted, p.seq FROM guardianships g
 JOIN persons p ON p.id = g.child_person_id
@@ -419,6 +514,50 @@ ORDER BY p.display_name ASC
 // exposed -- which is exactly why it is worth fixing before something does.
 func (q *Queries) ListChildren(ctx context.Context, guardianPersonID uuid.UUID) ([]Person, error) {
 	rows, err := q.db.Query(ctx, listChildren, guardianPersonID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []Person
+	for rows.Next() {
+		var i Person
+		if err := rows.Scan(
+			&i.ID,
+			&i.DisplayName,
+			&i.GivenName,
+			&i.FamilyName,
+			&i.Birthdate,
+			&i.Email,
+			&i.Phone,
+			&i.EmergencyContactName,
+			&i.EmergencyContactPhone,
+			&i.MedicalNotes,
+			&i.CreatedAt,
+			&i.UpdatedAt,
+			&i.SyncAccountID,
+			&i.Payload,
+			&i.Deleted,
+			&i.Seq,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
+const listGuardiansForChild = `-- name: ListGuardiansForChild :many
+SELECT p.id, p.display_name, p.given_name, p.family_name, p.birthdate, p.email, p.phone, p.emergency_contact_name, p.emergency_contact_phone, p.medical_notes, p.created_at, p.updated_at, p.sync_account_id, p.payload, p.deleted, p.seq FROM guardianships g
+JOIN persons p ON p.id = g.guardian_person_id
+WHERE g.child_person_id = $1 AND p.deleted = false
+ORDER BY p.display_name ASC
+`
+
+func (q *Queries) ListGuardiansForChild(ctx context.Context, childPersonID uuid.UUID) ([]Person, error) {
+	rows, err := q.db.Query(ctx, listGuardiansForChild, childPersonID)
 	if err != nil {
 		return nil, err
 	}
@@ -499,6 +638,60 @@ func (q *Queries) ListMembershipsForPerson(ctx context.Context, personID uuid.UU
 	return items, nil
 }
 
+const listOrganizationMembers = `-- name: ListOrganizationMembers :many
+SELECT p.id AS person_id, p.display_name, p.email,
+       array_agg(m.role ORDER BY m.role)::text[] AS roles,
+       bool_or(o.owner_person_id = p.id) AS is_owner
+FROM memberships m
+JOIN persons p ON p.id = m.person_id
+JOIN organizations o ON o.id = m.organization_id
+WHERE m.organization_id = $1 AND p.deleted = false
+GROUP BY p.id, p.display_name, p.email
+ORDER BY p.display_name ASC, p.id ASC
+`
+
+type ListOrganizationMembersRow struct {
+	PersonID    uuid.UUID `json:"person_id"`
+	DisplayName string    `json:"display_name"`
+	Email       *string   `json:"email"`
+	Roles       []string  `json:"roles"`
+	IsOwner     bool      `json:"is_owner"`
+}
+
+// Everyone in an organization, one row per person with their roles gathered into an
+// array. Roles are rows -- UNIQUE (person_id, organization_id, role) -- so a person
+// holding both coach and parent is two memberships, and listing them unaggregated would
+// show that person twice with no way to tell it was one human.
+//
+// Deliberately not a person read: display_name and email are what a member list needs,
+// and birthdate, phone and medical notes are not. Someone who may manage members is not
+// thereby entitled to every athlete's medical history.
+func (q *Queries) ListOrganizationMembers(ctx context.Context, organizationID uuid.UUID) ([]ListOrganizationMembersRow, error) {
+	rows, err := q.db.Query(ctx, listOrganizationMembers, organizationID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []ListOrganizationMembersRow
+	for rows.Next() {
+		var i ListOrganizationMembersRow
+		if err := rows.Scan(
+			&i.PersonID,
+			&i.DisplayName,
+			&i.Email,
+			&i.Roles,
+			&i.IsOwner,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
 const listOwnedPersonalOrgIDsForPerson = `-- name: ListOwnedPersonalOrgIDsForPerson :many
 SELECT o.id
 FROM organizations o
@@ -537,6 +730,39 @@ func (q *Queries) ListOwnedPersonalOrgIDsForPerson(ctx context.Context, ownerPer
 	return items, nil
 }
 
+const listRolesForPersonInOrg = `-- name: ListRolesForPersonInOrg :many
+SELECT role FROM memberships
+WHERE person_id = $1 AND organization_id = $2
+ORDER BY role
+`
+
+type ListRolesForPersonInOrgParams struct {
+	PersonID       uuid.UUID `json:"person_id"`
+	OrganizationID uuid.UUID `json:"organization_id"`
+}
+
+// One person's roles in one organization. Used before a role change, so the handler can
+// say what it is replacing and refuse to strip the last admin.
+func (q *Queries) ListRolesForPersonInOrg(ctx context.Context, arg ListRolesForPersonInOrgParams) ([]string, error) {
+	rows, err := q.db.Query(ctx, listRolesForPersonInOrg, arg.PersonID, arg.OrganizationID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []string
+	for rows.Next() {
+		var role string
+		if err := rows.Scan(&role); err != nil {
+			return nil, err
+		}
+		items = append(items, role)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
 const personHasUserAccount = `-- name: PersonHasUserAccount :one
 SELECT EXISTS (
     SELECT 1 FROM user_accounts WHERE person_id = $1
@@ -548,6 +774,34 @@ SELECT EXISTS (
 // create -- someone with an account edits their own row.
 func (q *Queries) PersonHasUserAccount(ctx context.Context, personID uuid.UUID) (bool, error) {
 	row := q.db.QueryRow(ctx, personHasUserAccount, personID)
+	var exists bool
+	err := row.Scan(&exists)
+	return exists, err
+}
+
+const personOwnedBySyncAccount = `-- name: PersonOwnedBySyncAccount :one
+SELECT EXISTS (
+    SELECT 1 FROM persons p
+     WHERE p.id = $1
+       AND p.deleted = false
+       AND p.sync_account_id = $2
+)
+`
+
+type PersonOwnedBySyncAccountParams struct {
+	PersonID       uuid.UUID  `json:"person_id"`
+	ViewerPersonID *uuid.UUID `json:"viewer_person_id"`
+}
+
+// Whether this Person is a row the caller pushed through sync themselves.
+//
+// Separate from the org arms and available to every role, because it is not a claim
+// about the organization: sync streams are per-account, so this matches only rows the
+// caller wrote and already holds on their own device. An athlete the app creates arrives
+// carrying no membership and no roster row, so without this the person endpoints answer
+// 404 for the athletes a coach actually has.
+func (q *Queries) PersonOwnedBySyncAccount(ctx context.Context, arg PersonOwnedBySyncAccountParams) (bool, error) {
+	row := q.db.QueryRow(ctx, personOwnedBySyncAccount, arg.PersonID, arg.ViewerPersonID)
 	var exists bool
 	err := row.Scan(&exists)
 	return exists, err
@@ -565,15 +819,13 @@ SELECT EXISTS (
                       JOIN teams t ON t.id = rm.team_id
                      WHERE rm.person_id = p.id
                        AND t.organization_id = $2
-                       AND t.deleted = false)
-         OR p.sync_account_id = $3)
+                       AND t.deleted = false))
 )
 `
 
 type PersonVisibleInOrgParams struct {
-	PersonID       uuid.UUID  `json:"person_id"`
-	OrganizationID uuid.UUID  `json:"organization_id"`
-	ViewerPersonID *uuid.UUID `json:"viewer_person_id"`
+	PersonID       uuid.UUID `json:"person_id"`
+	OrganizationID uuid.UUID `json:"organization_id"`
 }
 
 // Whether the caller may see a Person at all: they are not tombstoned, and one of three
@@ -582,19 +834,13 @@ type PersonVisibleInOrgParams struct {
 // matters because an athlete can be added to a team without a membership row of their
 // own.
 //
-// The third arm was added with PATCH /persons/{id}. An athlete the app creates arrives
-// over /v1/sync carrying no membership and no roster row -- the app keeps that structure
-// on the phone -- so the first two arms do not see them, and every REST route keyed on a
-// person id answered 404 for the athletes a coach actually has. That made the person
-// endpoints reachable only for rows REST itself created.
-//
-// It discloses nothing new: sync_account_id is set to the account that pushed the row,
-// so this arm matches only rows the caller wrote and already holds on their own device.
-// It is deliberately an ownership test, not an org test -- sync streams are per-account,
-// so a second coach in the same club does not see the first coach's un-rostered
-// athletes through it.
+// This is the *organization* arm only. Sync ownership used to be a third disjunct here;
+// it is PersonOwnedBySyncAccount now, because the two answer different questions and the
+// role rules ask them of different callers. Staff get this one -- they run the club, so
+// they see everyone in it. A parent does not, and would have been handed the whole club
+// by the membership arm.
 func (q *Queries) PersonVisibleInOrg(ctx context.Context, arg PersonVisibleInOrgParams) (bool, error) {
-	row := q.db.QueryRow(ctx, personVisibleInOrg, arg.PersonID, arg.OrganizationID, arg.ViewerPersonID)
+	row := q.db.QueryRow(ctx, personVisibleInOrg, arg.PersonID, arg.OrganizationID)
 	var exists bool
 	err := row.Scan(&exists)
 	return exists, err

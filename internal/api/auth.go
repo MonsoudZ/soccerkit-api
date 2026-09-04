@@ -106,6 +106,10 @@ func personIDFrom(ctx context.Context) uuid.UUID {
 type orgContext struct {
 	orgID uuid.UUID
 	roles map[string]bool
+	// callerID is the authenticated Person, carried here because the role rules ask
+	// about the caller as often as about the org: who owns this club, whose children
+	// are these, is this row mine.
+	callerID uuid.UUID
 }
 
 func (o orgContext) hasAnyRole(roles ...string) bool {
@@ -155,5 +159,5 @@ func (s *Server) resolveOrg(r *http.Request) (orgContext, error) {
 	if !found {
 		return orgContext{}, errForbidden("you are not a member of that organization")
 	}
-	return orgContext{orgID: chosen, roles: roles}, nil
+	return orgContext{orgID: chosen, roles: roles, callerID: personID}, nil
 }

@@ -1,10 +1,7 @@
 package api
 
 import (
-	"errors"
 	"net/http"
-
-	"github.com/jackc/pgx/v5"
 
 	"github.com/monsoudz/soccerkit-api/internal/store"
 )
@@ -44,34 +41,16 @@ func (s *Server) handleUpdateOrganization(w http.ResponseWriter, r *http.Request
 		writeError(w, err)
 		return
 	}
-	id, err := pathUUID(r, "id")
+	org, err := s.orgFromPath(r, oc)
 	if err != nil {
 		writeError(w, err)
 		return
 	}
-	// Every route in this API acts in one organization at a time, the one resolved from
-	// X-Organization-ID (or the caller's only org). Editing a different one you happen
-	// to belong to would be the single exception, so it is refused with the header to
-	// set rather than quietly resolved a second way.
-	if id != oc.orgID {
-		writeError(w, errForbidden(
-			"that is not the organization you are acting in; set X-Organization-ID to it"))
-		return
-	}
-	org, err := s.store.GetOrganization(r.Context(), id)
-	if errors.Is(err, pgx.ErrNoRows) {
-		writeError(w, errNotFound("organization not found"))
-		return
-	} else if err != nil {
-		writeError(w, err)
-		return
-	}
 	// An owner who somehow holds no admin membership can still rename what they own;
-	// otherwise this is an administrative act, not a coaching one.
-	callerID := personIDFrom(r.Context())
-	owns := org.OwnerPersonID != nil && *org.OwnerPersonID == callerID
-	if !owns && !oc.hasAnyRole("admin", "director") {
-		writeError(w, errForbidden("only an admin, director or the owner can rename an organization"))
+	// otherwise this is an administrative act, not a coaching one. Same gate as member
+	// management, and for the same reason.
+	if err := s.requireMemberManager(oc, org); err != nil {
+		writeError(w, err)
 		return
 	}
 
@@ -80,7 +59,7 @@ func (s *Server) handleUpdateOrganization(w http.ResponseWriter, r *http.Request
 		writeError(w, err)
 		return
 	}
-	params := store.UpdateOrganizationParams{ID: id}
+	params := store.UpdateOrganizationParams{ID: org.ID}
 	if v, ok := raw["name"]; ok {
 		name, verr := requiredString(v, "name")
 		if verr != nil {

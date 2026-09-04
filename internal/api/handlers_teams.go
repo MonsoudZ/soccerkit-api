@@ -86,12 +86,16 @@ func (s *Server) handleGetTeam(w http.ResponseWriter, r *http.Request) {
 		writeError(w, err)
 		return
 	}
-	entries := make([]RosterEntry, len(roster))
-	for i, row := range roster {
-		entries[i] = rosterRowDTO(row)
+	entries, err := s.visibleRoster(r.Context(), oc, roster)
+	if err != nil {
+		writeError(w, err)
+		return
 	}
+	// The count is the squad's, not the caller's slice of it: how many players a team
+	// carries is not a disclosure about any of them, and a parent seeing "1" for a team
+	// of fifteen would be wrong rather than private.
 	writeJSON(w, http.StatusOK, map[string]any{
-		"team":   teamDTO(team, int64(len(entries))),
+		"team":   teamDTO(team, int64(len(roster))),
 		"roster": entries,
 	})
 }
@@ -247,31 +251,72 @@ func (s *Server) teamByIDInOrg(ctx context.Context, oc orgContext, id uuid.UUID)
 	return team, nil
 }
 
-// personVisibleTo reports whether the caller's organization may see a Person, and is
-// the check the person, roster and evaluation endpoints share.
+// personVisibleTo reports whether the caller may see a Person, and is the check the
+// person, roster and evaluation endpoints share. These endpoints return birthdate,
+// contact details and medical notes, so an ungated read is a disclosure of a minor's
+// PII.
 //
-// A Person is visible when they hold a membership in the caller's org, are rostered on
-// one of its teams, or are the caller themselves. Everything else is a 404 rather than
-// a 403: these ids are not enumerable, and answering "forbidden" would confirm that a
-// given id exists, which is itself a disclosure about someone in another club.
+// It used to ask one question -- is the subject in the caller's organization -- and
+// never what the caller was. Every member therefore saw every athlete: a parent could
+// read another family's medical notes, and a player their whole squad's contact
+// details. Nothing exploited it because the roles that would have suffered it could not
+// be granted to anyone able to log in; member management is what makes it reachable, so
+// the gate lands in the same change.
+//
+// The rules, in the order they are asked:
+//
+//   - Yourself, always.
+//   - Rows you pushed through sync, whatever role you hold. That is per-account and not
+//     per-org, so it is a statement about your own data rather than about the club.
+//   - Staff (admin, director, coach) see the organization they run: anyone holding a
+//     membership in it, or rostered on one of its teams.
+//   - A parent sees the children they are a recorded guardian of, and no others.
+//   - A player sees themselves, which the first rule already answered.
+//
+// Everything else is 404 rather than 403: these ids are not enumerable, and answering
+// "forbidden" would confirm that a given id exists, which is itself a disclosure about
+// someone in another club.
 func (s *Server) personVisibleTo(ctx context.Context, oc orgContext, personID uuid.UUID) error {
-	if personID == personIDFrom(ctx) {
+	caller := personIDFrom(ctx)
+	if personID == caller {
 		return nil
 	}
-	// sync_account_id is nullable, so the comparison column is a pointer. The caller is
-	// always authenticated here, so this is never the nil UUID in practice -- and a nil
-	// UUID would match no row anyway, since no account has that id.
-	viewer := personIDFrom(ctx)
-	visible, err := s.store.PersonVisibleInOrg(ctx, store.PersonVisibleInOrgParams{
-		PersonID: personID, OrganizationID: oc.orgID, ViewerPersonID: &viewer,
+
+	owned, err := s.store.PersonOwnedBySyncAccount(ctx, store.PersonOwnedBySyncAccountParams{
+		PersonID: personID, ViewerPersonID: &caller,
 	})
 	if err != nil {
 		return err
 	}
-	if !visible {
-		return errNotFound("person not found")
+	if owned {
+		return nil
 	}
-	return nil
+
+	if oc.isStaff() {
+		visible, err := s.store.PersonVisibleInOrg(ctx, store.PersonVisibleInOrgParams{
+			PersonID: personID, OrganizationID: oc.orgID,
+		})
+		if err != nil {
+			return err
+		}
+		if !visible {
+			return errNotFound("person not found")
+		}
+		return nil
+	}
+
+	if oc.roles[roleParent] {
+		isGuardian, err := s.store.IsGuardianOf(ctx, store.IsGuardianOfParams{
+			GuardianPersonID: caller, ChildPersonID: personID,
+		})
+		if err != nil {
+			return err
+		}
+		if isGuardian {
+			return nil
+		}
+	}
+	return errNotFound("person not found")
 }
 
 // updatableTeamFields is the set PATCH /teams/{id} accepts.
@@ -375,4 +420,42 @@ func newTeamPayload(id uuid.UUID, name string, ageGroup, season *string) []byte 
 		return nil
 	}
 	return payload
+}
+
+// visibleRoster narrows a team's roster to the entries the caller may see.
+//
+// Staff see the squad. Everyone else sees themselves and their own children, because the
+// roster carries each athlete's name, email and birthdate -- handing the whole list to a
+// parent is the same disclosure personVisibleTo refuses one id at a time, and it was the
+// easier of the two to reach: one GET returned the lot.
+//
+// The children are loaded once rather than asked per row. personVisibleTo would answer
+// each entry correctly, but at a query per athlete on a page that has already read the
+// whole squad.
+func (s *Server) visibleRoster(ctx context.Context, oc orgContext, rows []store.ListActiveRosterRow) ([]RosterEntry, error) {
+	entries := make([]RosterEntry, 0, len(rows))
+	if oc.isStaff() {
+		for _, row := range rows {
+			entries = append(entries, rosterRowDTO(row))
+		}
+		return entries, nil
+	}
+
+	caller := personIDFrom(ctx)
+	mine := map[uuid.UUID]bool{caller: true}
+	if oc.roles[roleParent] {
+		children, err := s.store.ListChildren(ctx, caller)
+		if err != nil {
+			return nil, err
+		}
+		for _, child := range children {
+			mine[child.ID] = true
+		}
+	}
+	for _, row := range rows {
+		if mine[row.PersonID] {
+			entries = append(entries, rosterRowDTO(row))
+		}
+	}
+	return entries, nil
 }

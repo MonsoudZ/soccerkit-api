@@ -37,6 +37,11 @@ type Querier interface {
 	// because the request is rejected as a whole, and it keeps the check to one round trip
 	// however many blocks the session has.
 	CountDrillsInOrgByIDs(ctx context.Context, arg CountDrillsInOrgByIDsParams) (int64, error)
+	// How many admins an organization would still have without this person. The guard against
+	// the one mistake that cannot be undone through the API: an org whose last admin demotes
+	// or removes themselves has nobody left who can manage members, and no endpoint that can
+	// put one back.
+	CountOtherAdminsInOrg(ctx context.Context, arg CountOtherAdminsInOrgParams) (int64, error)
 	// Drills --------------------------------------------------------------------
 	CreateDrill(ctx context.Context, arg CreateDrillParams) (Drill, error)
 	CreateFormAnswer(ctx context.Context, arg CreateFormAnswerParams) (FormAnswer, error)
@@ -118,6 +123,10 @@ type Querier interface {
 	// returned, resyncing that device from the beginning on every single pull. The caller
 	// reads `known = false` as "no bound available" and lets the cursor stand.
 	CurrentSyncSeq(ctx context.Context) (CurrentSyncSeqRow, error)
+	DeleteGuardianship(ctx context.Context, arg DeleteGuardianshipParams) error
+	// Removes a person from an organization outright, every role at once. Roles are rows, so
+	// "remove this member" is a delete of the set rather than of one of them.
+	DeleteMembershipsForPersonInOrg(ctx context.Context, arg DeleteMembershipsForPersonInOrgParams) error
 	DeleteOrganizationsByIDs(ctx context.Context, ids []uuid.UUID) error
 	DeletePersonByID(ctx context.Context, id uuid.UUID) error
 	DeletePersonsByIDs(ctx context.Context, ids []uuid.UUID) error
@@ -142,12 +151,27 @@ type Querier interface {
 	GetGame(ctx context.Context, id uuid.UUID) (Game, error)
 	GetOrganization(ctx context.Context, id uuid.UUID) (Organization, error)
 	GetPerson(ctx context.Context, id uuid.UUID) (Person, error)
+	// Resolves the address a member is invited by to the Person it belongs to.
+	//
+	// Addressing by email rather than by person id is the authorization: a person id is an
+	// opaque handle that says nothing about whether the caller has any business adding its
+	// owner, whereas knowing someone's sign-in address is the ordinary evidence that you
+	// know them. It also keeps this endpoint from becoming a way to sweep person ids and
+	// pull each one into an org to read it.
+	//
+	// user_accounts.email, not persons.email: the former is the verified Apple claim and is
+	// UNIQUE, the latter is editable contact information and neither.
+	GetPersonIDByAccountEmail(ctx context.Context, email string) (uuid.UUID, error)
 	GetRefreshToken(ctx context.Context, tokenHash string) (RefreshToken, error)
 	GetSession(ctx context.Context, id uuid.UUID) (Session, error)
 	GetTeam(ctx context.Context, id uuid.UUID) (Team, error)
 	GetUserAccountByAppleSub(ctx context.Context, appleSub *string) (UserAccount, error)
 	GetUserAccountByEmail(ctx context.Context, email string) (UserAccount, error)
 	GetUserAccountByID(ctx context.Context, id uuid.UUID) (UserAccount, error)
+	// Whether one person is a recorded guardian of another. This is what makes the parent
+	// role mean something narrower than "member of the org": a parent sees their own
+	// children and nobody else's.
+	IsGuardianOf(ctx context.Context, arg IsGuardianOfParams) (bool, error)
 	ListActiveRoster(ctx context.Context, teamID uuid.UUID) ([]ListActiveRosterRow, error)
 	ListAnswersForInstance(ctx context.Context, instanceID uuid.UUID) ([]ListAnswersForInstanceRow, error)
 	// p.deleted = false for the same reason every other person read has it: a tombstoned
@@ -159,11 +183,21 @@ type Querier interface {
 	ListFormFields(ctx context.Context, templateID uuid.UUID) ([]FormField, error)
 	ListFormTemplates(ctx context.Context, arg ListFormTemplatesParams) ([]FormTemplate, error)
 	ListGamesForTeam(ctx context.Context, teamID uuid.UUID) ([]Game, error)
+	ListGuardiansForChild(ctx context.Context, childPersonID uuid.UUID) ([]Person, error)
 	ListInstancesForPerson(ctx context.Context, arg ListInstancesForPersonParams) ([]ListInstancesForPersonRow, error)
 	// Tie-broken on id: orgs created inside one transaction share a now() timestamp, and
 	// resolveOrg takes the first row as the caller's default org when no X-Organization-ID
 	// is sent. Without the tie-break that default is whatever Postgres happens to return.
 	ListMembershipsForPerson(ctx context.Context, personID uuid.UUID) ([]ListMembershipsForPersonRow, error)
+	// Everyone in an organization, one row per person with their roles gathered into an
+	// array. Roles are rows -- UNIQUE (person_id, organization_id, role) -- so a person
+	// holding both coach and parent is two memberships, and listing them unaggregated would
+	// show that person twice with no way to tell it was one human.
+	//
+	// Deliberately not a person read: display_name and email are what a member list needs,
+	// and birthdate, phone and medical notes are not. Someone who may manage members is not
+	// thereby entitled to every athlete's medical history.
+	ListOrganizationMembers(ctx context.Context, organizationID uuid.UUID) ([]ListOrganizationMembersRow, error)
 	// The personal org(s) this person owns, selected on organizations.owner_person_id.
 	//
 	// This used to select on membership and argue that the two were the same thing —
@@ -177,6 +211,9 @@ type Querier interface {
 	// owner's account should destroy the club is a product decision that has not been made,
 	// and the conservative answer — orphan it, leave the data — matches today's behaviour.
 	ListOwnedPersonalOrgIDsForPerson(ctx context.Context, ownerPersonID *uuid.UUID) ([]uuid.UUID, error)
+	// One person's roles in one organization. Used before a role change, so the handler can
+	// say what it is replacing and refuse to strip the last admin.
+	ListRolesForPersonInOrg(ctx context.Context, arg ListRolesForPersonInOrgParams) ([]string, error)
 	ListSessionBlocks(ctx context.Context, sessionID uuid.UUID) ([]ListSessionBlocksRow, error)
 	ListSessionsInOrg(ctx context.Context, arg ListSessionsInOrgParams) ([]Session, error)
 	// The delta an account hasn't seen: synced rows across every source, ordered by
@@ -232,23 +269,25 @@ type Querier interface {
 	// rights to the loginless athletes they manage, the same population POST /persons can
 	// create -- someone with an account edits their own row.
 	PersonHasUserAccount(ctx context.Context, personID uuid.UUID) (bool, error)
+	// Whether this Person is a row the caller pushed through sync themselves.
+	//
+	// Separate from the org arms and available to every role, because it is not a claim
+	// about the organization: sync streams are per-account, so this matches only rows the
+	// caller wrote and already holds on their own device. An athlete the app creates arrives
+	// carrying no membership and no roster row, so without this the person endpoints answer
+	// 404 for the athletes a coach actually has.
+	PersonOwnedBySyncAccount(ctx context.Context, arg PersonOwnedBySyncAccountParams) (bool, error)
 	// Whether the caller may see a Person at all: they are not tombstoned, and one of three
 	// things is true -- they hold a membership in the caller's org, they are rostered on one
 	// of its live teams, or the caller pushed them through sync themselves. The roster arm
 	// matters because an athlete can be added to a team without a membership row of their
 	// own.
 	//
-	// The third arm was added with PATCH /persons/{id}. An athlete the app creates arrives
-	// over /v1/sync carrying no membership and no roster row -- the app keeps that structure
-	// on the phone -- so the first two arms do not see them, and every REST route keyed on a
-	// person id answered 404 for the athletes a coach actually has. That made the person
-	// endpoints reachable only for rows REST itself created.
-	//
-	// It discloses nothing new: sync_account_id is set to the account that pushed the row,
-	// so this arm matches only rows the caller wrote and already holds on their own device.
-	// It is deliberately an ownership test, not an org test -- sync streams are per-account,
-	// so a second coach in the same club does not see the first coach's un-rostered
-	// athletes through it.
+	// This is the *organization* arm only. Sync ownership used to be a third disjunct here;
+	// it is PersonOwnedBySyncAccount now, because the two answer different questions and the
+	// role rules ask them of different callers. Staff get this one -- they run the club, so
+	// they see everyone in it. A parent does not, and would have been handed the whole club
+	// by the membership arm.
 	PersonVisibleInOrg(ctx context.Context, arg PersonVisibleInOrgParams) (bool, error)
 	// Delete refresh tokens that expired long enough ago to be of no further use.
 	//
