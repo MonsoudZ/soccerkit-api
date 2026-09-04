@@ -16,6 +16,16 @@ func rfc3339(ts pgtype.Timestamptz) string {
 	return ts.Time.UTC().Format(time.RFC3339)
 }
 
+// timePtr is rfc3339 for a column that is genuinely optional, where "" and "never" are
+// different answers a client has to be able to tell apart.
+func timePtr(ts pgtype.Timestamptz) *string {
+	if !ts.Valid {
+		return nil
+	}
+	s := rfc3339(ts)
+	return &s
+}
+
 func dateStr(d pgtype.Date) *string {
 	if !d.Valid {
 		return nil
@@ -263,6 +273,65 @@ func gameDTO(g store.Game) Game {
 		HomeAway: g.HomeAway, OurScore: g.OurScore, OpponentScore: g.OpponentScore,
 		Status: g.Status, CreatedAt: rfc3339(g.CreatedAt),
 	}
+}
+
+// AttendanceEntry is one line of the sheet: a person, and both halves of what is known
+// about them at this event. Every field of both halves is nullable, because "has not
+// replied" and "not recorded yet" are the state most lines are in most of the time.
+type AttendanceEntry struct {
+	PersonID     uuid.UUID `json:"personId"`
+	DisplayName  string    `json:"displayName"`
+	JerseyNumber *int32    `json:"jerseyNumber"`
+	Position     *string   `json:"position"`
+	// OnRoster is false for someone who was at the event but has since left the team.
+	// Their line stays on the sheet -- a player who left in March was still at February's
+	// match -- and this is what lets a client show it as history rather than as a squad
+	// member who has not replied.
+	OnRoster   bool       `json:"onRoster"`
+	RSVP       *string    `json:"rsvp"`
+	RSVPNote   *string    `json:"rsvpNote"`
+	RSVPAt     *string    `json:"rsvpAt"`
+	RSVPBy     *uuid.UUID `json:"rsvpBy"`
+	Status     *string    `json:"status"`
+	StatusNote *string    `json:"statusNote"`
+	RecordedAt *string    `json:"recordedAt"`
+	RecordedBy *uuid.UUID `json:"recordedBy"`
+}
+
+func attendanceEntryDTO(r store.ListAttendanceForEventRow) AttendanceEntry {
+	return AttendanceEntry{
+		PersonID: r.PersonID, DisplayName: r.DisplayName, JerseyNumber: r.JerseyNumber,
+		Position: r.Position, OnRoster: r.OnRoster,
+		RSVP: r.Rsvp, RSVPNote: r.RsvpNote, RSVPAt: timePtr(r.RsvpAt), RSVPBy: r.RsvpByPersonID,
+		Status: r.Status, StatusNote: r.StatusNote, RecordedAt: timePtr(r.RecordedAt),
+		RecordedBy: r.RecordedByPersonID,
+	}
+}
+
+// AttendanceCounts is the squad's tally, which is what a coach reads before they read any
+// line. Both halves carry a "neither" bucket: a squad nobody has asked and a squad that
+// answered no are the same size and mean opposite things.
+type AttendanceCounts struct {
+	Going       int `json:"going"`
+	Maybe       int `json:"maybe"`
+	NotGoing    int `json:"notGoing"`
+	NoReply     int `json:"noReply"`
+	Present     int `json:"present"`
+	Absent      int `json:"absent"`
+	Late        int `json:"late"`
+	Excused     int `json:"excused"`
+	NotRecorded int `json:"notRecorded"`
+}
+
+// AttendanceSheet is one event's attendance, whole. EventType names which of the two
+// scheduled things this is, so a client holding a sheet knows what to call it without
+// remembering which endpoint it asked.
+type AttendanceSheet struct {
+	EventType string            `json:"eventType"`
+	EventID   uuid.UUID         `json:"eventId"`
+	TeamID    uuid.UUID         `json:"teamId"`
+	Counts    AttendanceCounts  `json:"counts"`
+	Entries   []AttendanceEntry `json:"entries"`
 }
 
 type ScoreAggregate struct {

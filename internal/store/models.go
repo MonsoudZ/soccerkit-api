@@ -9,6 +9,23 @@ import (
 	"github.com/jackc/pgx/v5/pgtype"
 )
 
+type Attendance struct {
+	ID                 uuid.UUID          `json:"id"`
+	GameID             *uuid.UUID         `json:"game_id"`
+	SessionID          *uuid.UUID         `json:"session_id"`
+	PersonID           uuid.UUID          `json:"person_id"`
+	Rsvp               *string            `json:"rsvp"`
+	RsvpNote           *string            `json:"rsvp_note"`
+	RsvpAt             pgtype.Timestamptz `json:"rsvp_at"`
+	RsvpByPersonID     *uuid.UUID         `json:"rsvp_by_person_id"`
+	Status             *string            `json:"status"`
+	StatusNote         *string            `json:"status_note"`
+	RecordedAt         pgtype.Timestamptz `json:"recorded_at"`
+	RecordedByPersonID *uuid.UUID         `json:"recorded_by_person_id"`
+	CreatedAt          pgtype.Timestamptz `json:"created_at"`
+	UpdatedAt          pgtype.Timestamptz `json:"updated_at"`
+}
+
 type DeviceToken struct {
 	Token      string             `json:"token"`
 	PersonID   uuid.UUID          `json:"person_id"`

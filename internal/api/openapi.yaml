@@ -17,6 +17,7 @@ tags:
   - name: persons
   - name: teams
   - name: evaluation
+  - name: attendance
   - name: sync
 
 paths:
@@ -1100,6 +1101,141 @@ paths:
               schema: { $ref: "#/components/schemas/Game" }
         "400": { $ref: "#/components/responses/Error" }
 
+  /api/v1/games/{id}/attendance:
+    get:
+      tags: [attendance]
+      summary: Who is coming to this game, and who came
+      description: >
+        Staff get the whole squad. A player gets their own line and a parent their
+        children's, because the sheet names people. The counts are the squad's either
+        way — how many replied is not a disclosure about any one of them. Lines are
+        included for people who have since left the team (onRoster false): they were
+        still at the fixture.
+      security: [{ bearerAuth: [] }]
+      parameters: [{ $ref: "#/components/parameters/Id" }]
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/AttendanceSheet" }
+        "403": { $ref: "#/components/responses/Error" }
+        "404": { $ref: "#/components/responses/Error" }
+  /api/v1/games/{id}/rsvp:
+    put:
+      tags: [attendance]
+      summary: Reply for yourself, your child, or (as staff) a player
+      description: >
+        Idempotent — one reply per person per game, replaced each time. There is no way
+        to un-answer; not_going is what a retraction means. Refused on a cancelled
+        fixture.
+      security: [{ bearerAuth: [] }]
+      parameters: [{ $ref: "#/components/parameters/Id" }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/RSVPRequest" }
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/AttendanceEntry" }
+        "400": { $ref: "#/components/responses/Error" }
+        "403": { $ref: "#/components/responses/Error" }
+        "404": { $ref: "#/components/responses/Error" }
+        "409": { $ref: "#/components/responses/Error" }
+  /api/v1/games/{id}/attendance/{personId}:
+    patch:
+      tags: [attendance]
+      summary: Record whether a player actually turned up (staff only)
+      security: [{ bearerAuth: [] }]
+      parameters:
+        - { $ref: "#/components/parameters/Id" }
+        - { $ref: "#/components/parameters/PersonId" }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/RecordAttendanceRequest" }
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/AttendanceEntry" }
+        "400": { $ref: "#/components/responses/Error" }
+        "403": { $ref: "#/components/responses/Error" }
+        "404": { $ref: "#/components/responses/Error" }
+
+  /api/v1/sessions/{id}/attendance:
+    get:
+      tags: [attendance]
+      summary: Who is coming to this training session, and who came
+      description: >
+        The same register as a game's, for the other scheduled thing. Unlike the rest of
+        /sessions this is not staff-only: a player has to be able to see the training
+        they are expected at, which is a different question from how it will be run.
+      security: [{ bearerAuth: [] }]
+      parameters: [{ $ref: "#/components/parameters/Id" }]
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/AttendanceSheet" }
+        "403": { $ref: "#/components/responses/Error" }
+        "404": { $ref: "#/components/responses/Error" }
+        "409":
+          description: The session is not attached to a team, so it has no roster
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+  /api/v1/sessions/{id}/rsvp:
+    put:
+      tags: [attendance]
+      summary: Reply to a training session
+      security: [{ bearerAuth: [] }]
+      parameters: [{ $ref: "#/components/parameters/Id" }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/RSVPRequest" }
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/AttendanceEntry" }
+        "400": { $ref: "#/components/responses/Error" }
+        "403": { $ref: "#/components/responses/Error" }
+        "404": { $ref: "#/components/responses/Error" }
+        "409": { $ref: "#/components/responses/Error" }
+  /api/v1/sessions/{id}/attendance/{personId}:
+    patch:
+      tags: [attendance]
+      summary: Record training attendance (staff only)
+      security: [{ bearerAuth: [] }]
+      parameters:
+        - { $ref: "#/components/parameters/Id" }
+        - { $ref: "#/components/parameters/PersonId" }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/RecordAttendanceRequest" }
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/AttendanceEntry" }
+        "400": { $ref: "#/components/responses/Error" }
+        "403": { $ref: "#/components/responses/Error" }
+        "404": { $ref: "#/components/responses/Error" }
+
 components:
   securitySchemes:
     bearerAuth: { type: http, scheme: bearer, bearerFormat: JWT }
@@ -1523,6 +1659,82 @@ components:
         opponentScore: { type: integer, nullable: true }
         status: { type: string, enum: [scheduled, in_progress, completed, cancelled] }
         createdAt: { type: string, format: date-time }
+    AttendanceEntry:
+      type: object
+      description: >-
+        One line of the register: a person, what they said, and what happened. Both halves
+        are nullable — "has not replied" and "not recorded yet" are the state most lines
+        are in most of the time. rsvpBy is not always personId: a parent answers for a
+        child, and a coach answers for a player who has no login.
+      properties:
+        personId: { type: string, format: uuid }
+        displayName: { type: string }
+        jerseyNumber: { type: integer, nullable: true }
+        position: { type: string, nullable: true }
+        onRoster:
+          type: boolean
+          description: >-
+            False for someone who was at the event but has since left the team. Their
+            line stays on the sheet; show it as history, not as an unanswered squad member.
+        rsvp: { type: string, enum: [going, maybe, not_going], nullable: true }
+        rsvpNote: { type: string, nullable: true }
+        rsvpAt: { type: string, format: date-time, nullable: true }
+        rsvpBy: { type: string, format: uuid, nullable: true }
+        status: { type: string, enum: [present, absent, late, excused], nullable: true }
+        statusNote: { type: string, nullable: true }
+        recordedAt: { type: string, format: date-time, nullable: true }
+        recordedBy: { type: string, format: uuid, nullable: true }
+    AttendanceCounts:
+      type: object
+      description: >-
+        The squad's tally, whole, whatever the caller may see of the lines behind it. Each
+        half carries a "neither" bucket, because a squad nobody asked and a squad that
+        answered no are the same size and mean opposite things.
+      properties:
+        going: { type: integer }
+        maybe: { type: integer }
+        notGoing: { type: integer }
+        noReply: { type: integer }
+        present: { type: integer }
+        absent: { type: integer }
+        late: { type: integer }
+        excused: { type: integer }
+        notRecorded: { type: integer }
+    AttendanceSheet:
+      type: object
+      properties:
+        eventType: { type: string, enum: [game, session] }
+        eventId: { type: string, format: uuid }
+        teamId: { type: string, format: uuid }
+        counts: { $ref: "#/components/schemas/AttendanceCounts" }
+        entries:
+          type: array
+          items: { $ref: "#/components/schemas/AttendanceEntry" }
+    RSVPRequest:
+      type: object
+      required: [status]
+      properties:
+        status: { type: string, enum: [going, maybe, not_going] }
+        note: { type: string, nullable: true }
+        personId:
+          type: string
+          format: uuid
+          description: >-
+            Who is replying. Omit for yourself, which is the ordinary case. A parent sends
+            a child's id; staff may send any player on the team, which is the common case
+            in youth football where the reply arrived by text to the coach.
+    RecordAttendanceRequest:
+      type: object
+      properties:
+        status:
+          type: string
+          enum: [present, absent, late, excused]
+          nullable: true
+          description: >-
+            Explicit null clears a line ticked by mistake — there is no value here that
+            means "not recorded", and leaving one in place makes the register say
+            something untrue. The recorded-at and recorded-by go with it.
+        note: { type: string, nullable: true }
     CreateGameRequest:
       type: object
       properties:

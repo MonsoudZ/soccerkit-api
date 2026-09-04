@@ -177,6 +177,20 @@ type Querier interface {
 	// needs the id, the flag and a seq, and nothing else. See docs/AUDIT-5.md L1.
 	DeleteTeam(ctx context.Context, id uuid.UUID) error
 	EndRosterMembership(ctx context.Context, arg EndRosterMembershipParams) (RosterMembership, error)
+	// Attendance (RSVP + who actually came) ------------------------------------
+	// Open the row for (event, person) if it is not already open.
+	//
+	// Paired with one of the two setters below rather than folded into them as an upsert:
+	// the uniqueness that matters lives in two partial indexes (one per event kind, see
+	// 0014_attendance.sql), and ON CONFLICT can only infer one target, so an upsert would
+	// have to be written twice and each copy would silently cover only half the table. A
+	// bare DO NOTHING covers whichever index the row actually hits, and makes this safe to
+	// call on every write without asking first.
+	//
+	// The two statements do not need a transaction between them. An insert whose setter
+	// never ran leaves a row with no answer and no status, which is exactly the row that
+	// would have been read as "has not replied" had the insert not happened at all.
+	EnsureAttendance(ctx context.Context, arg EnsureAttendanceParams) error
 	GetActiveRosterMembership(ctx context.Context, arg GetActiveRosterMembershipParams) (RosterMembership, error)
 	GetDrill(ctx context.Context, id uuid.UUID) (Drill, error)
 	GetFormInstance(ctx context.Context, id uuid.UUID) (FormInstance, error)
@@ -212,6 +226,24 @@ type Querier interface {
 	IsGuardianOf(ctx context.Context, arg IsGuardianOfParams) (bool, error)
 	ListActiveRoster(ctx context.Context, teamID uuid.UUID) ([]ListActiveRosterRow, error)
 	ListAnswersForInstance(ctx context.Context, instanceID uuid.UUID) ([]ListAnswersForInstanceRow, error)
+	// The sheet: one line per person, whether or not they have answered.
+	//
+	// The people are the union of two sets, not just the current roster. A player who left
+	// the club in March was still at February's match, and driving this off
+	// roster_memberships alone would erase them from that game's record -- the attendance
+	// row would still exist, unreachable, and the coach's own count would disagree with it.
+	// `on_roster` is what tells the two apart on the far side.
+	//
+	// The union is a CTE over two indexed lookups rather than a scan of persons filtered by
+	// "on this team or at this event", which is the same set and reads every person in the
+	// database to find it.
+	//
+	// `all_people` narrows the result to named people without a second query: the RSVP and
+	// attendance writes each return the one line they changed, and re-reading a squad of
+	// twenty to answer with one of them is a query nobody asked for. Role scoping is
+	// deliberately NOT done here -- see handleGetAttendance, which needs the whole sheet to
+	// count it before narrowing what it shows.
+	ListAttendanceForEvent(ctx context.Context, arg ListAttendanceForEventParams) ([]ListAttendanceForEventRow, error)
 	// p.deleted = false for the same reason every other person read has it: a tombstoned
 	// Person is gone, and since a tombstone now clears its display columns it would list as
 	// a blank row rather than a name. Nothing calls this yet -- guardianships are not
@@ -396,6 +428,30 @@ type Querier interface {
 	// survives (the shared-athlete / multi-org case). Excludes the caller's own
 	// Person (deleted separately) and anyone synced by a different account.
 	SelectOrphanedAthletePersonIDs(ctx context.Context, arg SelectOrphanedAthletePersonIDsParams) ([]uuid.UUID, error)
+	// Record what a player said, and who said it. rsvp_by_person_id is the caller, which is
+	// not always the subject: a parent answers for a child, and a coach answers for a player
+	// with no login.
+	//
+	// The event is matched with an OR over the two nullable keys rather than a branch per
+	// kind. Exactly one of the arguments is ever non-NULL, and `column = NULL` is NULL and so
+	// never matches, which makes the unused half of the condition inert instead of wrong.
+	//
+	// Every field is written, with no set-flags: the endpoint is a PUT of one whole answer,
+	// so a reply sent without a note is a reply that has no note. That is the difference from
+	// SetAttendanceStatus below, which is a PATCH and has to tell absent from null.
+	SetAttendanceRSVP(ctx context.Context, arg SetAttendanceRSVPParams) (Attendance, error)
+	// Record what happened, which is staff's to write.
+	//
+	// Clearing the status is a real operation, unlike clearing an RSVP: a coach who ticked
+	// the wrong player needs the row to go back to "not recorded", and there is no value in
+	// the vocabulary that means that. When the status goes the provenance goes with it --
+	// keeping a recorded_at for a status nobody holds would be a timestamp on nothing.
+	//
+	// Which makes each field a set-flag plus a nullable value, the shape UpdateGame settles
+	// on and for the same reason: this is a PATCH, so absent and null are different requests,
+	// and a single COALESCE has no way to say "clear it". Without the flags, a coach adding a
+	// note to a line would silently erase the status they had just recorded.
+	SetAttendanceStatus(ctx context.Context, arg SetAttendanceStatusParams) (Attendance, error)
 	SyncTombstoneDiagram(ctx context.Context, arg SyncTombstoneDiagramParams) (int64, error)
 	SyncTombstoneDocument(ctx context.Context, arg SyncTombstoneDocumentParams) (int64, error)
 	SyncTombstoneDrill(ctx context.Context, arg SyncTombstoneDrillParams) (int64, error)

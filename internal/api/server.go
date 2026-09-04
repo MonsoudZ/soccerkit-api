@@ -156,6 +156,12 @@ func (s *Server) Router() http.Handler {
 			r.Route("/games", func(r chi.Router) {
 				r.Get("/{id}", s.handleGetGame)
 				r.Patch("/{id}", s.handleUpdateGame)
+				// Who is coming, and who came. Mounted identically under /sessions
+				// below: those are the two scheduled things a squad turns up to, and
+				// the handlers are written once against whichever the path names.
+				r.Get("/{id}/attendance", s.attendanceSheet(s.gameEvent))
+				r.Put("/{id}/rsvp", s.rsvp(s.gameEvent))
+				r.Patch("/{id}/attendance/{personId}", s.recordAttendance(s.gameEvent))
 			})
 
 			// The club itself (rename only -- see updatableOrganizationFields).
@@ -181,6 +187,12 @@ func (s *Server) Router() http.Handler {
 				r.Post("/", s.handleCreateSession)
 				r.Get("/{id}", s.handleGetSession)
 				r.Delete("/{id}", s.handleDeleteSession)
+				// Training has a register too, and it is the same one. These three do
+				// not carry the staff-only gate the rest of /sessions does -- see
+				// sessionEvent for why the plan and the register are different questions.
+				r.Get("/{id}/attendance", s.attendanceSheet(s.sessionEvent))
+				r.Put("/{id}/rsvp", s.rsvp(s.sessionEvent))
+				r.Patch("/{id}/attendance/{personId}", s.recordAttendance(s.sessionEvent))
 			})
 
 			// Evaluation engine

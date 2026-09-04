@@ -1,0 +1,470 @@
+package api_test
+
+import (
+	"net/http"
+	"testing"
+)
+
+// counts pulls the squad tally out of a sheet response.
+func counts(t *testing.T, r resp) map[string]float64 {
+	t.Helper()
+	raw, ok := r.body["counts"].(map[string]any)
+	if !ok {
+		t.Fatalf("no counts in %s", r.raw)
+	}
+	out := map[string]float64{}
+	for k, v := range raw {
+		n, ok := v.(float64)
+		if !ok {
+			t.Fatalf("count %s is %T in %s", k, v, r.raw)
+		}
+		out[k] = n
+	}
+	return out
+}
+
+// entriesOf pulls the lines out of a sheet response.
+func entriesOf(t *testing.T, r resp) []map[string]any {
+	t.Helper()
+	raw, ok := r.body["entries"].([]any)
+	if !ok {
+		t.Fatalf("no entries in %s", r.raw)
+	}
+	out := make([]map[string]any, len(raw))
+	for i, e := range raw {
+		out[i] = e.(map[string]any)
+	}
+	return out
+}
+
+// squad builds a club with a game, a training session and two rostered athletes, one of
+// whom has an account and can speak for themselves.
+type squad struct {
+	coach, orgID     string
+	player, playerID string
+	mateID           string
+	teamID, gameID   string
+	sessionID        string
+}
+
+func newSquad(t *testing.T, prefix string) squad {
+	t.Helper()
+	coach, _ := signInCoach(t, prefix+"coach@e.com")
+	orgID := orgOf(t, coach)
+	player, playerID := signInCoach(t, prefix+"player@e.com")
+	joinOrg(t, coach, orgID, player, prefix+"player@e.com", "player")
+
+	team := do(t, http.MethodPost, "/api/v1/teams", coach, map[string]any{"name": "U12"})
+	if team.status != http.StatusCreated {
+		t.Fatalf("create team: %d %s", team.status, team.raw)
+	}
+	teamID := team.body["id"].(string)
+
+	mateID := createAthlete(t, coach, prefix+" Teammate")
+	for _, id := range []string{playerID, mateID} {
+		if r := do(t, http.MethodPost, "/api/v1/teams/"+teamID+"/roster", coach,
+			map[string]any{"personId": id}); r.status != http.StatusCreated {
+			t.Fatalf("roster %s: %d %s", id, r.status, r.raw)
+		}
+	}
+
+	game := do(t, http.MethodPost, "/api/v1/teams/"+teamID+"/games", coach, map[string]any{
+		"opponent": "Rivals FC", "kickoffAt": "2026-04-11T10:00:00Z", "homeAway": "home",
+	})
+	if game.status != http.StatusCreated {
+		t.Fatalf("create game: %d %s", game.status, game.raw)
+	}
+	session := do(t, http.MethodPost, "/api/v1/sessions", coach, map[string]any{
+		"title": "Tuesday", "teamId": teamID, "blocks": []map[string]any{},
+	})
+	if session.status != http.StatusCreated {
+		t.Fatalf("create session: %d %s", session.status, session.raw)
+	}
+	return squad{
+		coach: coach, orgID: orgID, player: player, playerID: playerID, mateID: mateID,
+		teamID: teamID, gameID: game.body["id"].(string),
+		sessionID: session.body["id"].(string),
+	}
+}
+
+// TestTheRegisterRoundTrips is the whole loop: a player says they are coming, the coach
+// records what happened, and the sheet answers both questions at once.
+func TestTheRegisterRoundTrips(t *testing.T) {
+	resetDB(t)
+	s := newSquad(t, "reg")
+
+	// Nobody has replied yet, and the empty state is a count rather than an absence.
+	before := do(t, http.MethodGet, "/api/v1/games/"+s.gameID+"/attendance", s.coach, nil)
+	if before.status != http.StatusOK {
+		t.Fatalf("sheet: %d %s", before.status, before.raw)
+	}
+	if c := counts(t, before); c["noReply"] != 2 || c["notRecorded"] != 2 || c["going"] != 0 {
+		t.Errorf("an unanswered squad of two should be 2 noReply / 2 notRecorded, got %v", c)
+	}
+	if len(entriesOf(t, before)) != 2 {
+		t.Errorf("the sheet lists the squad whether or not they replied: %s", before.raw)
+	}
+
+	// The player answers for themselves.
+	reply := doIn(t, http.MethodPut, "/api/v1/games/"+s.gameID+"/rsvp", s.player, s.orgID,
+		map[string]any{"status": "going", "note": "bringing boots"})
+	if reply.status != http.StatusOK {
+		t.Fatalf("rsvp: %d %s", reply.status, reply.raw)
+	}
+	if reply.body["rsvp"] != "going" || reply.body["rsvpNote"] != "bringing boots" {
+		t.Errorf("the reply is echoed back: %s", reply.raw)
+	}
+	if reply.body["rsvpBy"] != s.playerID {
+		t.Errorf("rsvpBy records who answered, got %s", reply.raw)
+	}
+	if reply.body["rsvpAt"] == nil {
+		t.Errorf("an answered line carries when it was answered: %s", reply.raw)
+	}
+
+	// Changing your mind replaces the answer rather than adding one.
+	again := doIn(t, http.MethodPut, "/api/v1/games/"+s.gameID+"/rsvp", s.player, s.orgID,
+		map[string]any{"status": "maybe"})
+	if again.status != http.StatusOK {
+		t.Fatalf("second rsvp: %d %s", again.status, again.raw)
+	}
+	mid := do(t, http.MethodGet, "/api/v1/games/"+s.gameID+"/attendance", s.coach, nil)
+	if c := counts(t, mid); c["maybe"] != 1 || c["going"] != 0 || c["noReply"] != 1 {
+		t.Errorf("a replaced reply should leave one maybe and one noReply, got %v", c)
+	}
+
+	// The coach records what actually happened.
+	rec := do(t, http.MethodPatch, "/api/v1/games/"+s.gameID+"/attendance/"+s.playerID, s.coach,
+		map[string]any{"status": "late", "note": "traffic"})
+	if rec.status != http.StatusOK {
+		t.Fatalf("record: %d %s", rec.status, rec.raw)
+	}
+	if rec.body["status"] != "late" || rec.body["recordedAt"] == nil {
+		t.Errorf("the recorded status and its timestamp come back: %s", rec.raw)
+	}
+	// The RSVP is untouched by it. They are two facts about one line, and recording the
+	// second must not overwrite the first.
+	if rec.body["rsvp"] != "maybe" {
+		t.Errorf("recording attendance must not disturb the reply: %s", rec.raw)
+	}
+
+	after := do(t, http.MethodGet, "/api/v1/games/"+s.gameID+"/attendance", s.coach, nil)
+	if c := counts(t, after); c["late"] != 1 || c["notRecorded"] != 1 {
+		t.Errorf("expected one late and one not recorded, got %v", c)
+	}
+
+	// A line ticked by mistake can be untick_ed. Nothing in the vocabulary means "not
+	// recorded", so explicit null has to.
+	clear := do(t, http.MethodPatch, "/api/v1/games/"+s.gameID+"/attendance/"+s.playerID, s.coach,
+		map[string]any{"status": nil})
+	if clear.status != http.StatusOK {
+		t.Fatalf("clear: %d %s", clear.status, clear.raw)
+	}
+	if clear.body["status"] != nil || clear.body["recordedAt"] != nil {
+		t.Errorf("clearing a status takes its provenance with it: %s", clear.raw)
+	}
+	if c := counts(t, do(t, http.MethodGet, "/api/v1/games/"+s.gameID+"/attendance", s.coach, nil)); c["notRecorded"] != 2 {
+		t.Errorf("expected the squad back to 2 not recorded, got %v", c)
+	}
+}
+
+// TestTrainingHasTheSameRegister — the second scheduled thing, through the same handlers.
+func TestTrainingHasTheSameRegister(t *testing.T) {
+	resetDB(t)
+	s := newSquad(t, "train")
+
+	reply := doIn(t, http.MethodPut, "/api/v1/sessions/"+s.sessionID+"/rsvp", s.player, s.orgID,
+		map[string]any{"status": "not_going", "note": "exams"})
+	if reply.status != http.StatusOK {
+		t.Fatalf("session rsvp: %d %s", reply.status, reply.raw)
+	}
+	sheet := do(t, http.MethodGet, "/api/v1/sessions/"+s.sessionID+"/attendance", s.coach, nil)
+	if sheet.status != http.StatusOK {
+		t.Fatalf("session sheet: %d %s", sheet.status, sheet.raw)
+	}
+	if sheet.body["eventType"] != "session" || sheet.body["eventId"] != s.sessionID {
+		t.Errorf("the sheet names its own event: %s", sheet.raw)
+	}
+	if c := counts(t, sheet); c["notGoing"] != 1 || c["noReply"] != 1 {
+		t.Errorf("expected one not_going and one noReply, got %v", c)
+	}
+
+	// A game's reply and a session's are separate rows: the same player is still
+	// unanswered for the fixture.
+	game := do(t, http.MethodGet, "/api/v1/games/"+s.gameID+"/attendance", s.coach, nil)
+	if c := counts(t, game); c["noReply"] != 2 {
+		t.Errorf("a session reply must not answer for the game, got %v", c)
+	}
+}
+
+// TestATrainingSessionWithNoTeamHasNoRegister — a session's team is optional, and a
+// register without a roster is a question with no answer rather than an empty one.
+func TestATrainingSessionWithNoTeamHasNoRegister(t *testing.T) {
+	resetDB(t)
+	coach, _ := signInCoach(t, "noteam@e.com")
+	session := do(t, http.MethodPost, "/api/v1/sessions", coach, map[string]any{
+		"title": "Solo planning", "blocks": []map[string]any{},
+	})
+	if session.status != http.StatusCreated {
+		t.Fatalf("create session: %d %s", session.status, session.raw)
+	}
+	id := session.body["id"].(string)
+	if r := do(t, http.MethodGet, "/api/v1/sessions/"+id+"/attendance", coach, nil); r.status != http.StatusConflict {
+		t.Errorf("expected 409 for a teamless session, got %d %s", r.status, r.raw)
+	}
+}
+
+// TestTheRegisterIsScopedByRole is the disclosure this feature could have made and does
+// not: the sheet names children, so a parent gets their own child's line and a player
+// gets their own, while the tally stays the squad's.
+func TestTheRegisterIsScopedByRole(t *testing.T) {
+	resetDB(t)
+	c := newClub(t, "att")
+	game := do(t, http.MethodPost, "/api/v1/teams/"+c.teamID+"/games", c.coach,
+		map[string]any{"opponent": "Rivals"})
+	if game.status != http.StatusCreated {
+		t.Fatalf("create game: %d %s", game.status, game.raw)
+	}
+	gameID := game.body["id"].(string)
+
+	// The parent answers for their own child.
+	mine := doIn(t, http.MethodPut, "/api/v1/games/"+gameID+"/rsvp", c.parent, c.orgID,
+		map[string]any{"personId": c.childID, "status": "going"})
+	if mine.status != http.StatusOK {
+		t.Fatalf("a parent must be able to reply for their child: %d %s", mine.status, mine.raw)
+	}
+	if mine.body["rsvpBy"] != c.parentID {
+		t.Errorf("the reply records the parent as its author: %s", mine.raw)
+	}
+
+	// And not for anybody else's.
+	other := doIn(t, http.MethodPut, "/api/v1/games/"+gameID+"/rsvp", c.parent, c.orgID,
+		map[string]any{"personId": c.otherID, "status": "going"})
+	if other.status != http.StatusForbidden {
+		t.Errorf("replying for another family's child should be 403, got %d %s", other.status, other.raw)
+	}
+
+	// The sheet they can read is their own child's line, with the squad's tally over it.
+	sheet := doIn(t, http.MethodGet, "/api/v1/games/"+gameID+"/attendance", c.parent, c.orgID, nil)
+	if sheet.status != http.StatusOK {
+		t.Fatalf("parent sheet: %d %s", sheet.status, sheet.raw)
+	}
+	entries := entriesOf(t, sheet)
+	if len(entries) != 1 || entries[0]["personId"] != c.childID {
+		t.Errorf("a parent sees their own child's line and no others: %s", sheet.raw)
+	}
+	if got := counts(t, sheet); got["going"] != 1 || got["noReply"] != 1 {
+		t.Errorf("the tally is the squad's, not the caller's slice of it: %v", got)
+	}
+
+	// Recording what happened is the club's statement about a child, not a family's.
+	rec := doIn(t, http.MethodPatch, "/api/v1/games/"+gameID+"/attendance/"+c.childID, c.parent,
+		c.orgID, map[string]any{"status": "present"})
+	if rec.status != http.StatusForbidden {
+		t.Errorf("a parent recording attendance should be 403, got %d %s", rec.status, rec.raw)
+	}
+}
+
+// TestAnUnconnectedMemberSeesNoRegister — the counts are aggregate, but they are still
+// the club's, and a member with nobody at the fixture has no business reading them.
+func TestAnUnconnectedMemberSeesNoRegister(t *testing.T) {
+	resetDB(t)
+	s := newSquad(t, "outsider")
+	bystander, _ := signInCoach(t, "outsider-bystander@e.com")
+	joinOrg(t, s.coach, s.orgID, bystander, "outsider-bystander@e.com", "player")
+
+	r := doIn(t, http.MethodGet, "/api/v1/games/"+s.gameID+"/attendance", bystander, s.orgID, nil)
+	if r.status != http.StatusForbidden {
+		t.Errorf("a member connected to nobody at this fixture should be 403, got %d %s", r.status, r.raw)
+	}
+	// And cannot reply themselves into it either: they are on no roster, so there is no
+	// line to open.
+	reply := doIn(t, http.MethodPut, "/api/v1/games/"+s.gameID+"/rsvp", bystander, s.orgID,
+		map[string]any{"status": "going"})
+	if reply.status != http.StatusNotFound {
+		t.Errorf("replying for a fixture you are not rostered for should be 404, got %d %s",
+			reply.status, reply.raw)
+	}
+}
+
+// TestRepliesAreRefusedForACancelledFixture — "going" to a match that will not be played
+// is a coaching signal that is simply wrong, and it would sit in the sheet looking true.
+func TestRepliesAreRefusedForACancelledFixture(t *testing.T) {
+	resetDB(t)
+	s := newSquad(t, "cancel")
+	if r := do(t, http.MethodPatch, "/api/v1/games/"+s.gameID, s.coach,
+		map[string]any{"status": "cancelled"}); r.status != http.StatusOK {
+		t.Fatalf("cancel: %d %s", r.status, r.raw)
+	}
+	reply := doIn(t, http.MethodPut, "/api/v1/games/"+s.gameID+"/rsvp", s.player, s.orgID,
+		map[string]any{"status": "going"})
+	if reply.status != http.StatusConflict {
+		t.Errorf("expected 409 for a cancelled fixture, got %d %s", reply.status, reply.raw)
+	}
+	// Recording who turned up is still allowed: a match called off at the ground is one
+	// the squad travelled to, and that is exactly the register a coach wants afterwards.
+	rec := do(t, http.MethodPatch, "/api/v1/games/"+s.gameID+"/attendance/"+s.playerID, s.coach,
+		map[string]any{"status": "present"})
+	if rec.status != http.StatusOK {
+		t.Errorf("recording attendance at a cancelled fixture should still work, got %d %s",
+			rec.status, rec.raw)
+	}
+}
+
+// TestALineSurvivesLeavingTheRoster — the register is a record of an event, not of the
+// current squad. Driving it off active memberships alone would erase a player from the
+// match they actually played in.
+func TestALineSurvivesLeavingTheRoster(t *testing.T) {
+	resetDB(t)
+	s := newSquad(t, "left")
+	if r := doIn(t, http.MethodPut, "/api/v1/games/"+s.gameID+"/rsvp", s.player, s.orgID,
+		map[string]any{"status": "going"}); r.status != http.StatusOK {
+		t.Fatalf("rsvp: %d %s", r.status, r.raw)
+	}
+	if r := do(t, http.MethodPatch, "/api/v1/games/"+s.gameID+"/attendance/"+s.playerID, s.coach,
+		map[string]any{"status": "present"}); r.status != http.StatusOK {
+		t.Fatalf("record: %d %s", r.status, r.raw)
+	}
+	if r := do(t, http.MethodDelete, "/api/v1/teams/"+s.teamID+"/roster/"+s.playerID, s.coach, nil); r.status != http.StatusOK {
+		t.Fatalf("end roster: %d %s", r.status, r.raw)
+	}
+
+	sheet := do(t, http.MethodGet, "/api/v1/games/"+s.gameID+"/attendance", s.coach, nil)
+	var line map[string]any
+	for _, e := range entriesOf(t, sheet) {
+		if e["personId"] == s.playerID {
+			line = e
+		}
+	}
+	if line == nil {
+		t.Fatalf("the player who was at the match is gone from its register: %s", sheet.raw)
+	}
+	if line["status"] != "present" {
+		t.Errorf("their recorded attendance should be intact: %v", line)
+	}
+	if line["onRoster"] != false {
+		t.Errorf("onRoster is what tells history from squad, got %v", line["onRoster"])
+	}
+	if c := counts(t, sheet); c["present"] != 1 {
+		t.Errorf("the tally still counts them, got %v", c)
+	}
+}
+
+// TestTheRegisterIsIsolatedByOrg — the same tenancy check every other team-scoped route
+// makes. A register is a list of named children.
+func TestTheRegisterIsIsolatedByOrg(t *testing.T) {
+	resetDB(t)
+	s := newSquad(t, "iso")
+	stranger, _ := signInCoach(t, "iso-stranger@e.com")
+
+	for _, tc := range []struct {
+		name           string
+		method, path   string
+		payload        any
+		wantStatusCode int
+	}{
+		{"read the game sheet", http.MethodGet, "/api/v1/games/" + s.gameID + "/attendance", nil, http.StatusForbidden},
+		{"reply to the game", http.MethodPut, "/api/v1/games/" + s.gameID + "/rsvp",
+			map[string]any{"status": "going"}, http.StatusForbidden},
+		{"record at the game", http.MethodPatch, "/api/v1/games/" + s.gameID + "/attendance/" + s.playerID,
+			map[string]any{"status": "present"}, http.StatusForbidden},
+		{"read the session sheet", http.MethodGet, "/api/v1/sessions/" + s.sessionID + "/attendance", nil, http.StatusForbidden},
+	} {
+		r := do(t, tc.method, tc.path, stranger, tc.payload)
+		if r.status != tc.wantStatusCode {
+			t.Errorf("%s from another org: got %d, want %d (%s)", tc.name, r.status, tc.wantStatusCode, r.raw)
+		}
+	}
+}
+
+// TestTheRegisterValidatesItsVocabularies — the two are deliberately different words, and
+// neither accepts the other's.
+func TestTheRegisterValidatesItsVocabularies(t *testing.T) {
+	resetDB(t)
+	s := newSquad(t, "vocab")
+
+	if r := doIn(t, http.MethodPut, "/api/v1/games/"+s.gameID+"/rsvp", s.player, s.orgID,
+		map[string]any{"status": "present"}); r.status != http.StatusBadRequest {
+		t.Errorf("an attendance status is not an RSVP, expected 400, got %d %s", r.status, r.raw)
+	}
+	if r := do(t, http.MethodPatch, "/api/v1/games/"+s.gameID+"/attendance/"+s.playerID, s.coach,
+		map[string]any{"status": "going"}); r.status != http.StatusBadRequest {
+		t.Errorf("an RSVP is not an attendance status, expected 400, got %d %s", r.status, r.raw)
+	}
+	// A reply with no status at all is a client bug, not an empty reply.
+	if r := doIn(t, http.MethodPut, "/api/v1/games/"+s.gameID+"/rsvp", s.player, s.orgID,
+		map[string]any{}); r.status != http.StatusBadRequest {
+		t.Errorf("expected 400 for a reply with no status, got %d %s", r.status, r.raw)
+	}
+	// And a person who has nothing to do with the fixture cannot be given a line.
+	outsider := createAthlete(t, s.coach, "Not On This Team")
+	if r := do(t, http.MethodPatch, "/api/v1/games/"+s.gameID+"/attendance/"+outsider, s.coach,
+		map[string]any{"status": "present"}); r.status != http.StatusNotFound {
+		t.Errorf("expected 404 recording for someone off the roster, got %d %s", r.status, r.raw)
+	}
+}
+
+// TestRecordingIsAPatchAndReplyingIsAPut pins the two halves' different semantics, which
+// are the easiest thing here to get wrong in a way nobody notices: a coach adding a note
+// must not erase the status it annotates, and a reply sent without a note must not keep
+// the note from the last one.
+func TestRecordingIsAPatchAndReplyingIsAPut(t *testing.T) {
+	resetDB(t)
+	s := newSquad(t, "patch")
+	line := "/api/v1/games/" + s.gameID + "/attendance/" + s.playerID
+
+	if r := do(t, http.MethodPatch, line, s.coach, map[string]any{"status": "present"}); r.status != http.StatusOK {
+		t.Fatalf("record: %d %s", r.status, r.raw)
+	}
+	// An absent key leaves that half alone.
+	noted := do(t, http.MethodPatch, line, s.coach, map[string]any{"note": "arrived early"})
+	if noted.status != http.StatusOK {
+		t.Fatalf("note: %d %s", noted.status, noted.raw)
+	}
+	if noted.body["status"] != "present" || noted.body["statusNote"] != "arrived early" {
+		t.Errorf("adding a note must not erase the status: %s", noted.raw)
+	}
+	// An explicit null clears it, and takes only its own half.
+	cleared := do(t, http.MethodPatch, line, s.coach, map[string]any{"status": nil})
+	if cleared.body["status"] != nil || cleared.body["statusNote"] != "arrived early" {
+		t.Errorf("null clears the status and nothing else: %s", cleared.raw)
+	}
+	// A misspelled field is a client bug, reported rather than silently dropped.
+	if r := do(t, http.MethodPatch, line, s.coach, map[string]any{"attended": true}); r.status != http.StatusBadRequest {
+		t.Errorf("expected 400 for an unknown field, got %d %s", r.status, r.raw)
+	}
+
+	// The reply is a PUT of one whole answer: no note means no note.
+	rsvp := "/api/v1/games/" + s.gameID + "/rsvp"
+	if r := doIn(t, http.MethodPut, rsvp, s.player, s.orgID,
+		map[string]any{"status": "going", "note": "bringing boots"}); r.status != http.StatusOK {
+		t.Fatalf("first reply: %d %s", r.status, r.raw)
+	}
+	second := doIn(t, http.MethodPut, rsvp, s.player, s.orgID, map[string]any{"status": "not_going"})
+	if second.status != http.StatusOK {
+		t.Fatalf("second reply: %d %s", second.status, second.raw)
+	}
+	if second.body["rsvpNote"] != nil {
+		t.Errorf("a replacement reply carries no note from the one it replaced: %s", second.raw)
+	}
+}
+
+// TestStaffMayReplyForAPlayer — the common case in youth football: the player is nine,
+// has no login, and the reply arrived as a text message to the coach.
+func TestStaffMayReplyForAPlayer(t *testing.T) {
+	resetDB(t)
+	s := newSquad(t, "onbehalf")
+
+	r := do(t, http.MethodPut, "/api/v1/games/"+s.gameID+"/rsvp", s.coach,
+		map[string]any{"personId": s.mateID, "status": "going", "note": "dad texted"})
+	if r.status != http.StatusOK {
+		t.Fatalf("staff reply on behalf: %d %s", r.status, r.raw)
+	}
+	if r.body["personId"] != s.mateID {
+		t.Errorf("the line belongs to the player, got %s", r.raw)
+	}
+	// Who spoke is recorded rather than assumed: "the coach entered this" and "the family
+	// told us" are different facts.
+	if r.body["rsvpBy"] == s.mateID {
+		t.Errorf("rsvpBy should be the coach who entered it, got %s", r.raw)
+	}
+}

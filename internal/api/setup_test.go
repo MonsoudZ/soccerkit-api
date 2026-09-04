@@ -107,6 +107,7 @@ func resetDB(t *testing.T) {
 			invitations, device_tokens,
 			sync_documents, players, events, diagrams,
 			form_answers, form_instances, form_fields, form_templates,
+			attendances,
 			share_grants, session_blocks, sessions, drills, games,
 			roster_memberships, teams, guardianships, memberships,
 			refresh_tokens, user_accounts, persons, organizations
