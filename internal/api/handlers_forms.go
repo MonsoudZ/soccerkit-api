@@ -75,6 +75,10 @@ func (s *Server) handleListTemplates(w http.ResponseWriter, r *http.Request) {
 		writeError(w, err)
 		return
 	}
+	if !oc.isStaff() {
+		writeError(w, errForbidden("only staff can see the coaching library"))
+		return
+	}
 	personID := personIDFrom(r.Context())
 	templates, err := s.store.ListFormTemplates(r.Context(), store.ListFormTemplatesParams{
 		OrganizationID: &oc.orgID, AuthorPersonID: &personID, Context: queryStrPtr(r, "context"),
@@ -99,6 +103,10 @@ func (s *Server) handleGetTemplate(w http.ResponseWriter, r *http.Request) {
 	oc, err := s.resolveOrg(r)
 	if err != nil {
 		writeError(w, err)
+		return
+	}
+	if !oc.isStaff() {
+		writeError(w, errForbidden("only staff can see the coaching library"))
 		return
 	}
 	tpl, err := s.templateFor(r, oc, id)
@@ -144,8 +152,11 @@ func (s *Server) handleCreateTemplate(w http.ResponseWriter, r *http.Request) {
 		writeError(w, err)
 		return
 	}
-	if !oc.hasAnyRole("admin", "director", "coach") {
-		writeError(w, errForbidden("only coaches can create templates"))
+	// standardizeTemplates in the permission matrix is admin and director, not coach: a
+	// template is the club's measuring stick, and a coach who could add one could change
+	// what every other coach's athletes are scored against.
+	if !oc.hasAnyRole(roleAdmin, roleDirector) {
+		writeError(w, errForbidden("only an admin or director can create templates"))
 		return
 	}
 	var req createTemplateRequest

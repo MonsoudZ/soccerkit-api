@@ -197,21 +197,26 @@ func TestMemberManagementGuards(t *testing.T) {
 	// The admin appoints a director.
 	joinOrg(t, admin, orgID, director, "mgdirector@e.com", "director")
 
-	t.Run("a director cannot grant admin", func(t *testing.T) {
-		r := doIn(t, http.MethodPost, "/api/v1/organizations/"+orgID+"/invitations", director, orgID,
-			map[string]any{"email": "mgoutsider@e.com", "roles": []string{"admin"}})
-		if r.status != http.StatusForbidden {
-			t.Errorf("expected 403, got %d %s", r.status, r.raw)
-		}
-	})
-
-	t.Run("a director cannot demote the admin above them", func(t *testing.T) {
+	// manageOrg in the permission matrix is admin alone. A director standardizes
+	// templates and sees every team; deciding who is in the club is not theirs.
+	t.Run("a director cannot manage members at all", func(t *testing.T) {
 		me := do(t, http.MethodGet, "/api/v1/me", admin, nil)
 		adminID := me.body["person"].(map[string]any)["id"].(string)
-		r := doIn(t, http.MethodPatch, "/api/v1/organizations/"+orgID+"/members/"+adminID,
+
+		invite := doIn(t, http.MethodPost, "/api/v1/organizations/"+orgID+"/invitations", director, orgID,
+			map[string]any{"email": "mgoutsider@e.com", "roles": []string{"coach"}})
+		if invite.status != http.StatusForbidden {
+			t.Errorf("inviting: expected 403, got %d %s", invite.status, invite.raw)
+		}
+		demote := doIn(t, http.MethodPatch, "/api/v1/organizations/"+orgID+"/members/"+adminID,
 			director, orgID, map[string]any{"roles": []string{"coach"}})
-		if r.status != http.StatusForbidden {
-			t.Errorf("expected 403, got %d %s", r.status, r.raw)
+		if demote.status != http.StatusForbidden {
+			t.Errorf("demoting: expected 403, got %d %s", demote.status, demote.raw)
+		}
+		remove := doIn(t, http.MethodDelete, "/api/v1/organizations/"+orgID+"/members/"+adminID,
+			director, orgID, nil)
+		if remove.status != http.StatusForbidden {
+			t.Errorf("removing: expected 403, got %d %s", remove.status, remove.raw)
 		}
 	})
 
@@ -410,5 +415,45 @@ func TestParentCannotLinkGuardiansEvenForTheirOwnChild(t *testing.T) {
 		map[string]any{"personId": secondID})
 	if r.status != http.StatusForbidden {
 		t.Fatalf("only staff may change a child's guardians, got %d %s", r.status, r.raw)
+	}
+}
+
+// TestTheGrantCeilingHoldsOnTheOwnerPath is what keeps checkGrantableRoles load-bearing
+// now that member management is admin-only.
+//
+// An owner is let through requireMemberManager whatever membership they hold, so that a
+// role change cannot lock someone out of the club they own. That is the only way a
+// caller below admin reaches the granting code, and the rank ceiling is the only thing
+// between them and appointing themselves one.
+//
+// No endpoint produces that state: wouldStrandOrg refuses to strip an owner's admin role
+// or remove them, on purpose. The state is still reachable in the database — nothing
+// about owner_person_id requires the owner to be an admin, and an ownership transfer is
+// the obvious next endpoint that would create it — so the setup here is SQL rather than
+// an API call. A guard for a state the schema permits is worth keeping and worth
+// testing; a guard that has never been executed is neither.
+func TestTheGrantCeilingHoldsOnTheOwnerPath(t *testing.T) {
+	resetDB(t)
+	owner, ownerID := signInCoach(t, "ceiling-owner@e.com")
+	orgID := orgOf(t, owner)
+	signInCoach(t, "ceiling-outsider@e.com")
+
+	// The owner holds only coach. Reachable in the schema, not through the API.
+	if _, err := testPool.Exec(context.Background(),
+		`DELETE FROM memberships WHERE person_id = $1 AND organization_id = $2 AND role <> 'coach'`,
+		ownerID, orgID); err != nil {
+		t.Fatalf("demote the owner: %v", err)
+	}
+
+	// Still the owner, so still past requireMemberManager — but a coach's ceiling.
+	invite := do(t, http.MethodPost, "/api/v1/organizations/"+orgID+"/invitations", owner,
+		map[string]any{"email": "ceiling-outsider@e.com", "roles": []string{"admin"}})
+	if invite.status != http.StatusForbidden {
+		t.Fatalf("an owner holding only coach must not grant admin, got %d %s", invite.status, invite.raw)
+	}
+	ok := do(t, http.MethodPost, "/api/v1/organizations/"+orgID+"/invitations", owner,
+		map[string]any{"email": "ceiling-outsider@e.com", "roles": []string{"coach"}})
+	if ok.status != http.StatusCreated {
+		t.Errorf("but may still grant at their own level, got %d %s", ok.status, ok.raw)
 	}
 }

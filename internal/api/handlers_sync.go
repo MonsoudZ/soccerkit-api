@@ -403,11 +403,21 @@ func (s *Server) applyUpsert(ctx context.Context, q *store.Queries, account, org
 			Season   string `json:"season"`
 		}
 		_ = json.Unmarshal(rec.Payload, &p)
-		return applied(q.SyncUpsertTeam(ctx, store.SyncUpsertTeamParams{
+		ok, err := applied(q.SyncUpsertTeam(ctx, store.SyncUpsertTeamParams{
 			ID: id, OrganizationID: orgID, SyncAccountID: &account,
 			Name: p.Name, AgeGroup: nilIfEmpty(p.AgeGroup), Season: nilIfEmpty(p.Season),
 			Payload: rec.Payload,
 		}))
+		if err != nil || !ok {
+			return ok, err
+		}
+		// A team the app pushes is a team its coach staffs. Without this, REST would
+		// answer "you have no teams" for the very teams they made on their phone, since
+		// GET /teams scopes a coach to what they staff.
+		if err := q.AddTeamStaff(ctx, store.AddTeamStaffParams{TeamID: id, PersonID: account}); err != nil {
+			return false, err
+		}
+		return true, nil
 	case "Drill":
 		var p struct {
 			Title      string `json:"title"`

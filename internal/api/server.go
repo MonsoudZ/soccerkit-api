@@ -106,6 +106,9 @@ func (s *Server) Router() http.Handler {
 			r.Get("/me", s.handleGetMe)
 			r.Delete("/me", s.handleDeleteMe)
 			r.Get("/me/invitations", s.handleListMyInvitations)
+			// The teams this person is rostered on — narrower than GET /teams, which
+			// answers what they may see rather than what they are part of.
+			r.Get("/me/teams", s.handleListMyTeams)
 
 			// Where to reach this person. Registered on launch, dropped on sign-out.
 			r.Post("/me/devices", s.handleRegisterDevice)
@@ -140,6 +143,10 @@ func (s *Server) Router() http.Handler {
 				r.Get("/{id}", s.handleGetTeam)
 				r.Patch("/{id}", s.handleUpdateTeam)
 				r.Delete("/{id}", s.handleDeleteTeam)
+				// Who runs a team, which is what scopes GET /teams for a coach.
+				r.Get("/{id}/staff", s.handleListTeamStaff)
+				r.Post("/{id}/staff", s.handleAddTeamStaff)
+				r.Delete("/{id}/staff/{personId}", s.handleRemoveTeamStaff)
 				r.Post("/{id}/roster", s.handleAddRoster)
 				r.Delete("/{id}/roster/{personId}", s.handleEndRoster)
 				// Game day

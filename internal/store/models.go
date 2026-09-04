@@ -265,6 +265,12 @@ type Team struct {
 	Seq            *int64             `json:"seq"`
 }
 
+type TeamStaff struct {
+	TeamID    uuid.UUID          `json:"team_id"`
+	PersonID  uuid.UUID          `json:"person_id"`
+	CreatedAt pgtype.Timestamptz `json:"created_at"`
+}
+
 type UserAccount struct {
 	ID        uuid.UUID          `json:"id"`
 	PersonID  uuid.UUID          `json:"person_id"`

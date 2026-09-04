@@ -24,13 +24,6 @@ RETURNING *;
 -- name: GetTeam :one
 SELECT * FROM teams WHERE id = $1 AND deleted = false;
 
--- name: ListTeamsInOrg :many
-SELECT t.*,
-    (SELECT count(*) FROM roster_memberships r WHERE r.team_id = t.id AND r.left_on IS NULL)::bigint AS active_roster_count
-FROM teams t
-WHERE t.organization_id = $1 AND t.deleted = false
-ORDER BY t.name ASC;
-
 -- name: UpdateTeam :one
 -- A REST edit has to reach the app, which is why this writes the record twice.
 --
@@ -101,3 +94,52 @@ FROM roster_memberships r
 JOIN teams t ON t.id = r.team_id
 WHERE r.person_id = $1
 ORDER BY r.joined_on DESC;
+
+-- name: AddTeamStaff :exec
+-- Idempotent: a coach already on a team stays on it, and the create path can call this
+-- without first asking.
+INSERT INTO team_staff (team_id, person_id)
+VALUES ($1, $2)
+ON CONFLICT (team_id, person_id) DO NOTHING;
+
+-- name: RemoveTeamStaff :execrows
+DELETE FROM team_staff WHERE team_id = $1 AND person_id = $2;
+
+-- name: ListTeamStaff :many
+SELECT p.* FROM team_staff ts
+JOIN persons p ON p.id = ts.person_id
+WHERE ts.team_id = $1 AND p.deleted = false
+ORDER BY p.display_name ASC;
+
+
+-- name: ListTeamsVisibleInOrg :many
+-- The teams a caller may see, which is a different set per role.
+--
+-- One statement rather than one per role, because every non-admin arm asks the same
+-- question in the end: is this team connected to me? A coach is connected by staffing
+-- it, a player by being rostered on it, a parent through a child. Someone who is two of
+-- those -- a parent who also coaches, which the role model explicitly allows -- gets the
+-- union without any branch having to remember they exist.
+--
+-- `see_all` is the whole of the role logic: admins and directors see the organization,
+-- per the permission matrix. Everyone else gets the connected set, and a coach who
+-- staffs nothing sees nothing, which is the correct answer to "your teams" rather than
+-- an error.
+SELECT t.*, (
+    SELECT count(*) FROM roster_memberships r
+    WHERE r.team_id = t.id AND r.left_on IS NULL
+) AS active_roster_count
+FROM teams t
+WHERE t.organization_id = sqlc.arg('organization_id')
+  AND t.deleted = false
+  AND (
+    sqlc.arg('see_all')::bool
+    OR EXISTS (SELECT 1 FROM team_staff ts
+                WHERE ts.team_id = t.id AND ts.person_id = sqlc.arg('person_id'))
+    OR EXISTS (SELECT 1 FROM roster_memberships r
+                WHERE r.team_id = t.id AND r.left_on IS NULL
+                  AND (r.person_id = sqlc.arg('person_id')
+                    OR r.person_id IN (SELECT child_person_id FROM guardianships
+                                        WHERE guardian_person_id = sqlc.arg('person_id'))))
+  )
+ORDER BY t.name ASC;

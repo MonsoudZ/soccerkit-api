@@ -37,12 +37,33 @@ func (s *Server) handleCreateTeam(w http.ResponseWriter, r *http.Request) {
 	// to carry it and the app requires it. See CreateTeam in db/queries/teams.sql.
 	teamID := uuid.New()
 	account := personIDFrom(r.Context())
-	team, err := s.store.CreateTeam(r.Context(), store.CreateTeamParams{
+
+	// In a transaction, because a team whose staff row failed to write is a team its own
+	// creator cannot see: GET /teams scopes a coach to the teams they staff.
+	tx, err := s.pool.Begin(r.Context())
+	if err != nil {
+		writeError(w, err)
+		return
+	}
+	defer tx.Rollback(r.Context()) //nolint:errcheck // no-op after a successful Commit
+	q := s.store.WithTx(tx)
+
+	team, err := q.CreateTeam(r.Context(), store.CreateTeamParams{
 		ID: teamID, OrganizationID: oc.orgID, SyncAccountID: &account,
 		Name: req.Name, AgeGroup: req.AgeGroup, Season: req.Season,
 		Payload: newTeamPayload(teamID, req.Name, req.AgeGroup, req.Season),
 	})
 	if err != nil {
+		writeError(w, err)
+		return
+	}
+	if err := q.AddTeamStaff(r.Context(), store.AddTeamStaffParams{
+		TeamID: team.ID, PersonID: account,
+	}); err != nil {
+		writeError(w, err)
+		return
+	}
+	if err := tx.Commit(r.Context()); err != nil {
 		writeError(w, err)
 		return
 	}
@@ -55,7 +76,15 @@ func (s *Server) handleListTeams(w http.ResponseWriter, r *http.Request) {
 		writeError(w, err)
 		return
 	}
-	rows, err := s.store.ListTeamsInOrg(r.Context(), oc.orgID)
+	// Per the permission matrix: an admin or director sees the organization, everyone
+	// else sees the teams they are connected to. This used to return every team in the
+	// club to anyone holding any membership, so a player could read the shape of a club
+	// they have one team in.
+	rows, err := s.store.ListTeamsVisibleInOrg(r.Context(), store.ListTeamsVisibleInOrgParams{
+		OrganizationID: oc.orgID,
+		SeeAll:         oc.hasAnyRole(roleAdmin, roleDirector),
+		PersonID:       oc.callerID,
+	})
 	if err != nil {
 		writeError(w, err)
 		return
@@ -458,4 +487,179 @@ func (s *Server) visibleRoster(ctx context.Context, oc orgContext, rows []store.
 		}
 	}
 	return entries, nil
+}
+
+// MyTeam is one line of "which teams am I on" — the roster view of a person's teams,
+// with the details that make a membership specific.
+type MyTeam struct {
+	TeamID       string  `json:"teamId"`
+	TeamName     string  `json:"teamName"`
+	JerseyNumber *int32  `json:"jerseyNumber"`
+	Position     *string `json:"position"`
+	JoinedOn     *string `json:"joinedOn"`
+	LeftOn       *string `json:"leftOn"`
+}
+
+// handleListMyTeams answers the question a player had no way to ask.
+//
+// GET /teams says which teams the caller may *see*, which for staff is a club's worth.
+// This is narrower and different: the teams this person is rostered on, with the jersey
+// number, position and dates that belong to the membership rather than to the team. A
+// coach gets their own playing history if they have one, and usually nothing.
+//
+// Past memberships are included, `leftOn` and all. A season that ended is the larger
+// part of an athlete's record, and filtering it out here would leave no way to ask for it.
+func (s *Server) handleListMyTeams(w http.ResponseWriter, r *http.Request) {
+	rows, err := s.store.ListTeamsForPerson(r.Context(), personIDFrom(r.Context()))
+	if err != nil {
+		writeError(w, err)
+		return
+	}
+	out := make([]MyTeam, len(rows))
+	for i, row := range rows {
+		out[i] = MyTeam{
+			TeamID: row.TeamID.String(), TeamName: row.TeamName,
+			JerseyNumber: row.JerseyNumber, Position: row.Position,
+			JoinedOn: dateStr(row.JoinedOn), LeftOn: dateStr(row.LeftOn),
+		}
+	}
+	writeJSON(w, http.StatusOK, out)
+}
+
+// --- team staff ------------------------------------------------------------
+
+// handleListTeamStaff lists who runs a team. Staff only, matching who may see the
+// member directory: it is the same kind of question about the same people.
+func (s *Server) handleListTeamStaff(w http.ResponseWriter, r *http.Request) {
+	oc, err := s.resolveOrg(r)
+	if err != nil {
+		writeError(w, err)
+		return
+	}
+	team, err := s.teamInOrg(r, oc)
+	if err != nil {
+		writeError(w, err)
+		return
+	}
+	if !oc.isStaff() {
+		writeError(w, errForbidden("only staff can see who runs a team"))
+		return
+	}
+	rows, err := s.store.ListTeamStaff(r.Context(), team.ID)
+	if err != nil {
+		writeError(w, err)
+		return
+	}
+	out := make([]Person, len(rows))
+	for i, p := range rows {
+		out[i] = personDTO(p)
+	}
+	writeJSON(w, http.StatusOK, out)
+}
+
+type addTeamStaffRequest struct {
+	PersonID string `json:"personId"`
+}
+
+// handleAddTeamStaff puts a coach on a team.
+//
+// Assigning staff decides who sees a team at all, so it is an organizational act rather
+// than a coaching one and takes the same gate as managing members. The person has to
+// already hold a staff role in the organization: this says *which* teams someone
+// coaches, not *that* they coach, and letting it grant the latter would route around the
+// role ceiling that member management enforces.
+func (s *Server) handleAddTeamStaff(w http.ResponseWriter, r *http.Request) {
+	oc, org, team, err := s.teamForStaffChange(r)
+	if err != nil {
+		writeError(w, err)
+		return
+	}
+	_ = org
+	var req addTeamStaffRequest
+	if err := decodeJSON(r, &req); err != nil {
+		writeError(w, err)
+		return
+	}
+	personID, err := parseUUIDParam(req.PersonID, "personId")
+	if err != nil {
+		writeError(w, err)
+		return
+	}
+	roles, err := s.store.ListRolesForPersonInOrg(r.Context(), store.ListRolesForPersonInOrgParams{
+		PersonID: personID, OrganizationID: oc.orgID,
+	})
+	if err != nil {
+		writeError(w, err)
+		return
+	}
+	if len(roles) == 0 {
+		writeError(w, errNotFound("that person is not a member of this organization"))
+		return
+	}
+	if !containsAnyRole(roles, roleAdmin, roleDirector, roleCoach) {
+		writeError(w, errValidation(
+			"that person holds no staff role here; give them coach, director or admin first"))
+		return
+	}
+	if err := s.store.AddTeamStaff(r.Context(), store.AddTeamStaffParams{
+		TeamID: team.ID, PersonID: personID,
+	}); err != nil {
+		writeError(w, err)
+		return
+	}
+	writeJSON(w, http.StatusCreated, map[string]any{"teamId": team.ID, "personId": personID})
+}
+
+// handleRemoveTeamStaff takes a coach off a team. Idempotent, and it cannot strand
+// anyone: an admin or director sees every team regardless of who staffs it.
+func (s *Server) handleRemoveTeamStaff(w http.ResponseWriter, r *http.Request) {
+	_, _, team, err := s.teamForStaffChange(r)
+	if err != nil {
+		writeError(w, err)
+		return
+	}
+	personID, err := pathUUID(r, "personId")
+	if err != nil {
+		writeError(w, err)
+		return
+	}
+	if _, err := s.store.RemoveTeamStaff(r.Context(), store.RemoveTeamStaffParams{
+		TeamID: team.ID, PersonID: personID,
+	}); err != nil {
+		writeError(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]bool{"ok": true})
+}
+
+// teamForStaffChange resolves the team and checks the caller may change who runs it.
+func (s *Server) teamForStaffChange(r *http.Request) (orgContext, store.Organization, store.Team, error) {
+	oc, err := s.resolveOrg(r)
+	if err != nil {
+		return orgContext{}, store.Organization{}, store.Team{}, err
+	}
+	org, err := s.store.GetOrganization(r.Context(), oc.orgID)
+	if err != nil {
+		return orgContext{}, store.Organization{}, store.Team{}, err
+	}
+	if err := s.requireMemberManager(oc, org); err != nil {
+		return orgContext{}, store.Organization{}, store.Team{}, err
+	}
+	team, err := s.teamInOrg(r, oc)
+	if err != nil {
+		return orgContext{}, store.Organization{}, store.Team{}, err
+	}
+	return oc, org, team, nil
+}
+
+// containsAnyRole reports whether a role set includes any of the named roles.
+func containsAnyRole(held []string, want ...string) bool {
+	for _, h := range held {
+		for _, w := range want {
+			if h == w {
+				return true
+			}
+		}
+	}
+	return false
 }

@@ -625,6 +625,22 @@ paths:
       responses:
         "200": { $ref: "#/components/responses/Ok" }
         "400": { $ref: "#/components/responses/Error" }
+  /api/v1/me/teams:
+    get:
+      tags: [me]
+      summary: The teams you are rostered on
+      description: >
+        Narrower than GET /teams, which answers what you may *see*. This is what you are
+        part of, with the jersey number, position and dates that belong to the membership
+        rather than to the team. Past memberships are included, `leftOn` and all — a
+        season that ended is the larger part of an athlete's record.
+      security: [{ bearerAuth: [] }]
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema: { type: array, items: { $ref: "#/components/schemas/MyTeam" } }
   /api/v1/me/invitations:
     get:
       tags: [me]
@@ -686,7 +702,12 @@ paths:
   /api/v1/teams:
     get:
       tags: [teams]
-      summary: List teams in your organization
+      summary: List the teams you can see
+      description: >
+        An admin or director sees every team in the organization; everyone else sees the
+        teams they are connected to — the ones a coach staffs, the ones a player is
+        rostered on, the ones a parent's children are on. A coach who staffs no teams
+        sees none, which is the answer to "your teams" rather than an error.
       security: [{ bearerAuth: [] }]
       parameters: [{ $ref: "#/components/parameters/OrgHeader" }]
       responses:
@@ -767,6 +788,68 @@ paths:
       responses:
         "200": { $ref: "#/components/responses/Ok" }
         "403": { $ref: "#/components/responses/Error" }
+  /api/v1/teams/{id}/staff:
+    get:
+      tags: [teams]
+      summary: Who runs this team
+      description: Staff only, matching who may read the member directory.
+      security: [{ bearerAuth: [] }]
+      parameters: [{ $ref: "#/components/parameters/Id" }]
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema: { type: array, items: { $ref: "#/components/schemas/Person" } }
+        "403": { $ref: "#/components/responses/Error" }
+        "404": { $ref: "#/components/responses/Error" }
+    post:
+      tags: [teams]
+      summary: Put a coach on this team
+      description: >
+        Assigning staff decides who sees the team at all — GET /teams scopes a coach to
+        the teams they staff — so it takes the same gate as managing members. The person
+        must already hold admin, director or coach in the organization: this says which
+        teams someone coaches, not that they coach.
+      security: [{ bearerAuth: [] }]
+      parameters: [{ $ref: "#/components/parameters/Id" }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [personId]
+              properties:
+                personId: { type: string, format: uuid }
+      responses:
+        "201":
+          description: Created
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  teamId: { type: string, format: uuid }
+                  personId: { type: string, format: uuid }
+        "400": { $ref: "#/components/responses/Error" }
+        "403": { $ref: "#/components/responses/Error" }
+        "404": { $ref: "#/components/responses/Error" }
+  /api/v1/teams/{id}/staff/{personId}:
+    delete:
+      tags: [teams]
+      summary: Take a coach off this team
+      description: >
+        Idempotent, and it cannot strand anyone — an admin or director sees every team
+        regardless of who staffs it.
+      security: [{ bearerAuth: [] }]
+      parameters:
+        - { $ref: "#/components/parameters/Id" }
+        - { $ref: "#/components/parameters/PersonId" }
+      responses:
+        "200": { $ref: "#/components/responses/Ok" }
+        "403": { $ref: "#/components/responses/Error" }
+        "404": { $ref: "#/components/responses/Error" }
   /api/v1/teams/{id}/roster:
     post:
       tags: [teams]
@@ -1221,6 +1304,15 @@ components:
         createdAt: { type: string, format: date-time }
         invitedByName: { type: string, nullable: true }
         organizationName: { type: string, nullable: true }
+    MyTeam:
+      type: object
+      properties:
+        teamId: { type: string, format: uuid }
+        teamName: { type: string }
+        jerseyNumber: { type: integer, nullable: true }
+        position: { type: string, nullable: true }
+        joinedOn: { type: string, format: date, nullable: true }
+        leftOn: { type: string, format: date, nullable: true }
     Member:
       type: object
       properties:

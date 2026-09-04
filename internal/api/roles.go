@@ -65,11 +65,11 @@ func (o orgContext) isStaff() bool {
 }
 
 // canManageMembers reports whether the caller may change who is in the organization and
-// with what role. Deliberately narrower than isStaff: a coach runs training, and handing
-// them the ability to appoint another coach -- or to remove the director who appointed
-// them -- is a different authority than the one the role is for.
+// with what role. This is the matrix's manageOrg, and it is admin alone: a coach runs
+// training and a director standardizes it, but deciding who is in the club at all -- and
+// therefore who can see whose children -- is the one authority that does not spread.
 func (o orgContext) canManageMembers() bool {
-	return o.hasAnyRole(roleAdmin, roleDirector)
+	return o.hasAnyRole(roleAdmin)
 }
 
 // highestRankOf is highestRank for someone else's role set, so a change can be refused

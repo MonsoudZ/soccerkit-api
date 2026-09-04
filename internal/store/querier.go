@@ -14,6 +14,9 @@ import (
 type Querier interface {
 	// Roster (time-bounded memberships) ----------------------------------------
 	AddRosterMembership(ctx context.Context, arg AddRosterMembershipParams) (RosterMembership, error)
+	// Idempotent: a coach already on a team stays on it, and the create path can call this
+	// without first asking.
+	AddTeamStaff(ctx context.Context, arg AddTeamStaffParams) error
 	// The moat query: cross-instance aggregation of scored fields for one athlete,
 	// optionally scoped to a context. Powers readiness means, effort trends, etc.
 	//
@@ -306,8 +309,21 @@ type Querier interface {
 	// drain is quadratic in the row count. Bounding that needs a cap on a single record's
 	// payload at push time, which is a wire change and is written up as M1 (3).
 	ListSyncChangesSince(ctx context.Context, arg ListSyncChangesSinceParams) ([]ListSyncChangesSinceRow, error)
+	ListTeamStaff(ctx context.Context, teamID uuid.UUID) ([]Person, error)
 	ListTeamsForPerson(ctx context.Context, personID uuid.UUID) ([]ListTeamsForPersonRow, error)
-	ListTeamsInOrg(ctx context.Context, organizationID uuid.UUID) ([]ListTeamsInOrgRow, error)
+	// The teams a caller may see, which is a different set per role.
+	//
+	// One statement rather than one per role, because every non-admin arm asks the same
+	// question in the end: is this team connected to me? A coach is connected by staffing
+	// it, a player by being rostered on it, a parent through a child. Someone who is two of
+	// those -- a parent who also coaches, which the role model explicitly allows -- gets the
+	// union without any branch having to remember they exist.
+	//
+	// `see_all` is the whole of the role logic: admins and directors see the organization,
+	// per the permission matrix. Everyone else gets the connected set, and a coach who
+	// staffs nothing sees nothing, which is the correct answer to "your teams" rather than
+	// an error.
+	ListTeamsVisibleInOrg(ctx context.Context, arg ListTeamsVisibleInOrgParams) ([]ListTeamsVisibleInOrgRow, error)
 	// Whether this Person can sign in. PATCH /persons/{id} uses it to keep a coach's edit
 	// rights to the loginless athletes they manage, the same population POST /persons can
 	// create -- someone with an account edits their own row.
@@ -348,6 +364,7 @@ type Querier interface {
 	// revoked row for as long as the token it describes could still be presented, plus the
 	// grace the caller passes.
 	ReapExpiredRefreshTokens(ctx context.Context, grace pgtype.Interval) (int64, error)
+	RemoveTeamStaff(ctx context.Context, arg RemoveTeamStaffParams) (int64, error)
 	// Answers an invitation, and is the whole concurrency story. The status test is inside
 	// the UPDATE, so two accepts of the same invitation cannot both see 'pending' and both
 	// grant the roles -- the second matches no row and is told it was already answered.

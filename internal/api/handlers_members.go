@@ -214,17 +214,24 @@ func (s *Server) handleRemoveMember(w http.ResponseWriter, r *http.Request) {
 
 // --- shared guards ---------------------------------------------------------
 
-// requireMemberManager gates every write here. Deliberately narrower than isStaff: a
-// coach runs training, and the authority to appoint another coach -- or to remove the
-// director who appointed them -- is a different thing than the one the role is for. The
-// owner qualifies whatever membership they hold, so an owner cannot be locked out of
+// requireMemberManager gates every write here, and now matches the permission matrix's
+// manageOrg -- "org, billing, seats" -- which is admin alone.
+//
+// It was admin or director, on the reasoning that a director runs the club day to day.
+// The matrix disagrees, and it is the more careful reading: a director's own powers are
+// standardizing templates and seeing every team, and if they could also appoint people
+// they could appoint themselves an admin -- the rank ceiling in checkGrantableRoles
+// stops them granting *above* their level, not granting *at* it to someone who then
+// returns the favour.
+//
+// The owner qualifies whatever membership they hold, so an owner cannot be locked out of
 // their own club by a role change.
 func (s *Server) requireMemberManager(oc orgContext, org store.Organization) error {
 	if org.OwnerPersonID != nil && *org.OwnerPersonID == oc.callerID {
 		return nil
 	}
 	if !oc.canManageMembers() {
-		return errForbidden("only an admin, director or the owner can manage members")
+		return errForbidden("only an admin or the owner can manage members")
 	}
 	return nil
 }

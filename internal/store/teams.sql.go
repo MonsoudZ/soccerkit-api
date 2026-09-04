@@ -52,6 +52,24 @@ func (q *Queries) AddRosterMembership(ctx context.Context, arg AddRosterMembersh
 	return i, err
 }
 
+const addTeamStaff = `-- name: AddTeamStaff :exec
+INSERT INTO team_staff (team_id, person_id)
+VALUES ($1, $2)
+ON CONFLICT (team_id, person_id) DO NOTHING
+`
+
+type AddTeamStaffParams struct {
+	TeamID   uuid.UUID `json:"team_id"`
+	PersonID uuid.UUID `json:"person_id"`
+}
+
+// Idempotent: a coach already on a team stays on it, and the create path can call this
+// without first asking.
+func (q *Queries) AddTeamStaff(ctx context.Context, arg AddTeamStaffParams) error {
+	_, err := q.db.Exec(ctx, addTeamStaff, arg.TeamID, arg.PersonID)
+	return err
+}
+
 const createTeam = `-- name: CreateTeam :one
 INSERT INTO teams (id, organization_id, sync_account_id, name, age_group, season, payload, seq)
 VALUES ($1, $2, $3, $4, $5, $6, $7, nextval('sync_seq'))
@@ -261,6 +279,50 @@ func (q *Queries) ListActiveRoster(ctx context.Context, teamID uuid.UUID) ([]Lis
 	return items, nil
 }
 
+const listTeamStaff = `-- name: ListTeamStaff :many
+SELECT p.id, p.display_name, p.given_name, p.family_name, p.birthdate, p.email, p.phone, p.emergency_contact_name, p.emergency_contact_phone, p.medical_notes, p.created_at, p.updated_at, p.sync_account_id, p.payload, p.deleted, p.seq FROM team_staff ts
+JOIN persons p ON p.id = ts.person_id
+WHERE ts.team_id = $1 AND p.deleted = false
+ORDER BY p.display_name ASC
+`
+
+func (q *Queries) ListTeamStaff(ctx context.Context, teamID uuid.UUID) ([]Person, error) {
+	rows, err := q.db.Query(ctx, listTeamStaff, teamID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []Person
+	for rows.Next() {
+		var i Person
+		if err := rows.Scan(
+			&i.ID,
+			&i.DisplayName,
+			&i.GivenName,
+			&i.FamilyName,
+			&i.Birthdate,
+			&i.Email,
+			&i.Phone,
+			&i.EmergencyContactName,
+			&i.EmergencyContactPhone,
+			&i.MedicalNotes,
+			&i.CreatedAt,
+			&i.UpdatedAt,
+			&i.SyncAccountID,
+			&i.Payload,
+			&i.Deleted,
+			&i.Seq,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
 const listTeamsForPerson = `-- name: ListTeamsForPerson :many
 SELECT t.id AS team_id, t.name AS team_name, r.jersey_number, r.position, r.joined_on, r.left_on
 FROM roster_memberships r
@@ -305,15 +367,34 @@ func (q *Queries) ListTeamsForPerson(ctx context.Context, personID uuid.UUID) ([
 	return items, nil
 }
 
-const listTeamsInOrg = `-- name: ListTeamsInOrg :many
-SELECT t.id, t.organization_id, t.name, t.age_group, t.season, t.created_at, t.updated_at, t.sync_account_id, t.payload, t.deleted, t.seq,
-    (SELECT count(*) FROM roster_memberships r WHERE r.team_id = t.id AND r.left_on IS NULL)::bigint AS active_roster_count
+const listTeamsVisibleInOrg = `-- name: ListTeamsVisibleInOrg :many
+SELECT t.id, t.organization_id, t.name, t.age_group, t.season, t.created_at, t.updated_at, t.sync_account_id, t.payload, t.deleted, t.seq, (
+    SELECT count(*) FROM roster_memberships r
+    WHERE r.team_id = t.id AND r.left_on IS NULL
+) AS active_roster_count
 FROM teams t
-WHERE t.organization_id = $1 AND t.deleted = false
+WHERE t.organization_id = $1
+  AND t.deleted = false
+  AND (
+    $2::bool
+    OR EXISTS (SELECT 1 FROM team_staff ts
+                WHERE ts.team_id = t.id AND ts.person_id = $3)
+    OR EXISTS (SELECT 1 FROM roster_memberships r
+                WHERE r.team_id = t.id AND r.left_on IS NULL
+                  AND (r.person_id = $3
+                    OR r.person_id IN (SELECT child_person_id FROM guardianships
+                                        WHERE guardian_person_id = $3)))
+  )
 ORDER BY t.name ASC
 `
 
-type ListTeamsInOrgRow struct {
+type ListTeamsVisibleInOrgParams struct {
+	OrganizationID uuid.UUID `json:"organization_id"`
+	SeeAll         bool      `json:"see_all"`
+	PersonID       uuid.UUID `json:"person_id"`
+}
+
+type ListTeamsVisibleInOrgRow struct {
 	ID                uuid.UUID          `json:"id"`
 	OrganizationID    uuid.UUID          `json:"organization_id"`
 	Name              string             `json:"name"`
@@ -328,15 +409,27 @@ type ListTeamsInOrgRow struct {
 	ActiveRosterCount int64              `json:"active_roster_count"`
 }
 
-func (q *Queries) ListTeamsInOrg(ctx context.Context, organizationID uuid.UUID) ([]ListTeamsInOrgRow, error) {
-	rows, err := q.db.Query(ctx, listTeamsInOrg, organizationID)
+// The teams a caller may see, which is a different set per role.
+//
+// One statement rather than one per role, because every non-admin arm asks the same
+// question in the end: is this team connected to me? A coach is connected by staffing
+// it, a player by being rostered on it, a parent through a child. Someone who is two of
+// those -- a parent who also coaches, which the role model explicitly allows -- gets the
+// union without any branch having to remember they exist.
+//
+// `see_all` is the whole of the role logic: admins and directors see the organization,
+// per the permission matrix. Everyone else gets the connected set, and a coach who
+// staffs nothing sees nothing, which is the correct answer to "your teams" rather than
+// an error.
+func (q *Queries) ListTeamsVisibleInOrg(ctx context.Context, arg ListTeamsVisibleInOrgParams) ([]ListTeamsVisibleInOrgRow, error) {
+	rows, err := q.db.Query(ctx, listTeamsVisibleInOrg, arg.OrganizationID, arg.SeeAll, arg.PersonID)
 	if err != nil {
 		return nil, err
 	}
 	defer rows.Close()
-	var items []ListTeamsInOrgRow
+	var items []ListTeamsVisibleInOrgRow
 	for rows.Next() {
-		var i ListTeamsInOrgRow
+		var i ListTeamsVisibleInOrgRow
 		if err := rows.Scan(
 			&i.ID,
 			&i.OrganizationID,
@@ -359,6 +452,23 @@ func (q *Queries) ListTeamsInOrg(ctx context.Context, organizationID uuid.UUID) 
 		return nil, err
 	}
 	return items, nil
+}
+
+const removeTeamStaff = `-- name: RemoveTeamStaff :execrows
+DELETE FROM team_staff WHERE team_id = $1 AND person_id = $2
+`
+
+type RemoveTeamStaffParams struct {
+	TeamID   uuid.UUID `json:"team_id"`
+	PersonID uuid.UUID `json:"person_id"`
+}
+
+func (q *Queries) RemoveTeamStaff(ctx context.Context, arg RemoveTeamStaffParams) (int64, error) {
+	result, err := q.db.Exec(ctx, removeTeamStaff, arg.TeamID, arg.PersonID)
+	if err != nil {
+		return 0, err
+	}
+	return result.RowsAffected(), nil
 }
 
 const updateTeam = `-- name: UpdateTeam :one

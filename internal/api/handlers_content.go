@@ -54,6 +54,10 @@ func (s *Server) handleListDrills(w http.ResponseWriter, r *http.Request) {
 		writeError(w, err)
 		return
 	}
+	if !oc.isStaff() {
+		writeError(w, errForbidden("only staff can see the coaching library"))
+		return
+	}
 	drills, err := s.store.ListDrillsInOrg(r.Context(), oc.orgID)
 	if err != nil {
 		writeError(w, err)
@@ -216,6 +220,10 @@ func (s *Server) handleListSessions(w http.ResponseWriter, r *http.Request) {
 		writeError(w, err)
 		return
 	}
+	if !oc.isStaff() {
+		writeError(w, errForbidden("only staff can see the coaching library"))
+		return
+	}
 	var teamFilter *uuid.UUID
 	if v := r.URL.Query().Get("teamId"); v != "" {
 		id, perr := parseUUIDParam(v, "teamId")
@@ -243,6 +251,10 @@ func (s *Server) handleGetSession(w http.ResponseWriter, r *http.Request) {
 	oc, err := s.resolveOrg(r)
 	if err != nil {
 		writeError(w, err)
+		return
+	}
+	if !oc.isStaff() {
+		writeError(w, errForbidden("only staff can see the coaching library"))
 		return
 	}
 	session, err := s.sessionInOrg(r, oc)
