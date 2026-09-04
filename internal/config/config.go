@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"net/netip"
 	"os"
+	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -34,6 +35,25 @@ type Config struct {
 	// DevAppleBypass trusts the identity token's claims without verifying Apple's
 	// signature. Local development only — never enable in a deployed environment.
 	DevAppleBypass bool
+
+	// APNs credentials for push notifications. All four are required together or not at
+	// all: with none set, push is simply off and the API behaves as it did before it
+	// existed. Partial configuration is an error rather than a silent no-op, because the
+	// failure it produces otherwise — invitations that quietly never notify anyone — is
+	// invisible until someone complains they were never told.
+	APNsKeyID      string
+	APNsTeamID     string
+	APNsBundleID   string
+	APNsPrivateKey string
+	// APNsProduction selects Apple's production host. A token minted by a sandbox build
+	// is rejected by production and vice versa, which is the usual cause of
+	// BadDeviceToken on a token that looks perfectly well formed.
+	APNsProduction bool
+}
+
+// PushConfigured reports whether this process has what it needs to deliver a push.
+func (c *Config) PushConfigured() bool {
+	return c.APNsKeyID != "" && c.APNsTeamID != "" && c.APNsBundleID != "" && c.APNsPrivateKey != ""
 }
 
 // Load reads configuration from the environment, applying defaults for local
@@ -89,7 +109,19 @@ func Load() (*Config, error) {
 		return nil, fmt.Errorf("APPLE_CLIENT_ID is required for Sign in with Apple (or set DEV_APPLE_BYPASS=true for local dev)")
 	}
 
+	// APNs private keys are PEM, and PEM is multi-line. An environment variable that
+	// went through a deploy config, a shell, or a secrets UI usually arrives with the
+	// newlines escaped, so they are restored here rather than producing an unhelpful
+	// "failed to parse PEM" at first push.
+	apnsKey := strings.ReplaceAll(getenv("APNS_PRIVATE_KEY", ""), "\\n", "\n")
+
 	cfg := &Config{
+		APNsKeyID:      getenv("APNS_KEY_ID", ""),
+		APNsTeamID:     getenv("APNS_TEAM_ID", ""),
+		APNsBundleID:   getenv("APNS_BUNDLE_ID", ""),
+		APNsPrivateKey: apnsKey,
+		APNsProduction: getenv("APNS_PRODUCTION", "") == "true",
+
 		Env:             envName,
 		Port:            port,
 		DatabaseURL:     dbURL,
@@ -101,10 +133,44 @@ func Load() (*Config, error) {
 		AppleClientID:   appleClientID,
 		DevAppleBypass:  bypass,
 	}
+	if err := cfg.validateAPNs(); err != nil {
+		return nil, err
+	}
 	if err := cfg.validateDeployed(); err != nil {
 		return nil, err
 	}
 	return cfg, nil
+}
+
+// validateAPNs insists the four APNs values arrive together.
+//
+// All four or none. Three of four is the shape a half-finished deploy config takes, and
+// the symptom it produces — invitations that are created correctly and notify nobody —
+// looks like a client problem and surfaces only when somebody says they were never told.
+// Refusing to boot puts the error where the mistake was made.
+func (c *Config) validateAPNs() error {
+	set := map[string]string{
+		"APNS_KEY_ID":      c.APNsKeyID,
+		"APNS_TEAM_ID":     c.APNsTeamID,
+		"APNS_BUNDLE_ID":   c.APNsBundleID,
+		"APNS_PRIVATE_KEY": c.APNsPrivateKey,
+	}
+	var missing []string
+	filled := 0
+	for name, v := range set {
+		if v == "" {
+			missing = append(missing, name)
+		} else {
+			filled++
+		}
+	}
+	if filled == 0 || len(missing) == 0 {
+		return nil
+	}
+	sort.Strings(missing)
+	return fmt.Errorf("push notifications need all of APNS_KEY_ID, APNS_TEAM_ID, "+
+		"APNS_BUNDLE_ID and APNS_PRIVATE_KEY, or none of them; missing: %s",
+		strings.Join(missing, ", "))
 }
 
 // IsDeployed reports whether this process is running outside a developer's

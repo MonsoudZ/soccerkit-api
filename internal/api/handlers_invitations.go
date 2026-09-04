@@ -115,7 +115,34 @@ func (s *Server) handleCreateInvitation(w http.ResponseWriter, r *http.Request) 
 		writeError(w, err)
 		return
 	}
+	// Told, rather than left to discover. This is why the notifier exists: an invitation
+	// is addressed to someone who may not have the app open, and /me/invitations only
+	// helps a person who already suspects there is something to look at.
+	//
+	// After the insert and outside any transaction, deliberately. A push for an
+	// invitation that failed to save is worse than no push, and the send itself must not
+	// be able to fail the request -- Notify queues and returns.
+	//
+	// An address with no account has nobody to notify, which is the waiting case working
+	// as intended: they will see it in /me/invitations at their first sign-in.
+	if personID, err := s.store.GetPersonIDByAccountEmail(r.Context(), email); err == nil {
+		s.notify(r.Context(), personID, Notification{
+			Title: "Invitation to " + org.Name,
+			Body:  invitationBody(org.Name, roles),
+			Data: map[string]string{
+				"type":         "invitation",
+				"invitationId": invite.ID.String(),
+			},
+		})
+	}
 	writeJSON(w, http.StatusCreated, invitationDTO(invite, nil, nil))
+}
+
+// invitationBody is what shows on a lock screen, so it says what is being offered and
+// nothing else. The club's name and the roles are the whole of it -- the inviter's name
+// would be a third party's information on a device that has not yet accepted anything.
+func invitationBody(orgName string, roles []string) string {
+	return "You have been invited to join " + orgName + " as " + strings.Join(roles, ", ") + "."
 }
 
 // handleListInvitations shows the club what it has outstanding. Staff, matching who may

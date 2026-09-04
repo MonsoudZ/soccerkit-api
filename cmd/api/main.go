@@ -11,12 +11,15 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/golang-jwt/jwt/v5"
+	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5/pgtype"
 	"github.com/jackc/pgx/v5/pgxpool"
 
 	"github.com/monsoudz/soccerkit-api/internal/api"
 	"github.com/monsoudz/soccerkit-api/internal/config"
 	"github.com/monsoudz/soccerkit-api/internal/database"
+	"github.com/monsoudz/soccerkit-api/internal/push"
 	"github.com/monsoudz/soccerkit-api/internal/store"
 )
 
@@ -54,6 +57,26 @@ func run() error {
 	go reapRefreshTokens(reaperCtx, pool)
 
 	srv := api.NewServer(cfg, pool)
+
+	// Push delivery, installed here for the same reason as the reaper above: it holds
+	// Apple's signing key and talks to their servers, so it is a property of this process
+	// and not of every test that builds a Server. With APNs unconfigured the server keeps
+	// its nil notifier and simply tells nobody, which is what a developer's machine
+	// should do.
+	if cfg.PushConfigured() {
+		sender, err := newPushSender(cfg, store.New(pool))
+		if err != nil {
+			return fmt.Errorf("push notifications: %w", err)
+		}
+		pushCtx, stopPush := context.WithCancel(ctx)
+		defer stopPush()
+		go sender.Run(pushCtx)
+		srv.SetNotifier(pushNotifier{sender})
+		log.Printf("push notifications enabled (bundle %s, %s)", cfg.APNsBundleID, apnsHostName(cfg))
+	} else {
+		log.Printf("push notifications disabled (APNS_* unset); invitations will not notify")
+	}
+
 	// Every timeout, not just the header one. middleware.Timeout bounds how long a
 	// handler may run; it says nothing about how slowly a client may dribble out a
 	// request body or read a response back, and limitBody caps the size rather than the
@@ -136,4 +159,46 @@ func reapRefreshTokens(ctx context.Context, pool *pgxpool.Pool) {
 			reap()
 		}
 	}
+}
+
+// newPushSender parses the APNs key and builds the sender.
+//
+// The key is parsed at boot rather than at first push, so a malformed one fails the
+// deploy instead of failing silently the first time somebody is invited -- the same
+// reasoning as config.validateAPNs, which checks that the four values arrive together.
+func newPushSender(cfg *config.Config, q *store.Queries) (*push.Sender, error) {
+	key, err := jwt.ParseECPrivateKeyFromPEM([]byte(cfg.APNsPrivateKey))
+	if err != nil {
+		return nil, fmt.Errorf("APNS_PRIVATE_KEY is not a PEM EC private key (expect the .p8 "+
+			"Apple issued, newlines and all): %w", err)
+	}
+	host := push.SandboxHost
+	if cfg.APNsProduction {
+		host = push.ProductionHost
+	}
+	return push.NewSender(q, push.Config{
+		KeyID: cfg.APNsKeyID, TeamID: cfg.APNsTeamID, BundleID: cfg.APNsBundleID,
+		PrivateKey: key, Host: host,
+	}), nil
+}
+
+func apnsHostName(cfg *config.Config) string {
+	if cfg.APNsProduction {
+		return "production"
+	}
+	return "sandbox"
+}
+
+// pushNotifier joins the two halves without either package importing the other.
+//
+// internal/api says who to tell and what about; internal/push knows Apple. Each declares
+// the notification shape it needs, and this converts between them -- four fields of
+// copying, in exchange for a delivery package that the API does not depend on and a test
+// server that cannot accidentally acquire one.
+type pushNotifier struct{ sender *push.Sender }
+
+func (p pushNotifier) Notify(ctx context.Context, personID uuid.UUID, note api.Notification) {
+	p.sender.Notify(ctx, personID, push.Notification{
+		Title: note.Title, Body: note.Body, Data: note.Data,
+	})
 }

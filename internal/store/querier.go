@@ -124,6 +124,13 @@ type Querier interface {
 	// returned, resyncing that device from the beginning on every single pull. The caller
 	// reads `known = false` as "no bound available" and lets the cursor stand.
 	CurrentSyncSeq(ctx context.Context) (CurrentSyncSeqRow, error)
+	// Scoped to the owner, so holding a token is not enough to unregister someone else's
+	// device. Sign-out is the ordinary caller.
+	DeleteDeviceToken(ctx context.Context, arg DeleteDeviceTokenParams) (int64, error)
+	// Pruning after Apple rejects a token, which is not scoped to a person on purpose: the
+	// rejection says this token is dead everywhere, and the row may well belong to whoever
+	// registered it before the device changed hands.
+	DeleteDeviceTokenAnyOwner(ctx context.Context, token string) error
 	DeleteGuardianship(ctx context.Context, arg DeleteGuardianshipParams) error
 	// Removes a person from an organization outright, every role at once. Roles are rows, so
 	// "remove this member" is a delete of the set rather than of one of them.
@@ -185,6 +192,7 @@ type Querier interface {
 	// a blank row rather than a name. Nothing calls this yet -- guardianships are not
 	// exposed -- which is exactly why it is worth fixing before something does.
 	ListChildren(ctx context.Context, guardianPersonID uuid.UUID) ([]Person, error)
+	ListDeviceTokensForPerson(ctx context.Context, personID uuid.UUID) ([]string, error)
 	ListDrillsInOrg(ctx context.Context, organizationID uuid.UUID) ([]Drill, error)
 	ListFormFields(ctx context.Context, templateID uuid.UUID) ([]FormField, error)
 	ListFormTemplates(ctx context.Context, arg ListFormTemplatesParams) ([]FormTemplate, error)
@@ -441,6 +449,9 @@ type Querier interface {
 	// and the new seq is simply unread; for a synced row, an edit that did not move the
 	// cursor is an edit no device would ever ask for.
 	UpdateTeam(ctx context.Context, arg UpdateTeamParams) (Team, error)
+	// Registering is idempotent and re-points the token at whoever is signed in now. See
+	// 0012_device_tokens.sql for why the token owns the row rather than the person.
+	UpsertDeviceToken(ctx context.Context, arg UpsertDeviceTokenParams) (DeviceToken, error)
 }
 
 var _ Querier = (*Queries)(nil)

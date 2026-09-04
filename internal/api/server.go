@@ -23,7 +23,16 @@ type Server struct {
 	store       *store.Queries
 	apple       *appleVerifier
 	authLimiter *ipRateLimiter
+	// notifier delivers pushes. Nil until SetNotifier installs one, which cmd/api does
+	// and no test does -- see the Notifier interface in handlers_devices.go.
+	notifier Notifier
 }
+
+// SetNotifier installs the push delivery this server uses. Kept off NewServer for the
+// reason the refresh-token reaper lives in cmd/api: it is a property of the running
+// process, not of every test that builds a server, and a test that accidentally spoke to
+// Apple would be a bad afternoon.
+func (s *Server) SetNotifier(n Notifier) { s.notifier = n }
 
 func NewServer(cfg *config.Config, pool *pgxpool.Pool) *Server {
 	return &Server{
@@ -97,6 +106,10 @@ func (s *Server) Router() http.Handler {
 			r.Get("/me", s.handleGetMe)
 			r.Delete("/me", s.handleDeleteMe)
 			r.Get("/me/invitations", s.handleListMyInvitations)
+
+			// Where to reach this person. Registered on launch, dropped on sign-out.
+			r.Post("/me/devices", s.handleRegisterDevice)
+			r.Delete("/me/devices/{token}", s.handleUnregisterDevice)
 
 			// Answering an invitation is not scoped to an organization: the caller is
 			// not a member of it yet, so resolveOrg could not name it.

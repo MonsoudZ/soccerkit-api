@@ -8,9 +8,11 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"sync"
 	"testing"
 	"time"
 
+	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5/pgxpool"
 
 	"github.com/monsoudz/soccerkit-api/internal/api"
@@ -24,7 +26,35 @@ var (
 	// testRouter is the same handler testServer wraps, kept as a chi router so
 	// TestOpenAPISpecMatchesTheRouter can walk the routes it mounts.
 	testRouter http.Handler
+	testNotes  *recordingNotifier
 )
+
+// recordingNotifier captures what the handlers asked to have delivered.
+type recordingNotifier struct {
+	mu    sync.Mutex
+	notes []recordedNote
+}
+
+type recordedNote struct {
+	personID uuid.UUID
+	note     api.Notification
+}
+
+func (n *recordingNotifier) Notify(_ context.Context, personID uuid.UUID, note api.Notification) {
+	n.mu.Lock()
+	defer n.mu.Unlock()
+	n.notes = append(n.notes, recordedNote{personID: personID, note: note})
+}
+
+// drain returns what has been recorded and clears it, so each test starts empty
+// alongside resetDB.
+func (n *recordingNotifier) drain() []recordedNote {
+	n.mu.Lock()
+	defer n.mu.Unlock()
+	out := n.notes
+	n.notes = nil
+	return out
+}
 
 func TestMain(m *testing.M) {
 	dbURL := os.Getenv("TEST_DATABASE_URL")
@@ -51,6 +81,11 @@ func TestMain(m *testing.M) {
 	}
 
 	srv := api.NewServer(cfg, testPool)
+	// A recording notifier rather than a real one: the suite must never be able to reach
+	// Apple, and what the handlers owe is "the right person was told the right thing",
+	// which this can answer. Delivery itself is internal/push's to prove.
+	testNotes = &recordingNotifier{}
+	srv.SetNotifier(testNotes)
 	testRouter = srv.Router()
 	testServer = httptest.NewServer(testRouter)
 
@@ -64,8 +99,12 @@ func TestMain(m *testing.M) {
 // resetDB truncates all tables so each test starts clean.
 func resetDB(t *testing.T) {
 	t.Helper()
+	if testNotes != nil {
+		testNotes.drain()
+	}
 	_, err := testPool.Exec(context.Background(), `
 		TRUNCATE TABLE
+			invitations, device_tokens,
 			sync_documents, players, events, diagrams,
 			form_answers, form_instances, form_fields, form_templates,
 			share_grants, session_blocks, sessions, drills, games,

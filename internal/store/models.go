@@ -9,6 +9,14 @@ import (
 	"github.com/jackc/pgx/v5/pgtype"
 )
 
+type DeviceToken struct {
+	Token      string             `json:"token"`
+	PersonID   uuid.UUID          `json:"person_id"`
+	Platform   string             `json:"platform"`
+	CreatedAt  pgtype.Timestamptz `json:"created_at"`
+	LastSeenAt pgtype.Timestamptz `json:"last_seen_at"`
+}
+
 type Diagram struct {
 	ID            uuid.UUID          `json:"id"`
 	SyncAccountID *uuid.UUID         `json:"sync_account_id"`
