@@ -37,25 +37,42 @@ func (q *Queries) CountDrillsInOrgByIDs(ctx context.Context, arg CountDrillsInOr
 
 const createDrill = `-- name: CreateDrill :one
 
-INSERT INTO drills (organization_id, author_person_id, name, description)
-VALUES ($1, $2, $3, $4)
+INSERT INTO drills (id, organization_id, author_person_id, sync_account_id, name, description, payload, seq)
+VALUES ($1, $2, $3, $4, $5, $6, $7, nextval('sync_seq'))
 RETURNING id, organization_id, author_person_id, name, description, created_at, updated_at, sync_account_id, payload, deleted, seq
 `
 
 type CreateDrillParams struct {
+	ID             uuid.UUID  `json:"id"`
 	OrganizationID uuid.UUID  `json:"organization_id"`
 	AuthorPersonID *uuid.UUID `json:"author_person_id"`
+	SyncAccountID  *uuid.UUID `json:"sync_account_id"`
 	Name           string     `json:"name"`
 	Description    *string    `json:"description"`
+	Payload        []byte     `json:"payload"`
 }
 
 // Drills --------------------------------------------------------------------
+// A drill created here is a drill the app can see, for the reasons CreateTeam sets out:
+// sync_account_id puts the row in the caller's stream, seq gives a cursor something to
+// deliver, and payload is what a pull actually returns.
+//
+// The payload carries only id, title and fieldSetup, because that is all POST /drills
+// collects. Until now the app required a category, a duration and coaching points as
+// well, so a drill made this way could not be decoded at all and was dropped whole --
+// Codable loses the record over one missing key. Those fields are optional on the app
+// side now, so the drill arrives with blanks the coach can fill in rather than not
+// arriving. Inventing a category here was the alternative, and putting a coaching
+// decision nobody made into a coach's library is worse than leaving it empty.
 func (q *Queries) CreateDrill(ctx context.Context, arg CreateDrillParams) (Drill, error) {
 	row := q.db.QueryRow(ctx, createDrill,
+		arg.ID,
 		arg.OrganizationID,
 		arg.AuthorPersonID,
+		arg.SyncAccountID,
 		arg.Name,
 		arg.Description,
+		arg.Payload,
 	)
 	var i Drill
 	err := row.Scan(
@@ -117,29 +134,44 @@ func (q *Queries) CreateGame(ctx context.Context, arg CreateGameParams) (Game, e
 
 const createSession = `-- name: CreateSession :one
 
-INSERT INTO sessions (organization_id, author_person_id, team_id, title, scheduled_at, notes)
-VALUES ($1, $2, $3, $4, $5, $6)
+INSERT INTO sessions (id, organization_id, author_person_id, sync_account_id, team_id, title, scheduled_at, notes, payload, seq)
+VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, nextval('sync_seq'))
 RETURNING id, organization_id, author_person_id, team_id, title, scheduled_at, notes, created_at, updated_at, sync_account_id, payload, deleted, seq
 `
 
 type CreateSessionParams struct {
+	ID             uuid.UUID          `json:"id"`
 	OrganizationID uuid.UUID          `json:"organization_id"`
 	AuthorPersonID *uuid.UUID         `json:"author_person_id"`
+	SyncAccountID  *uuid.UUID         `json:"sync_account_id"`
 	TeamID         *uuid.UUID         `json:"team_id"`
 	Title          string             `json:"title"`
 	ScheduledAt    pgtype.Timestamptz `json:"scheduled_at"`
 	Notes          *string            `json:"notes"`
+	Payload        []byte             `json:"payload"`
 }
 
 // Sessions ------------------------------------------------------------------
+// Same three columns as CreateDrill, and one field that needs saying out loud: the app
+// requires a date and the server always has one, so the payload carries scheduled_at
+// when it was given and the creation time when it was not. It is written as a number of
+// seconds since 2001-01-01, which is how Swift encodes a Date -- see
+// TestContractSwiftDatesSurviveAsNumbers, which pins that against this side drifting.
+//
+// teamID and each block's drillID may be absent. Both were required by the app until
+// now, and both are things this API has always let a caller leave out, so a session
+// without a team, or with a warm-up block that runs no drill, simply never arrived.
 func (q *Queries) CreateSession(ctx context.Context, arg CreateSessionParams) (Session, error) {
 	row := q.db.QueryRow(ctx, createSession,
+		arg.ID,
 		arg.OrganizationID,
 		arg.AuthorPersonID,
+		arg.SyncAccountID,
 		arg.TeamID,
 		arg.Title,
 		arg.ScheduledAt,
 		arg.Notes,
+		arg.Payload,
 	)
 	var i Session
 	err := row.Scan(
@@ -161,12 +193,13 @@ func (q *Queries) CreateSession(ctx context.Context, arg CreateSessionParams) (S
 }
 
 const createSessionBlock = `-- name: CreateSessionBlock :one
-INSERT INTO session_blocks (session_id, drill_id, title, duration_min, position, notes)
-VALUES ($1, $2, $3, $4, $5, $6)
+INSERT INTO session_blocks (id, session_id, drill_id, title, duration_min, position, notes)
+VALUES ($1, $2, $3, $4, $5, $6, $7)
 RETURNING id, session_id, drill_id, title, duration_min, position, notes
 `
 
 type CreateSessionBlockParams struct {
+	ID          uuid.UUID  `json:"id"`
 	SessionID   uuid.UUID  `json:"session_id"`
 	DrillID     *uuid.UUID `json:"drill_id"`
 	Title       string     `json:"title"`
@@ -175,8 +208,11 @@ type CreateSessionBlockParams struct {
 	Notes       *string    `json:"notes"`
 }
 
+// The id is supplied rather than defaulted, because the session's payload has to carry
+// each block's id and is written in the same statement as the session itself.
 func (q *Queries) CreateSessionBlock(ctx context.Context, arg CreateSessionBlockParams) (SessionBlock, error) {
 	row := q.db.QueryRow(ctx, createSessionBlock,
+		arg.ID,
 		arg.SessionID,
 		arg.DrillID,
 		arg.Title,

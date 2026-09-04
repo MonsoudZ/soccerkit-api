@@ -1,8 +1,19 @@
 -- Drills --------------------------------------------------------------------
 
 -- name: CreateDrill :one
-INSERT INTO drills (organization_id, author_person_id, name, description)
-VALUES ($1, $2, $3, $4)
+-- A drill created here is a drill the app can see, for the reasons CreateTeam sets out:
+-- sync_account_id puts the row in the caller's stream, seq gives a cursor something to
+-- deliver, and payload is what a pull actually returns.
+--
+-- The payload carries only id, title and fieldSetup, because that is all POST /drills
+-- collects. Until now the app required a category, a duration and coaching points as
+-- well, so a drill made this way could not be decoded at all and was dropped whole --
+-- Codable loses the record over one missing key. Those fields are optional on the app
+-- side now, so the drill arrives with blanks the coach can fill in rather than not
+-- arriving. Inventing a category here was the alternative, and putting a coaching
+-- decision nobody made into a coach's library is worse than leaving it empty.
+INSERT INTO drills (id, organization_id, author_person_id, sync_account_id, name, description, payload, seq)
+VALUES ($1, $2, $3, $4, $5, $6, $7, nextval('sync_seq'))
 RETURNING *;
 
 -- name: GetDrill :one
@@ -24,8 +35,17 @@ SELECT * FROM drills WHERE organization_id = $1 AND deleted = false ORDER BY nam
 -- Sessions ------------------------------------------------------------------
 
 -- name: CreateSession :one
-INSERT INTO sessions (organization_id, author_person_id, team_id, title, scheduled_at, notes)
-VALUES ($1, $2, $3, $4, $5, $6)
+-- Same three columns as CreateDrill, and one field that needs saying out loud: the app
+-- requires a date and the server always has one, so the payload carries scheduled_at
+-- when it was given and the creation time when it was not. It is written as a number of
+-- seconds since 2001-01-01, which is how Swift encodes a Date -- see
+-- TestContractSwiftDatesSurviveAsNumbers, which pins that against this side drifting.
+--
+-- teamID and each block's drillID may be absent. Both were required by the app until
+-- now, and both are things this API has always let a caller leave out, so a session
+-- without a team, or with a warm-up block that runs no drill, simply never arrived.
+INSERT INTO sessions (id, organization_id, author_person_id, sync_account_id, team_id, title, scheduled_at, notes, payload, seq)
+VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, nextval('sync_seq'))
 RETURNING *;
 
 -- name: GetSession :one
@@ -45,8 +65,10 @@ UPDATE sessions SET deleted = true, seq = nextval('sync_seq'), updated_at = now(
 WHERE id = $1;
 
 -- name: CreateSessionBlock :one
-INSERT INTO session_blocks (session_id, drill_id, title, duration_min, position, notes)
-VALUES ($1, $2, $3, $4, $5, $6)
+-- The id is supplied rather than defaulted, because the session's payload has to carry
+-- each block's id and is written in the same statement as the session itself.
+INSERT INTO session_blocks (id, session_id, drill_id, title, duration_min, position, notes)
+VALUES ($1, $2, $3, $4, $5, $6, $7)
 RETURNING *;
 
 -- name: ListSessionBlocks :many

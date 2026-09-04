@@ -1,6 +1,7 @@
 package api
 
 import (
+	"encoding/json"
 	"errors"
 	"net/http"
 	"time"
@@ -34,8 +35,11 @@ func (s *Server) handleCreateDrill(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	personID := personIDFrom(r.Context())
+	drillID := uuid.New()
 	drill, err := s.store.CreateDrill(r.Context(), store.CreateDrillParams{
-		OrganizationID: oc.orgID, AuthorPersonID: &personID, Name: req.Name, Description: req.Description,
+		ID: drillID, OrganizationID: oc.orgID, AuthorPersonID: &personID,
+		SyncAccountID: &personID, Name: req.Name, Description: req.Description,
+		Payload: newDrillPayload(drillID, req.Name, req.Description),
 	})
 	if err != nil {
 		writeError(w, err)
@@ -65,16 +69,20 @@ func (s *Server) handleListDrills(w http.ResponseWriter, r *http.Request) {
 // --- sessions -------------------------------------------------------------
 
 type createSessionRequest struct {
+	Title       string                `json:"title"`
+	TeamID      *string               `json:"teamId"`
+	ScheduledAt *string               `json:"scheduledAt"`
+	Notes       *string               `json:"notes"`
+	Blocks      []sessionBlockRequest `json:"blocks"`
+}
+
+// sessionBlockRequest is one entry in a session's plan. Named rather than anonymous now
+// that the payload builder takes it too.
+type sessionBlockRequest struct {
 	Title       string  `json:"title"`
-	TeamID      *string `json:"teamId"`
-	ScheduledAt *string `json:"scheduledAt"`
+	DrillID     *string `json:"drillId"`
+	DurationMin *int32  `json:"durationMin"`
 	Notes       *string `json:"notes"`
-	Blocks      []struct {
-		Title       string  `json:"title"`
-		DrillID     *string `json:"drillId"`
-		DurationMin *int32  `json:"durationMin"`
-		Notes       *string `json:"notes"`
-	} `json:"blocks"`
 }
 
 func (s *Server) handleCreateSession(w http.ResponseWriter, r *http.Request) {
@@ -154,9 +162,27 @@ func (s *Server) handleCreateSession(w http.ResponseWriter, r *http.Request) {
 	defer tx.Rollback(r.Context())
 	q := s.store.WithTx(tx)
 
+	// Ids are minted here rather than defaulted by the column, because the session's
+	// payload has to carry its own id and every block's, and it is written in the same
+	// statement as the session.
+	sessionID := uuid.New()
+	blockIDs := make([]uuid.UUID, len(req.Blocks))
+	for i := range blockIDs {
+		blockIDs[i] = uuid.New()
+	}
+	// The app requires a date and the server always has one: the scheduled time when it
+	// was given, the creation time when it was not.
+	sessionDate := time.Now()
+	if scheduled.Valid {
+		sessionDate = scheduled.Time
+	}
+
 	session, err := q.CreateSession(r.Context(), store.CreateSessionParams{
-		OrganizationID: oc.orgID, AuthorPersonID: &personID, TeamID: teamID,
+		ID: sessionID, OrganizationID: oc.orgID, AuthorPersonID: &personID,
+		SyncAccountID: &personID, TeamID: teamID,
 		Title: req.Title, ScheduledAt: scheduled, Notes: req.Notes,
+		Payload: newSessionPayload(sessionID, teamID, req.Title, sessionDate, req.Notes,
+			blockIDs, blockDrillIDs, req.Blocks),
 	})
 	if err != nil {
 		writeError(w, err)
@@ -165,7 +191,7 @@ func (s *Server) handleCreateSession(w http.ResponseWriter, r *http.Request) {
 	blocks := make([]SessionBlock, 0, len(req.Blocks))
 	for i, b := range req.Blocks {
 		created, berr := q.CreateSessionBlock(r.Context(), store.CreateSessionBlockParams{
-			SessionID: session.ID, DrillID: blockDrillIDs[i], Title: b.Title,
+			ID: blockIDs[i], SessionID: session.ID, DrillID: blockDrillIDs[i], Title: b.Title,
 			DurationMin: b.DurationMin, Position: int32(i), Notes: b.Notes,
 		})
 		if berr != nil {
@@ -291,4 +317,82 @@ func (s *Server) optionalTeamInOrg(r *http.Request, oc orgContext, raw *string) 
 		return nil, err
 	}
 	return &id, nil
+}
+
+// swiftReferenceDate is 2001-01-01 UTC, the epoch Swift's Date measures from. Its
+// JSONEncoder writes a Date as seconds since that instant, as a Double, which is what
+// the app's decoder expects and what TestContractSwiftDatesSurviveAsNumbers pins.
+var swiftReferenceDate = time.Date(2001, time.January, 1, 0, 0, 0, 0, time.UTC)
+
+// swiftDate renders a time the way the app's records spell one.
+func swiftDate(t time.Time) float64 { return t.Sub(swiftReferenceDate).Seconds() }
+
+// newDrillPayload builds the record the app will decode for a drill created over REST.
+//
+// Three keys, because POST /drills collects three things. The app's decoder used to
+// require a category, a duration and coaching points as well, and Codable loses the
+// whole record over one missing key — so a drill made here was not merely incomplete on
+// the phone, it never appeared. Those fields are optional there now, and left out here
+// rather than invented: a category nobody chose is worse in a coach's library than a
+// blank they can fill in.
+func newDrillPayload(id uuid.UUID, title string, fieldSetup *string) []byte {
+	payload, err := json.Marshal(map[string]any{
+		"id":         id.String(),
+		"title":      title,
+		"fieldSetup": syncString(fieldSetup),
+	})
+	if err != nil {
+		return nil
+	}
+	return payload
+}
+
+// newSessionPayload builds the record the app will decode for a session created over
+// REST, including its blocks.
+//
+// teamID and a block's drillID are written only when present. Both were required by the
+// app until this change and both are optional here, which is exactly why a session
+// without a team — or with a warm-up block that runs no drill — used to be created
+// successfully and then never arrive.
+func newSessionPayload(
+	id uuid.UUID, teamID *uuid.UUID, title string, date time.Time, objective *string,
+	blockIDs []uuid.UUID, blockDrillIDs []*uuid.UUID, blocks []sessionBlockRequest,
+) []byte {
+	wire := make([]map[string]any, 0, len(blocks))
+	for i, b := range blocks {
+		block := map[string]any{
+			"id":      blockIDs[i].String(),
+			"minutes": int32Value(b.DurationMin),
+			// The app calls it focus; this API calls it a block title. Same field: the
+			// short label a coach reads down the session plan.
+			"focus": b.Title,
+		}
+		if drillID := blockDrillIDs[i]; drillID != nil {
+			block["drillID"] = drillID.String()
+		}
+		wire = append(wire, block)
+	}
+	record := map[string]any{
+		"id":        id.String(),
+		"title":     title,
+		"date":      swiftDate(date),
+		"objective": syncString(objective),
+		"blocks":    wire,
+	}
+	if teamID != nil {
+		record["teamID"] = teamID.String()
+	}
+	payload, err := json.Marshal(record)
+	if err != nil {
+		return nil
+	}
+	return payload
+}
+
+// int32Value is zero for an absent duration, which is what the app defaults to.
+func int32Value(v *int32) int32 {
+	if v == nil {
+		return 0
+	}
+	return *v
 }

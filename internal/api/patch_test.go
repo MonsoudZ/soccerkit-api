@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"testing"
+	"time"
 
 	"github.com/google/uuid"
 )
@@ -312,5 +313,145 @@ func TestTeamCreatedWithoutOptionalsIsStillDecodable(t *testing.T) {
 		if _, isString := v.(string); !isString {
 			t.Errorf("%q must be a string, not %#v — null fails a non-optional String", key, v)
 		}
+	}
+}
+
+// TestDrillCreatedOverRESTReachesTheApp — the create side for drills, which used to
+// leave sync_account_id NULL and so never reached a phone at all.
+//
+// The keys asserted are the ones Models/Drill.swift decodes with `decode` rather than
+// `decodeIfPresent`. Everything else the app defaults, which is the change that made a
+// three-field payload decodable in the first place.
+func TestDrillCreatedOverRESTReachesTheApp(t *testing.T) {
+	resetDB(t)
+	coach, _ := signInCoach(t, "drillsync@e.com")
+
+	created := do(t, http.MethodPost, "/api/v1/drills", coach, map[string]any{
+		"name": "Rondo", "description": "5v2 in a 10m box",
+	})
+	if created.status != http.StatusCreated {
+		t.Fatalf("create drill: %d %s", created.status, created.raw)
+	}
+	drillID := created.body["id"].(string)
+
+	payload := payloadOf(t, pullSync(t, coach, ""), "Drill", drillID)
+	if payload["id"] != drillID {
+		t.Errorf("the payload id must match the record id: %v", payload["id"])
+	}
+	if payload["title"] != "Rondo" {
+		t.Errorf("title did not reach the payload: %v", payload["title"])
+	}
+	if payload["fieldSetup"] != "5v2 in a 10m box" {
+		t.Errorf("the description is the app's fieldSetup: %v", payload["fieldSetup"])
+	}
+	// Deliberately absent: a category nobody chose is worse than a blank.
+	for _, key := range []string{"category", "durationMinutes", "coachingPoints"} {
+		if _, present := payload[key]; present {
+			t.Errorf("%q should not be invented by the server: %v", key, payload)
+		}
+	}
+}
+
+// TestSessionCreatedOverRESTReachesTheApp covers the harder record: a date the app
+// requires and the server must supply, and the two references the app used to require
+// and this API has always allowed a caller to omit.
+func TestSessionCreatedOverRESTReachesTheApp(t *testing.T) {
+	resetDB(t)
+	coach, _ := signInCoach(t, "sessionsync@e.com")
+
+	team := do(t, http.MethodPost, "/api/v1/teams", coach, map[string]any{"name": "U12"})
+	teamID := team.body["id"].(string)
+	drill := do(t, http.MethodPost, "/api/v1/drills", coach, map[string]any{"name": "Rondo"})
+	drillID := drill.body["id"].(string)
+
+	created := do(t, http.MethodPost, "/api/v1/sessions", coach, map[string]any{
+		"title": "Tuesday Training", "teamId": teamID,
+		"scheduledAt": "2027-02-01T18:00:00Z", "notes": "Pressing",
+		"blocks": []map[string]any{
+			{"title": "Warm-up", "durationMin": 15},
+			{"title": "Rondo", "drillId": drillID, "durationMin": 20},
+		},
+	})
+	if created.status != http.StatusCreated {
+		t.Fatalf("create session: %d %s", created.status, created.raw)
+	}
+	sessionID := created.body["id"].(string)
+
+	payload := payloadOf(t, pullSync(t, coach, ""), "Session", sessionID)
+	for _, key := range []string{"id", "title", "date", "objective", "blocks"} {
+		if _, ok := payload[key]; !ok {
+			t.Errorf("TrainingSession requires %q; payload has %v", key, payload)
+		}
+	}
+	if payload["teamID"] != teamID {
+		t.Errorf("teamID did not reach the payload: %v", payload["teamID"])
+	}
+	if payload["objective"] != "Pressing" {
+		t.Errorf("notes are the app's objective: %v", payload["objective"])
+	}
+	// Swift reads Date as seconds since 2001-01-01, as a number.
+	date, ok := payload["date"].(float64)
+	if !ok {
+		t.Fatalf("date must be a number, got %T (%v)", payload["date"], payload["date"])
+	}
+	want := time.Date(2027, time.February, 1, 18, 0, 0, 0, time.UTC).
+		Sub(time.Date(2001, time.January, 1, 0, 0, 0, 0, time.UTC)).Seconds()
+	if date != want {
+		t.Errorf("date = %v, want %v (seconds since 2001)", date, want)
+	}
+
+	blocks, _ := payload["blocks"].([]any)
+	if len(blocks) != 2 {
+		t.Fatalf("expected 2 blocks, got %v", payload["blocks"])
+	}
+	first := blocks[0].(map[string]any)
+	for _, key := range []string{"id", "minutes", "focus"} {
+		if _, ok := first[key]; !ok {
+			t.Errorf("TrainingBlock requires %q; block has %v", key, first)
+		}
+	}
+	if first["focus"] != "Warm-up" {
+		t.Errorf("a block's title is the app's focus: %v", first["focus"])
+	}
+	if _, present := first["drillID"]; present {
+		t.Errorf("a block that runs no drill must not claim one: %v", first)
+	}
+	second := blocks[1].(map[string]any)
+	if second["drillID"] != drillID {
+		t.Errorf("a drill-backed block should carry it: %v", second)
+	}
+}
+
+// TestSessionWithoutATeamOrScheduleStillReachesTheApp — both omissions this API allows,
+// and both of which used to stop the record decoding on the phone. The date is the one
+// required field with no caller-supplied value, so the server supplies it.
+func TestSessionWithoutATeamOrScheduleStillReachesTheApp(t *testing.T) {
+	resetDB(t)
+	coach, _ := signInCoach(t, "baresession@e.com")
+
+	before := float64(time.Since(time.Date(2001, time.January, 1, 0, 0, 0, 0, time.UTC)).Seconds())
+	created := do(t, http.MethodPost, "/api/v1/sessions", coach, map[string]any{
+		"title": "Open Session", "blocks": []map[string]any{},
+	})
+	if created.status != http.StatusCreated {
+		t.Fatalf("create session: %d %s", created.status, created.raw)
+	}
+	payload := payloadOf(t, pullSync(t, coach, ""), "Session", created.body["id"].(string))
+
+	if _, present := payload["teamID"]; present {
+		t.Errorf("a session with no team must not claim one: %v", payload["teamID"])
+	}
+	date, ok := payload["date"].(float64)
+	if !ok {
+		t.Fatalf("date must still be present and a number, got %v", payload["date"])
+	}
+	if date < before-5 {
+		t.Errorf("an unscheduled session should date from its creation, got %v", date)
+	}
+	if payload["objective"] != "" {
+		t.Errorf("absent notes should be \"\", not null: %#v", payload["objective"])
+	}
+	if blocks, ok := payload["blocks"].([]any); !ok || len(blocks) != 0 {
+		t.Errorf("blocks must be an empty array, not null: %#v", payload["blocks"])
 	}
 }

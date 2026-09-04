@@ -43,6 +43,17 @@ type Querier interface {
 	// put one back.
 	CountOtherAdminsInOrg(ctx context.Context, arg CountOtherAdminsInOrgParams) (int64, error)
 	// Drills --------------------------------------------------------------------
+	// A drill created here is a drill the app can see, for the reasons CreateTeam sets out:
+	// sync_account_id puts the row in the caller's stream, seq gives a cursor something to
+	// deliver, and payload is what a pull actually returns.
+	//
+	// The payload carries only id, title and fieldSetup, because that is all POST /drills
+	// collects. Until now the app required a category, a duration and coaching points as
+	// well, so a drill made this way could not be decoded at all and was dropped whole --
+	// Codable loses the record over one missing key. Those fields are optional on the app
+	// side now, so the drill arrives with blanks the coach can fill in rather than not
+	// arriving. Inventing a category here was the alternative, and putting a coaching
+	// decision nobody made into a coach's library is worse than leaving it empty.
 	CreateDrill(ctx context.Context, arg CreateDrillParams) (Drill, error)
 	CreateFormAnswer(ctx context.Context, arg CreateFormAnswerParams) (FormAnswer, error)
 	CreateFormField(ctx context.Context, arg CreateFormFieldParams) (FormField, error)
@@ -78,7 +89,18 @@ type Querier interface {
 	CreatePersonWithID(ctx context.Context, arg CreatePersonWithIDParams) (Person, error)
 	CreateRefreshToken(ctx context.Context, arg CreateRefreshTokenParams) (RefreshToken, error)
 	// Sessions ------------------------------------------------------------------
+	// Same three columns as CreateDrill, and one field that needs saying out loud: the app
+	// requires a date and the server always has one, so the payload carries scheduled_at
+	// when it was given and the creation time when it was not. It is written as a number of
+	// seconds since 2001-01-01, which is how Swift encodes a Date -- see
+	// TestContractSwiftDatesSurviveAsNumbers, which pins that against this side drifting.
+	//
+	// teamID and each block's drillID may be absent. Both were required by the app until
+	// now, and both are things this API has always let a caller leave out, so a session
+	// without a team, or with a warm-up block that runs no drill, simply never arrived.
 	CreateSession(ctx context.Context, arg CreateSessionParams) (Session, error)
+	// The id is supplied rather than defaulted, because the session's payload has to carry
+	// each block's id and is written in the same statement as the session itself.
 	CreateSessionBlock(ctx context.Context, arg CreateSessionBlockParams) (SessionBlock, error)
 	// A team created here is a team the app can see. It used to be invisible: a REST insert
 	// left sync_account_id NULL, and ListSyncChangesSince scopes every branch to an account,
