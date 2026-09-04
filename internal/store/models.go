@@ -112,6 +112,18 @@ type Guardianship struct {
 	CreatedAt        pgtype.Timestamptz `json:"created_at"`
 }
 
+type Invitation struct {
+	ID                uuid.UUID          `json:"id"`
+	OrganizationID    uuid.UUID          `json:"organization_id"`
+	Email             string             `json:"email"`
+	Roles             []string           `json:"roles"`
+	InvitedByPersonID *uuid.UUID         `json:"invited_by_person_id"`
+	Status            string             `json:"status"`
+	ExpiresAt         pgtype.Timestamptz `json:"expires_at"`
+	CreatedAt         pgtype.Timestamptz `json:"created_at"`
+	RespondedAt       pgtype.Timestamptz `json:"responded_at"`
+}
+
 type Membership struct {
 	ID             uuid.UUID          `json:"id"`
 	PersonID       uuid.UUID          `json:"person_id"`

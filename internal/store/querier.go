@@ -53,6 +53,7 @@ type Querier interface {
 	// Games (game day) ----------------------------------------------------------
 	CreateGame(ctx context.Context, arg CreateGameParams) (Game, error)
 	CreateGuardianship(ctx context.Context, arg CreateGuardianshipParams) (Guardianship, error)
+	CreateInvitation(ctx context.Context, arg CreateInvitationParams) (Invitation, error)
 	CreateMembership(ctx context.Context, arg CreateMembershipParams) (Membership, error)
 	// owner_person_id is not optional in practice: it is what account deletion selects on,
 	// and an org created without one can never be deleted by the person who made it.
@@ -149,6 +150,7 @@ type Querier interface {
 	GetFormInstance(ctx context.Context, id uuid.UUID) (FormInstance, error)
 	GetFormTemplate(ctx context.Context, id uuid.UUID) (FormTemplate, error)
 	GetGame(ctx context.Context, id uuid.UUID) (Game, error)
+	GetInvitation(ctx context.Context, id uuid.UUID) (Invitation, error)
 	GetOrganization(ctx context.Context, id uuid.UUID) (Organization, error)
 	GetPerson(ctx context.Context, id uuid.UUID) (Person, error)
 	// Resolves the address a member is invited by to the Person it belongs to.
@@ -168,6 +170,10 @@ type Querier interface {
 	GetUserAccountByAppleSub(ctx context.Context, appleSub *string) (UserAccount, error)
 	GetUserAccountByEmail(ctx context.Context, email string) (UserAccount, error)
 	GetUserAccountByID(ctx context.Context, id uuid.UUID) (UserAccount, error)
+	// The account behind a Person, and so the verified address invitations are matched on.
+	// A Person with no account has no row here, which is the right answer rather than an
+	// error: an athlete with no login has nothing to sign in and accept with.
+	GetUserAccountByPersonID(ctx context.Context, personID uuid.UUID) (UserAccount, error)
 	// Whether one person is a recorded guardian of another. This is what makes the parent
 	// role mean something narrower than "member of the org": a parent sees their own
 	// children and nobody else's.
@@ -211,6 +217,13 @@ type Querier interface {
 	// owner's account should destroy the club is a product decision that has not been made,
 	// and the conservative answer — orphan it, leave the data — matches today's behaviour.
 	ListOwnedPersonalOrgIDsForPerson(ctx context.Context, ownerPersonID *uuid.UUID) ([]uuid.UUID, error)
+	// The invitee's side. Keyed on the address alone, because the caller proved they own it
+	// by signing in with it -- see 0011_invitations.sql for why there is no token.
+	ListPendingInvitationsForEmail(ctx context.Context, email string) ([]ListPendingInvitationsForEmailRow, error)
+	// What the club has outstanding. Expired rows are filtered rather than deleted: an
+	// invitation nobody answered is a fact about what was offered, and the partial unique
+	// index only guards pending ones, so a stale row never blocks a fresh send.
+	ListPendingInvitationsForOrg(ctx context.Context, organizationID uuid.UUID) ([]ListPendingInvitationsForOrgRow, error)
 	// One person's roles in one organization. Used before a role change, so the handler can
 	// say what it is replacing and refuse to strip the last admin.
 	ListRolesForPersonInOrg(ctx context.Context, arg ListRolesForPersonInOrgParams) ([]string, error)
@@ -305,6 +318,13 @@ type Querier interface {
 	// revoked row for as long as the token it describes could still be presented, plus the
 	// grace the caller passes.
 	ReapExpiredRefreshTokens(ctx context.Context, grace pgtype.Interval) (int64, error)
+	// Answers an invitation, and is the whole concurrency story. The status test is inside
+	// the UPDATE, so two accepts of the same invitation cannot both see 'pending' and both
+	// grant the roles -- the second matches no row and is told it was already answered.
+	// Expiry is checked here too, so a row that aged out between the read and the write
+	// cannot slip through.
+	RespondToInvitation(ctx context.Context, arg RespondToInvitationParams) (int64, error)
+	RevokeInvitation(ctx context.Context, arg RevokeInvitationParams) (int64, error)
 	// Rotation's single-use guard, not a follow-up to one. handleRefresh used to read the
 	// row, decide it was live, and then revoke it unconditionally — a check-then-act with
 	// nothing between the two statements, so concurrent presentations of one token all read

@@ -54,6 +54,12 @@ RETURNING *;
 -- name: GetUserAccountByEmail :one
 SELECT * FROM user_accounts WHERE email = $1;
 
+-- name: GetUserAccountByPersonID :one
+-- The account behind a Person, and so the verified address invitations are matched on.
+-- A Person with no account has no row here, which is the right answer rather than an
+-- error: an athlete with no login has nothing to sign in and accept with.
+SELECT * FROM user_accounts WHERE person_id = $1;
+
 -- name: GetUserAccountByID :one
 SELECT * FROM user_accounts WHERE id = $1;
 
@@ -162,6 +168,48 @@ RETURNING *;
 SELECT EXISTS (
     SELECT 1 FROM user_accounts WHERE person_id = $1
 );
+
+-- name: CreateInvitation :one
+INSERT INTO invitations (organization_id, email, roles, invited_by_person_id, expires_at)
+VALUES ($1, $2, $3, $4, $5)
+RETURNING *;
+
+-- name: ListPendingInvitationsForOrg :many
+-- What the club has outstanding. Expired rows are filtered rather than deleted: an
+-- invitation nobody answered is a fact about what was offered, and the partial unique
+-- index only guards pending ones, so a stale row never blocks a fresh send.
+SELECT i.*, p.display_name AS invited_by_name
+FROM invitations i
+LEFT JOIN persons p ON p.id = i.invited_by_person_id
+WHERE i.organization_id = $1 AND i.status = 'pending' AND i.expires_at > now()
+ORDER BY i.created_at DESC;
+
+-- name: ListPendingInvitationsForEmail :many
+-- The invitee's side. Keyed on the address alone, because the caller proved they own it
+-- by signing in with it -- see 0011_invitations.sql for why there is no token.
+SELECT i.*, o.name AS organization_name, o.kind AS organization_kind
+FROM invitations i
+JOIN organizations o ON o.id = i.organization_id
+WHERE i.email = $1 AND i.status = 'pending' AND i.expires_at > now()
+ORDER BY i.created_at DESC;
+
+-- name: GetInvitation :one
+SELECT * FROM invitations WHERE id = $1;
+
+-- name: RespondToInvitation :execrows
+-- Answers an invitation, and is the whole concurrency story. The status test is inside
+-- the UPDATE, so two accepts of the same invitation cannot both see 'pending' and both
+-- grant the roles -- the second matches no row and is told it was already answered.
+-- Expiry is checked here too, so a row that aged out between the read and the write
+-- cannot slip through.
+UPDATE invitations
+SET status = sqlc.arg('status'), responded_at = now()
+WHERE id = sqlc.arg('id') AND status = 'pending' AND expires_at > now();
+
+-- name: RevokeInvitation :execrows
+UPDATE invitations
+SET status = 'revoked', responded_at = now()
+WHERE id = sqlc.arg('id') AND organization_id = sqlc.arg('organization_id') AND status = 'pending';
 
 -- name: CreateRefreshToken :one
 INSERT INTO refresh_tokens (token_hash, user_account_id, expires_at)

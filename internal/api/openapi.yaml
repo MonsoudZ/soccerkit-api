@@ -470,44 +470,6 @@ paths:
             application/json:
               schema: { type: array, items: { $ref: "#/components/schemas/Member" } }
         "403": { $ref: "#/components/responses/Error" }
-    post:
-      tags: [organizations]
-      summary: Add an existing account holder to the organization
-      description: >
-        Addressed by sign-in email rather than person id: knowing someone's address is
-        the ordinary evidence you know them, while an id says nothing about whether you
-        should be adding its owner. Requires admin, director or the owner, and you cannot
-        grant a role above your own. There is no acceptance step yet -- the person is
-        added when the call succeeds and learns of it from GET /me.
-      security: [{ bearerAuth: [] }]
-      parameters: [{ $ref: "#/components/parameters/Id" }]
-      requestBody:
-        required: true
-        content:
-          application/json:
-            schema:
-              type: object
-              required: [email, roles]
-              properties:
-                email: { type: string }
-                roles:
-                  type: array
-                  minItems: 1
-                  items: { $ref: "#/components/schemas/Role" }
-      responses:
-        "201":
-          description: Created
-          content:
-            application/json:
-              schema:
-                type: object
-                properties:
-                  personId: { type: string, format: uuid }
-                  roles: { type: array, items: { $ref: "#/components/schemas/Role" } }
-        "400": { $ref: "#/components/responses/Error" }
-        "403": { $ref: "#/components/responses/Error" }
-        "404": { $ref: "#/components/responses/Error" }
-        "409": { $ref: "#/components/responses/Error" }
   /api/v1/organizations/{id}/members/{personId}:
     patch:
       tags: [organizations]
@@ -559,6 +521,124 @@ paths:
       responses:
         "200": { $ref: "#/components/responses/Ok" }
         "403": { $ref: "#/components/responses/Error" }
+        "404": { $ref: "#/components/responses/Error" }
+        "409": { $ref: "#/components/responses/Error" }
+  /api/v1/organizations/{id}/invitations:
+    get:
+      tags: [organizations]
+      summary: List the organization's outstanding invitations
+      description: Staff only. Expired invitations are not listed.
+      security: [{ bearerAuth: [] }]
+      parameters: [{ $ref: "#/components/parameters/Id" }]
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema: { type: array, items: { $ref: "#/components/schemas/Invitation" } }
+        "403": { $ref: "#/components/responses/Error" }
+    post:
+      tags: [organizations]
+      summary: Invite an address to join the organization
+      description: >
+        Replaces the direct add that used to live at POST .../members. Nobody joins until
+        they accept. The address need not have an account yet — the invitation waits and
+        appears the first time they sign in with it, which is also why this cannot be used
+        to probe for who has signed up. Requires admin, director or the owner, and you
+        cannot grant a role above your own. One live invitation per address per
+        organization; declining or revoking frees it.
+      security: [{ bearerAuth: [] }]
+      parameters: [{ $ref: "#/components/parameters/Id" }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [email, roles]
+              properties:
+                email: { type: string }
+                roles:
+                  type: array
+                  minItems: 1
+                  items: { $ref: "#/components/schemas/Role" }
+      responses:
+        "201":
+          description: Created
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Invitation" }
+        "400": { $ref: "#/components/responses/Error" }
+        "403": { $ref: "#/components/responses/Error" }
+        "409": { $ref: "#/components/responses/Error" }
+  /api/v1/organizations/{id}/invitations/{invitationId}:
+    delete:
+      tags: [organizations]
+      summary: Revoke an invitation that has not been answered
+      security: [{ bearerAuth: [] }]
+      parameters:
+        - { $ref: "#/components/parameters/Id" }
+        - { $ref: "#/components/parameters/InvitationId" }
+      responses:
+        "200": { $ref: "#/components/responses/Ok" }
+        "403": { $ref: "#/components/responses/Error" }
+        "404": { $ref: "#/components/responses/Error" }
+  /api/v1/me/invitations:
+    get:
+      tags: [me]
+      summary: Invitations addressed to you
+      description: >
+        Matched on the verified address on your account, which is the whole of the
+        authentication an invitation carries — there is no token to hold or forward.
+      security: [{ bearerAuth: [] }]
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema: { type: array, items: { $ref: "#/components/schemas/Invitation" } }
+  /api/v1/invitations/{invitationId}/accept:
+    post:
+      tags: [me]
+      summary: Accept an invitation, granting its roles
+      description: >
+        Not scoped to an organization — you are not a member of it yet. An invitation
+        addressed to another account answers 404, and one already answered or expired
+        answers 409.
+      security: [{ bearerAuth: [] }]
+      parameters: [{ $ref: "#/components/parameters/InvitationId" }]
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  id: { type: string, format: uuid }
+                  organizationId: { type: string, format: uuid }
+                  status: { type: string }
+                  roles: { type: array, items: { $ref: "#/components/schemas/Role" } }
+        "404": { $ref: "#/components/responses/Error" }
+        "409": { $ref: "#/components/responses/Error" }
+  /api/v1/invitations/{invitationId}/decline:
+    post:
+      tags: [me]
+      summary: Decline an invitation
+      security: [{ bearerAuth: [] }]
+      parameters: [{ $ref: "#/components/parameters/InvitationId" }]
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  id: { type: string, format: uuid }
+                  organizationId: { type: string, format: uuid }
+                  status: { type: string }
+                  roles: { type: array, items: { $ref: "#/components/schemas/Role" } }
         "404": { $ref: "#/components/responses/Error" }
         "409": { $ref: "#/components/responses/Error" }
   /api/v1/teams:
@@ -904,6 +984,11 @@ components:
       name: id
       required: true
       schema: { type: string, format: uuid }
+    InvitationId:
+      in: path
+      name: invitationId
+      required: true
+      schema: { type: string, format: uuid }
     PersonId:
       in: path
       name: personId
@@ -1082,6 +1167,18 @@ components:
             enrolled in it — a person with no organizational linkage would be visible to
             nobody, including you. Only the unprivileged roles can be granted this way,
             because the person has no login.
+    Invitation:
+      type: object
+      properties:
+        id: { type: string, format: uuid }
+        organizationId: { type: string, format: uuid }
+        email: { type: string }
+        roles: { type: array, items: { $ref: "#/components/schemas/Role" } }
+        status: { type: string, enum: [pending, accepted, declined, revoked] }
+        expiresAt: { type: string, format: date-time }
+        createdAt: { type: string, format: date-time }
+        invitedByName: { type: string, nullable: true }
+        organizationName: { type: string, nullable: true }
     Member:
       type: object
       properties:

@@ -57,6 +57,43 @@ func (q *Queries) CreateGuardianship(ctx context.Context, arg CreateGuardianship
 	return i, err
 }
 
+const createInvitation = `-- name: CreateInvitation :one
+INSERT INTO invitations (organization_id, email, roles, invited_by_person_id, expires_at)
+VALUES ($1, $2, $3, $4, $5)
+RETURNING id, organization_id, email, roles, invited_by_person_id, status, expires_at, created_at, responded_at
+`
+
+type CreateInvitationParams struct {
+	OrganizationID    uuid.UUID          `json:"organization_id"`
+	Email             string             `json:"email"`
+	Roles             []string           `json:"roles"`
+	InvitedByPersonID *uuid.UUID         `json:"invited_by_person_id"`
+	ExpiresAt         pgtype.Timestamptz `json:"expires_at"`
+}
+
+func (q *Queries) CreateInvitation(ctx context.Context, arg CreateInvitationParams) (Invitation, error) {
+	row := q.db.QueryRow(ctx, createInvitation,
+		arg.OrganizationID,
+		arg.Email,
+		arg.Roles,
+		arg.InvitedByPersonID,
+		arg.ExpiresAt,
+	)
+	var i Invitation
+	err := row.Scan(
+		&i.ID,
+		&i.OrganizationID,
+		&i.Email,
+		&i.Roles,
+		&i.InvitedByPersonID,
+		&i.Status,
+		&i.ExpiresAt,
+		&i.CreatedAt,
+		&i.RespondedAt,
+	)
+	return i, err
+}
+
 const createMembership = `-- name: CreateMembership :one
 INSERT INTO memberships (person_id, organization_id, role)
 VALUES ($1, $2, $3)
@@ -340,6 +377,27 @@ func (q *Queries) DeleteRefreshTokenByToken(ctx context.Context, tokenHash strin
 	return err
 }
 
+const getInvitation = `-- name: GetInvitation :one
+SELECT id, organization_id, email, roles, invited_by_person_id, status, expires_at, created_at, responded_at FROM invitations WHERE id = $1
+`
+
+func (q *Queries) GetInvitation(ctx context.Context, id uuid.UUID) (Invitation, error) {
+	row := q.db.QueryRow(ctx, getInvitation, id)
+	var i Invitation
+	err := row.Scan(
+		&i.ID,
+		&i.OrganizationID,
+		&i.Email,
+		&i.Roles,
+		&i.InvitedByPersonID,
+		&i.Status,
+		&i.ExpiresAt,
+		&i.CreatedAt,
+		&i.RespondedAt,
+	)
+	return i, err
+}
+
 const getOrganization = `-- name: GetOrganization :one
 SELECT id, name, kind, created_at, updated_at, owner_person_id FROM organizations WHERE id = $1
 `
@@ -467,6 +525,27 @@ SELECT id, person_id, email, apple_sub, created_at, updated_at FROM user_account
 
 func (q *Queries) GetUserAccountByID(ctx context.Context, id uuid.UUID) (UserAccount, error) {
 	row := q.db.QueryRow(ctx, getUserAccountByID, id)
+	var i UserAccount
+	err := row.Scan(
+		&i.ID,
+		&i.PersonID,
+		&i.Email,
+		&i.AppleSub,
+		&i.CreatedAt,
+		&i.UpdatedAt,
+	)
+	return i, err
+}
+
+const getUserAccountByPersonID = `-- name: GetUserAccountByPersonID :one
+SELECT id, person_id, email, apple_sub, created_at, updated_at FROM user_accounts WHERE person_id = $1
+`
+
+// The account behind a Person, and so the verified address invitations are matched on.
+// A Person with no account has no row here, which is the right answer rather than an
+// error: an athlete with no login has nothing to sign in and accept with.
+func (q *Queries) GetUserAccountByPersonID(ctx context.Context, personID uuid.UUID) (UserAccount, error) {
+	row := q.db.QueryRow(ctx, getUserAccountByPersonID, personID)
 	var i UserAccount
 	err := row.Scan(
 		&i.ID,
@@ -730,6 +809,117 @@ func (q *Queries) ListOwnedPersonalOrgIDsForPerson(ctx context.Context, ownerPer
 	return items, nil
 }
 
+const listPendingInvitationsForEmail = `-- name: ListPendingInvitationsForEmail :many
+SELECT i.id, i.organization_id, i.email, i.roles, i.invited_by_person_id, i.status, i.expires_at, i.created_at, i.responded_at, o.name AS organization_name, o.kind AS organization_kind
+FROM invitations i
+JOIN organizations o ON o.id = i.organization_id
+WHERE i.email = $1 AND i.status = 'pending' AND i.expires_at > now()
+ORDER BY i.created_at DESC
+`
+
+type ListPendingInvitationsForEmailRow struct {
+	ID                uuid.UUID          `json:"id"`
+	OrganizationID    uuid.UUID          `json:"organization_id"`
+	Email             string             `json:"email"`
+	Roles             []string           `json:"roles"`
+	InvitedByPersonID *uuid.UUID         `json:"invited_by_person_id"`
+	Status            string             `json:"status"`
+	ExpiresAt         pgtype.Timestamptz `json:"expires_at"`
+	CreatedAt         pgtype.Timestamptz `json:"created_at"`
+	RespondedAt       pgtype.Timestamptz `json:"responded_at"`
+	OrganizationName  string             `json:"organization_name"`
+	OrganizationKind  string             `json:"organization_kind"`
+}
+
+// The invitee's side. Keyed on the address alone, because the caller proved they own it
+// by signing in with it -- see 0011_invitations.sql for why there is no token.
+func (q *Queries) ListPendingInvitationsForEmail(ctx context.Context, email string) ([]ListPendingInvitationsForEmailRow, error) {
+	rows, err := q.db.Query(ctx, listPendingInvitationsForEmail, email)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []ListPendingInvitationsForEmailRow
+	for rows.Next() {
+		var i ListPendingInvitationsForEmailRow
+		if err := rows.Scan(
+			&i.ID,
+			&i.OrganizationID,
+			&i.Email,
+			&i.Roles,
+			&i.InvitedByPersonID,
+			&i.Status,
+			&i.ExpiresAt,
+			&i.CreatedAt,
+			&i.RespondedAt,
+			&i.OrganizationName,
+			&i.OrganizationKind,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
+const listPendingInvitationsForOrg = `-- name: ListPendingInvitationsForOrg :many
+SELECT i.id, i.organization_id, i.email, i.roles, i.invited_by_person_id, i.status, i.expires_at, i.created_at, i.responded_at, p.display_name AS invited_by_name
+FROM invitations i
+LEFT JOIN persons p ON p.id = i.invited_by_person_id
+WHERE i.organization_id = $1 AND i.status = 'pending' AND i.expires_at > now()
+ORDER BY i.created_at DESC
+`
+
+type ListPendingInvitationsForOrgRow struct {
+	ID                uuid.UUID          `json:"id"`
+	OrganizationID    uuid.UUID          `json:"organization_id"`
+	Email             string             `json:"email"`
+	Roles             []string           `json:"roles"`
+	InvitedByPersonID *uuid.UUID         `json:"invited_by_person_id"`
+	Status            string             `json:"status"`
+	ExpiresAt         pgtype.Timestamptz `json:"expires_at"`
+	CreatedAt         pgtype.Timestamptz `json:"created_at"`
+	RespondedAt       pgtype.Timestamptz `json:"responded_at"`
+	InvitedByName     *string            `json:"invited_by_name"`
+}
+
+// What the club has outstanding. Expired rows are filtered rather than deleted: an
+// invitation nobody answered is a fact about what was offered, and the partial unique
+// index only guards pending ones, so a stale row never blocks a fresh send.
+func (q *Queries) ListPendingInvitationsForOrg(ctx context.Context, organizationID uuid.UUID) ([]ListPendingInvitationsForOrgRow, error) {
+	rows, err := q.db.Query(ctx, listPendingInvitationsForOrg, organizationID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []ListPendingInvitationsForOrgRow
+	for rows.Next() {
+		var i ListPendingInvitationsForOrgRow
+		if err := rows.Scan(
+			&i.ID,
+			&i.OrganizationID,
+			&i.Email,
+			&i.Roles,
+			&i.InvitedByPersonID,
+			&i.Status,
+			&i.ExpiresAt,
+			&i.CreatedAt,
+			&i.RespondedAt,
+			&i.InvitedByName,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
 const listRolesForPersonInOrg = `-- name: ListRolesForPersonInOrg :many
 SELECT role FROM memberships
 WHERE person_id = $1 AND organization_id = $2
@@ -868,6 +1058,49 @@ WHERE expires_at < now() - $1::interval
 // grace the caller passes.
 func (q *Queries) ReapExpiredRefreshTokens(ctx context.Context, grace pgtype.Interval) (int64, error) {
 	result, err := q.db.Exec(ctx, reapExpiredRefreshTokens, grace)
+	if err != nil {
+		return 0, err
+	}
+	return result.RowsAffected(), nil
+}
+
+const respondToInvitation = `-- name: RespondToInvitation :execrows
+UPDATE invitations
+SET status = $1, responded_at = now()
+WHERE id = $2 AND status = 'pending' AND expires_at > now()
+`
+
+type RespondToInvitationParams struct {
+	Status string    `json:"status"`
+	ID     uuid.UUID `json:"id"`
+}
+
+// Answers an invitation, and is the whole concurrency story. The status test is inside
+// the UPDATE, so two accepts of the same invitation cannot both see 'pending' and both
+// grant the roles -- the second matches no row and is told it was already answered.
+// Expiry is checked here too, so a row that aged out between the read and the write
+// cannot slip through.
+func (q *Queries) RespondToInvitation(ctx context.Context, arg RespondToInvitationParams) (int64, error) {
+	result, err := q.db.Exec(ctx, respondToInvitation, arg.Status, arg.ID)
+	if err != nil {
+		return 0, err
+	}
+	return result.RowsAffected(), nil
+}
+
+const revokeInvitation = `-- name: RevokeInvitation :execrows
+UPDATE invitations
+SET status = 'revoked', responded_at = now()
+WHERE id = $1 AND organization_id = $2 AND status = 'pending'
+`
+
+type RevokeInvitationParams struct {
+	ID             uuid.UUID `json:"id"`
+	OrganizationID uuid.UUID `json:"organization_id"`
+}
+
+func (q *Queries) RevokeInvitation(ctx context.Context, arg RevokeInvitationParams) (int64, error) {
+	result, err := q.db.Exec(ctx, revokeInvitation, arg.ID, arg.OrganizationID)
 	if err != nil {
 		return 0, err
 	}

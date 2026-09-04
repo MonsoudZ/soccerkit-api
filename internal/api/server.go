@@ -96,6 +96,12 @@ func (s *Server) Router() http.Handler {
 
 			r.Get("/me", s.handleGetMe)
 			r.Delete("/me", s.handleDeleteMe)
+			r.Get("/me/invitations", s.handleListMyInvitations)
+
+			// Answering an invitation is not scoped to an organization: the caller is
+			// not a member of it yet, so resolveOrg could not name it.
+			r.Post("/invitations/{invitationId}/accept", s.handleAcceptInvitation)
+			r.Post("/invitations/{invitationId}/decline", s.handleDeclineInvitation)
 
 			// iOS opaque delta-sync (projection over the domain tables).
 			r.Get("/sync", s.handleSyncPull)
@@ -137,9 +143,12 @@ func (s *Server) Router() http.Handler {
 				r.Patch("/{id}", s.handleUpdateOrganization)
 				// Who is in the club, and what they may do.
 				r.Get("/{id}/members", s.handleListMembers)
-				r.Post("/{id}/members", s.handleAddMember)
 				r.Patch("/{id}/members/{personId}", s.handleSetMemberRoles)
 				r.Delete("/{id}/members/{personId}", s.handleRemoveMember)
+				// Joining is an offer the invitee answers -- there is no direct add.
+				r.Get("/{id}/invitations", s.handleListInvitations)
+				r.Post("/{id}/invitations", s.handleCreateInvitation)
+				r.Delete("/{id}/invitations/{invitationId}", s.handleRevokeInvitation)
 			})
 
 			// Training content

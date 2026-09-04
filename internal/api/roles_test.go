@@ -55,6 +55,21 @@ func orgOf(t *testing.T, token string) string {
 	return memberships[0].(map[string]any)["organizationId"].(string)
 }
 
+// joinOrg is the only way into an organization now: an invitation the invitee answers.
+// Tests that just need someone in a club use this rather than restating the two calls.
+func joinOrg(t *testing.T, inviter, orgID, invitee, email string, roles ...string) {
+	t.Helper()
+	inv := do(t, http.MethodPost, "/api/v1/organizations/"+orgID+"/invitations", inviter,
+		map[string]any{"email": email, "roles": roles})
+	if inv.status != http.StatusCreated {
+		t.Fatalf("invite %s: %d %s", email, inv.status, inv.raw)
+	}
+	accept := do(t, http.MethodPost, "/api/v1/invitations/"+inv.body["id"].(string)+"/accept", invitee, nil)
+	if accept.status != http.StatusOK {
+		t.Fatalf("accept for %s: %d %s", email, accept.status, accept.raw)
+	}
+}
+
 // club builds the fixture every test below needs: a coach with an organization, an
 // account-holding parent added to it, and two athletes with one of them linked to the
 // parent. Until member management existed this arrangement could not be made at all --
@@ -73,11 +88,7 @@ func newClub(t *testing.T, prefix string) club {
 	parent, parentID := signInCoach(t, prefix+"parent@e.com")
 	orgID := orgOf(t, coach)
 
-	add := do(t, http.MethodPost, "/api/v1/organizations/"+orgID+"/members", coach,
-		map[string]any{"email": prefix + "parent@e.com", "roles": []string{"parent"}})
-	if add.status != http.StatusCreated {
-		t.Fatalf("add parent: %d %s", add.status, add.raw)
-	}
+	joinOrg(t, coach, orgID, parent, prefix+"parent@e.com", "parent")
 
 	mk := func(name, notes string) string {
 		p := do(t, http.MethodPost, "/api/v1/persons", coach, map[string]any{
@@ -184,13 +195,10 @@ func TestMemberManagementGuards(t *testing.T) {
 	outsider, _ := signInCoach(t, "mgoutsider@e.com")
 
 	// The admin appoints a director.
-	if r := do(t, http.MethodPost, "/api/v1/organizations/"+orgID+"/members", admin,
-		map[string]any{"email": "mgdirector@e.com", "roles": []string{"director"}}); r.status != http.StatusCreated {
-		t.Fatalf("appoint director: %d %s", r.status, r.raw)
-	}
+	joinOrg(t, admin, orgID, director, "mgdirector@e.com", "director")
 
 	t.Run("a director cannot grant admin", func(t *testing.T) {
-		r := doIn(t, http.MethodPost, "/api/v1/organizations/"+orgID+"/members", director, orgID,
+		r := doIn(t, http.MethodPost, "/api/v1/organizations/"+orgID+"/invitations", director, orgID,
 			map[string]any{"email": "mgoutsider@e.com", "roles": []string{"admin"}})
 		if r.status != http.StatusForbidden {
 			t.Errorf("expected 403, got %d %s", r.status, r.raw)
@@ -225,16 +233,18 @@ func TestMemberManagementGuards(t *testing.T) {
 		}
 	})
 
-	t.Run("an unknown address is not a membership probe", func(t *testing.T) {
-		r := do(t, http.MethodPost, "/api/v1/organizations/"+orgID+"/members", admin,
-			map[string]any{"email": "nobody@e.com", "roles": []string{"coach"}})
-		if r.status != http.StatusNotFound {
-			t.Errorf("expected 404, got %d %s", r.status, r.raw)
+	t.Run("an address with no account can still be invited", func(t *testing.T) {
+		// The old direct-add answered 404 here, which made it a probe for who had signed
+		// up. An invitation does not need the account to exist yet -- it waits.
+		r := do(t, http.MethodPost, "/api/v1/organizations/"+orgID+"/invitations", admin,
+			map[string]any{"email": "nobody-yet@e.com", "roles": []string{"coach"}})
+		if r.status != http.StatusCreated {
+			t.Errorf("expected 201, got %d %s", r.status, r.raw)
 		}
 	})
 
-	t.Run("adding twice is a conflict", func(t *testing.T) {
-		r := do(t, http.MethodPost, "/api/v1/organizations/"+orgID+"/members", admin,
+	t.Run("inviting an existing member is a conflict", func(t *testing.T) {
+		r := do(t, http.MethodPost, "/api/v1/organizations/"+orgID+"/invitations", admin,
 			map[string]any{"email": "mgdirector@e.com", "roles": []string{"coach"}})
 		if r.status != http.StatusConflict {
 			t.Errorf("expected 409, got %d %s", r.status, r.raw)
@@ -242,7 +252,7 @@ func TestMemberManagementGuards(t *testing.T) {
 	})
 
 	t.Run("an unknown role is rejected", func(t *testing.T) {
-		r := do(t, http.MethodPost, "/api/v1/organizations/"+orgID+"/members", admin,
+		r := do(t, http.MethodPost, "/api/v1/organizations/"+orgID+"/invitations", admin,
 			map[string]any{"email": "mgoutsider@e.com", "roles": []string{"superuser"}})
 		if r.status != http.StatusBadRequest {
 			t.Errorf("expected 400, got %d %s", r.status, r.raw)
@@ -265,19 +275,16 @@ func TestCoachCannotManageMembers(t *testing.T) {
 	coach, _ := signInCoach(t, "ccplain@e.com")
 	signInCoach(t, "ccspare@e.com")
 
-	if r := do(t, http.MethodPost, "/api/v1/organizations/"+orgID+"/members", admin,
-		map[string]any{"email": "ccplain@e.com", "roles": []string{"coach"}}); r.status != http.StatusCreated {
-		t.Fatalf("appoint coach: %d %s", r.status, r.raw)
-	}
+	joinOrg(t, admin, orgID, coach, "ccplain@e.com", "coach")
 	// Staff, so they may read the directory.
 	if r := doIn(t, http.MethodGet, "/api/v1/organizations/"+orgID+"/members", coach, orgID, nil); r.status != http.StatusOK {
 		t.Errorf("a coach may list members: %d %s", r.status, r.raw)
 	}
 	// But not change it.
-	r := doIn(t, http.MethodPost, "/api/v1/organizations/"+orgID+"/members", coach, orgID,
+	r := doIn(t, http.MethodPost, "/api/v1/organizations/"+orgID+"/invitations", coach, orgID,
 		map[string]any{"email": "ccspare@e.com", "roles": []string{"coach"}})
 	if r.status != http.StatusForbidden {
-		t.Errorf("a coach must not appoint members, got %d %s", r.status, r.raw)
+		t.Errorf("a coach must not invite members, got %d %s", r.status, r.raw)
 	}
 }
 
@@ -366,11 +373,8 @@ func TestLastAdminCannotBeRemovedFromAnOrphanedClub(t *testing.T) {
 	}
 
 	// With a second admin in place, stepping down is allowed.
-	signInCoach(t, "orphan-second@e.com")
-	if r := do(t, http.MethodPost, "/api/v1/organizations/"+orgID+"/members", admin,
-		map[string]any{"email": "orphan-second@e.com", "roles": []string{"admin"}}); r.status != http.StatusCreated {
-		t.Fatalf("appoint second admin: %d %s", r.status, r.raw)
-	}
+	second, _ := signInCoach(t, "orphan-second@e.com")
+	joinOrg(t, admin, orgID, second, "orphan-second@e.com", "admin")
 	if r := do(t, http.MethodPatch, "/api/v1/organizations/"+orgID+"/members/"+adminID,
 		admin, map[string]any{"roles": []string{"coach"}}); r.status != http.StatusOK {
 		t.Fatalf("with another admin in place this is allowed, got %d %s", r.status, r.raw)
