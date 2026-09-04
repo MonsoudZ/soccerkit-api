@@ -3,6 +3,7 @@ package api
 import (
 	"encoding/json"
 	"errors"
+	"log"
 	"net/http"
 	"time"
 
@@ -210,6 +211,20 @@ func (s *Server) handleCreateSession(w http.ResponseWriter, r *http.Request) {
 	if err := tx.Commit(r.Context()); err != nil {
 		writeError(w, err)
 		return
+	}
+	// Training a squad is expected at is the same ask as a fixture, so it gets the same
+	// push. Only when the session has a team: without one there is no roster to tell, and
+	// a plan a coach is drafting for themselves is not an event anybody attends.
+	if teamID != nil {
+		if team, terr := s.store.GetTeam(r.Context(), *teamID); terr == nil {
+			s.notifySquad(r.Context(), team.ID, fixtureNote(
+				"New training for "+team.Name,
+				session.Title+" — can you make it?",
+				"session", session.ID, team.ID, timePtr(session.ScheduledAt),
+			))
+		} else {
+			log.Printf("sessions: naming the team for a training notification: %v", terr)
+		}
 	}
 	writeJSON(w, http.StatusCreated, sessionDTO(session, blocks))
 }

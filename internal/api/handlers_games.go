@@ -1,12 +1,15 @@
 package api
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
+	"log"
 	"net/http"
 	"time"
 
 	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgtype"
 
 	"github.com/monsoudz/soccerkit-api/internal/store"
 )
@@ -59,6 +62,12 @@ func (s *Server) handleCreateGame(w http.ResponseWriter, r *http.Request) {
 		writeError(w, err)
 		return
 	}
+	// A fixture nobody was told about is a register nobody fills in. See notifySquad.
+	s.notifySquad(r.Context(), team.ID, fixtureNote(
+		"New fixture for "+team.Name,
+		fixtureName(team.Name, game.Opponent)+" — can you make it?",
+		"game", game.ID, team.ID, timePtr(game.KickoffAt),
+	))
 	writeJSON(w, http.StatusCreated, gameDTO(game))
 }
 
@@ -229,7 +238,53 @@ func (s *Server) handleUpdateGame(w http.ResponseWriter, r *http.Request) {
 		writeError(w, err)
 		return
 	}
+	s.notifyIfFixtureChanged(r.Context(), game, updated)
 	writeJSON(w, http.StatusOK, gameDTO(updated))
+}
+
+// notifyIfFixtureChanged tells the squad when an edit is one they have to act on.
+//
+// Two of them are: a kickoff that moved, and a fixture that is off. Everything else this
+// endpoint writes -- an opponent's name corrected, a scoreline entered at full time -- is
+// not, and pushing on those would train a squad to swipe these away, which costs the two
+// that matter. The comparison is against the row as it was, which is why gameInOrg's
+// result is still in hand here.
+func (s *Server) notifyIfFixtureChanged(ctx context.Context, before, after store.Game) {
+	cancelled := after.Status == "cancelled" && before.Status != "cancelled"
+	moved := !sameInstant(before.KickoffAt, after.KickoffAt)
+	if !cancelled && !moved {
+		return
+	}
+	// Checked before the team lookup below, so an unconfigured push costs nothing.
+	if s.notifier == nil {
+		return
+	}
+	team, err := s.store.GetTeam(ctx, after.TeamID)
+	if err != nil {
+		log.Printf("games: naming the team for a fixture notification: %v", err)
+		return
+	}
+	name := fixtureName(team.Name, after.Opponent)
+	// Cancellation wins when both changed. A squad told the time moved for a match that
+	// is off would turn up to the new one.
+	title, body := "Kickoff changed for "+team.Name,
+		name+" — the kickoff time has changed. Check you can still make it."
+	if cancelled {
+		title, body = "Fixture cancelled for "+team.Name, name+" is off."
+	}
+	s.notifySquad(ctx, after.TeamID, fixtureNote(
+		title, body, "game", after.ID, after.TeamID, timePtr(after.KickoffAt)))
+}
+
+// sameInstant compares two nullable timestamps, where "both unset" counts as unchanged.
+// pgtype.Timestamptz is a struct with a location pointer inside it, so == would call a
+// kickoff moved because the row came back from Postgres with a different *time.Location
+// than the one that was written.
+func sameInstant(a, b pgtype.Timestamptz) bool {
+	if a.Valid != b.Valid {
+		return false
+	}
+	return !a.Valid || a.Time.Equal(b.Time)
 }
 
 // updatableGameFields is the set PATCH /games/{id} accepts.

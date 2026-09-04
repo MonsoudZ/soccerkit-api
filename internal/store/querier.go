@@ -289,6 +289,20 @@ type Querier interface {
 	// invitation nobody answered is a fact about what was offered, and the partial unique
 	// index only guards pending ones, so a stale row never blocks a fresh send.
 	ListPendingInvitationsForOrg(ctx context.Context, organizationID uuid.UUID) ([]ListPendingInvitationsForOrgRow, error)
+	// Who to tell when a team's fixture is scheduled, moved or called off: the squad, and the
+	// parents of the squad. It is the RSVP's audience -- the people the register is asking --
+	// so it is the roster and its guardians rather than everyone who can see the team.
+	//
+	// Filtered to people who have a device registered, which is a departure from how an
+	// invitation notifies: that one tells a single named person and asks nothing about their
+	// phone. A fixture fans out to a whole squad plus their families, and the delivery queue
+	// is bounded and drained by one worker (see internal/push), so a coach entering a
+	// season's fixtures in one sitting would otherwise push hundreds of deliveries for people
+	// with nowhere to deliver to, and the drops would land on whoever was behind them.
+	//
+	// The actor is excluded. A coach who just moved a kickoff does not need their own phone
+	// to tell them they moved it.
+	ListReachablePeopleForTeam(ctx context.Context, arg ListReachablePeopleForTeamParams) ([]uuid.UUID, error)
 	// One person's roles in one organization. Used before a role change, so the handler can
 	// say what it is replacing and refuse to strip the last admin.
 	ListRolesForPersonInOrg(ctx context.Context, arg ListRolesForPersonInOrgParams) ([]string, error)

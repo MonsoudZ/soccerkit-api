@@ -2,6 +2,7 @@ package api
 
 import (
 	"context"
+	"log"
 	"net/http"
 
 	"github.com/google/uuid"
@@ -332,6 +333,76 @@ func (s *Server) recordAttendance(resolve eventResolver) http.HandlerFunc {
 		}
 		writeJSON(w, http.StatusOK, attendanceEntryDTO(line))
 	}
+}
+
+// --- being asked ------------------------------------------------------------
+
+// notifySquad tells a team's players and their parents that there is something to answer.
+//
+// This is what makes the register work rather than exist. A coach schedules a fixture, a
+// sheet full of "has not replied" appears, and until somebody is told there is nothing to
+// reply to, it stays that way and the coach goes back to the group chat -- which is the
+// problem the table was added to solve.
+//
+// Called after the write and outside any transaction, for the reason
+// handleCreateInvitation gives: a push about a fixture that failed to save is worse than
+// no push, and the send must never be able to fail a request that has already succeeded.
+// Notify queues and returns, so nothing here waits for Apple.
+func (s *Server) notifySquad(ctx context.Context, teamID uuid.UUID, note Notification) {
+	// With no notifier installed -- which is what an unset APNS_* configuration means --
+	// there is nobody to tell, and the recipient lookup is a query per fixture written
+	// for an answer nothing would read.
+	if s.notifier == nil {
+		return
+	}
+	people, err := s.store.ListReachablePeopleForTeam(ctx, store.ListReachablePeopleForTeamParams{
+		TeamID: teamID, ActorPersonID: personIDFrom(ctx),
+	})
+	if err != nil {
+		// Logged and dropped. The fixture is written and readable; who was told about it
+		// is a convenience, and failing the request now would report a notification
+		// problem as a scheduling one.
+		log.Printf("attendance: looking up who to notify for team %s: %v", teamID, err)
+		return
+	}
+	for _, personID := range people {
+		s.notify(ctx, personID, note)
+	}
+}
+
+// fixtureNote builds one of these messages, and is where the same decision gets made for
+// all of them: no time in the text.
+//
+// The server knows a kickoff as an instant and does not know which zone the club reads it
+// in -- there is no timezone on an organization, a team or a game. Rendering one here
+// would print the server's UTC, which shows a Saturday evening match as Sunday to anyone
+// far enough east, and a push that names the wrong day is worse than one that names none.
+// The instant rides in the payload instead, where the app formats it in the device's own
+// zone, and the screen the tap opens shows it correctly.
+func fixtureNote(title, body, eventType string, eventID, teamID uuid.UUID, kickoff *string) Notification {
+	data := map[string]string{
+		"type":   eventType,
+		"teamId": teamID.String(),
+		// One key for the event's id whichever kind it is, so a client handling a tap has
+		// one thing to read rather than a branch. `type` says what it points at.
+		"eventId": eventID.String(),
+		"action":  "rsvp",
+	}
+	if kickoff != nil {
+		data["startsAt"] = *kickoff
+	}
+	return Notification{Title: title, Body: body, Data: data}
+}
+
+// fixtureName is how a fixture reads on a lock screen: the team, and who they are playing
+// when that is known. A game against nobody in particular is a real row -- opponent is
+// nullable and a coach often schedules before the draw -- so it has to read as a sentence
+// either way.
+func fixtureName(teamName string, opponent *string) string {
+	if opponent != nil && *opponent != "" {
+		return teamName + " vs " + *opponent
+	}
+	return teamName
 }
 
 // --- shared ------------------------------------------------------------------

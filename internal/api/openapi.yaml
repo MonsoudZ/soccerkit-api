@@ -1009,6 +1009,10 @@ paths:
     post:
       tags: [content]
       summary: Create a training session with blocks
+      description: >
+        When the session names a team, its squad and their parents are pushed an ask to
+        reply — see the attendance endpoints. A session with no team tells nobody: there
+        is no roster, and a plan a coach is drafting for themselves is not an event.
       security: [{ bearerAuth: [] }]
       parameters: [{ $ref: "#/components/parameters/OrgHeader" }]
       requestBody:
@@ -1058,6 +1062,10 @@ paths:
     post:
       tags: [games]
       summary: Schedule a game
+      description: >
+        Pushes an ask to reply to the team's squad and their parents — anyone with a
+        registered device, minus whoever scheduled it. The kickoff instant rides in the
+        payload rather than the text: the server does not know the club's timezone.
       security: [{ bearerAuth: [] }]
       parameters: [{ $ref: "#/components/parameters/Id" }]
       requestBody:
@@ -1087,6 +1095,10 @@ paths:
     patch:
       tags: [games]
       summary: Update a game (record kickoff, status, and result)
+      description: >
+        Two of these changes push to the squad: a kickoff that moved, and a status that
+        became cancelled. A corrected opponent or a scoreline entered at full time does
+        not — a push per edit would train a squad to ignore the two that matter.
       security: [{ bearerAuth: [] }]
       parameters: [{ $ref: "#/components/parameters/Id" }]
       requestBody:

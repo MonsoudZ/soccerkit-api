@@ -20,3 +20,32 @@ DELETE FROM device_tokens WHERE token = $1;
 
 -- name: ListDeviceTokensForPerson :many
 SELECT token FROM device_tokens WHERE person_id = $1 ORDER BY last_seen_at DESC;
+
+-- name: ListReachablePeopleForTeam :many
+-- Who to tell when a team's fixture is scheduled, moved or called off: the squad, and the
+-- parents of the squad. It is the RSVP's audience -- the people the register is asking --
+-- so it is the roster and its guardians rather than everyone who can see the team.
+--
+-- Filtered to people who have a device registered, which is a departure from how an
+-- invitation notifies: that one tells a single named person and asks nothing about their
+-- phone. A fixture fans out to a whole squad plus their families, and the delivery queue
+-- is bounded and drained by one worker (see internal/push), so a coach entering a
+-- season's fixtures in one sitting would otherwise push hundreds of deliveries for people
+-- with nowhere to deliver to, and the drops would land on whoever was behind them.
+--
+-- The actor is excluded. A coach who just moved a kickoff does not need their own phone
+-- to tell them they moved it.
+WITH people AS (
+    SELECT r.person_id FROM roster_memberships r
+    WHERE r.team_id = @team_id AND r.left_on IS NULL
+    UNION
+    SELECT g.guardian_person_id AS person_id FROM guardianships g
+    WHERE g.child_person_id IN (
+        SELECT r.person_id FROM roster_memberships r
+        WHERE r.team_id = @team_id AND r.left_on IS NULL
+    )
+)
+SELECT p.id FROM people pe
+JOIN persons p ON p.id = pe.person_id AND p.deleted = false
+WHERE p.id <> @actor_person_id
+  AND EXISTS (SELECT 1 FROM device_tokens d WHERE d.person_id = p.id);

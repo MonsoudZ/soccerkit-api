@@ -1,9 +1,31 @@
 package api_test
 
 import (
+	"fmt"
 	"net/http"
+	"strings"
 	"testing"
 )
+
+// aDevice registers a distinct APNs token for a caller, which is what makes them
+// reachable — ListReachablePeopleForTeam deliberately skips people with no device.
+func aDevice(t *testing.T, token string, n int) {
+	t.Helper()
+	r := do(t, http.MethodPost, "/api/v1/me/devices", token,
+		map[string]any{"token": fmt.Sprintf("%064x", n)})
+	if r.status != http.StatusOK {
+		t.Fatalf("register device: %d %s", r.status, r.raw)
+	}
+}
+
+// notified returns the person ids a batch of notifications was addressed to.
+func notified(notes []recordedNote) map[string]bool {
+	out := map[string]bool{}
+	for _, n := range notes {
+		out[n.personID.String()] = true
+	}
+	return out
+}
 
 // counts pulls the squad tally out of a sheet response.
 func counts(t *testing.T, r resp) map[string]float64 {
@@ -466,5 +488,215 @@ func TestStaffMayReplyForAPlayer(t *testing.T) {
 	// told us" are different facts.
 	if r.body["rsvpBy"] == s.mateID {
 		t.Errorf("rsvpBy should be the coach who entered it, got %s", r.raw)
+	}
+}
+
+// --- being asked -------------------------------------------------------------
+
+// askedSquad is newSquad with the people who can actually be reached: the player and a
+// parent of the other athlete, each with a device, and the coach with one too so the
+// actor exclusion has something to prove.
+type askedSquad struct {
+	squad
+	parent, parentID string
+}
+
+func newAskedSquad(t *testing.T, prefix string) askedSquad {
+	t.Helper()
+	s := newSquad(t, prefix)
+	parent, parentID := signInCoach(t, prefix+"parent@e.com")
+	joinOrg(t, s.coach, s.orgID, parent, prefix+"parent@e.com", "parent")
+	if r := do(t, http.MethodPost, "/api/v1/persons/"+s.mateID+"/guardians", s.coach,
+		map[string]any{"personId": parentID}); r.status != http.StatusCreated {
+		t.Fatalf("link guardian: %d %s", r.status, r.raw)
+	}
+	aDevice(t, s.player, 1)
+	aDevice(t, parent, 2)
+	aDevice(t, s.coach, 3)
+	testNotes.drain()
+	return askedSquad{squad: s, parent: parent, parentID: parentID}
+}
+
+// TestSchedulingAFixtureAsksTheSquad is what makes the register work rather than exist.
+// Without it a coach schedules a game, a sheet full of "has not replied" appears, and
+// nobody is ever told there is anything to reply to.
+func TestSchedulingAFixtureAsksTheSquad(t *testing.T) {
+	resetDB(t)
+	s := newAskedSquad(t, "ask")
+
+	game := do(t, http.MethodPost, "/api/v1/teams/"+s.teamID+"/games", s.coach, map[string]any{
+		"opponent": "Rivals FC", "kickoffAt": "2026-05-02T09:30:00Z",
+	})
+	if game.status != http.StatusCreated {
+		t.Fatalf("create game: %d %s", game.status, game.raw)
+	}
+	notes := testNotes.drain()
+	who := notified(notes)
+
+	// The player, because they are on the roster; the parent, through the child they are
+	// a recorded guardian of.
+	if !who[s.playerID] {
+		t.Errorf("the rostered player should be asked, told: %v", who)
+	}
+	if !who[s.parentID] {
+		t.Errorf("a parent should be asked through their child, told: %v", who)
+	}
+	// The athlete with no account has no device and nothing to receive on; the coach made
+	// the fixture and does not need their own phone to tell them.
+	if who[s.mateID] {
+		t.Errorf("an athlete with no device should not be queued, told: %v", who)
+	}
+	if len(who) != 2 {
+		t.Errorf("expected exactly the player and the parent, told: %v", who)
+	}
+
+	// The payload is what a tap acts on. No time in the text -- the server does not know
+	// the club's timezone -- so the instant rides here instead.
+	note := notes[0].note
+	if note.Data["type"] != "game" || note.Data["eventId"] != game.body["id"].(string) {
+		t.Errorf("the payload should name the fixture: %v", note.Data)
+	}
+	if note.Data["teamId"] != s.teamID || note.Data["action"] != "rsvp" {
+		t.Errorf("the payload should deep-link to the reply: %v", note.Data)
+	}
+	if note.Data["startsAt"] != "2026-05-02T09:30:00Z" {
+		t.Errorf("the kickoff instant should ride in the payload, got %q", note.Data["startsAt"])
+	}
+	if !strings.Contains(note.Body, "Rivals FC") {
+		t.Errorf("the body should say who they are playing, got %q", note.Body)
+	}
+	// A rendered time would be the server's UTC, which is the wrong day for half the
+	// world. The app formats startsAt in the device's own zone instead.
+	if strings.Contains(note.Body, "09:30") || strings.Contains(note.Title, "09:30") {
+		t.Errorf("the text must not render a time: %q / %q", note.Title, note.Body)
+	}
+}
+
+// TestOnlyChangesWorthActingOnArePushed — a push per scoreline would train a squad to
+// swipe these away, which costs the two that matter.
+func TestOnlyChangesWorthActingOnArePushed(t *testing.T) {
+	resetDB(t)
+	s := newAskedSquad(t, "moved")
+	game := do(t, http.MethodPost, "/api/v1/teams/"+s.teamID+"/games", s.coach, map[string]any{
+		"opponent": "Rivals FC", "kickoffAt": "2026-05-02T09:30:00Z",
+	})
+	gameID := game.body["id"].(string)
+	testNotes.drain()
+
+	quiet := []struct {
+		name    string
+		payload map[string]any
+	}{
+		{"a corrected opponent", map[string]any{"opponent": "Rivals AFC"}},
+		{"a scoreline at full time", map[string]any{"ourScore": 2, "opponentScore": 1}},
+		{"a status that is not a cancellation", map[string]any{"status": "completed"}},
+		{"the same kickoff sent again", map[string]any{"kickoffAt": "2026-05-02T09:30:00Z"}},
+	}
+	for _, q := range quiet {
+		r := do(t, http.MethodPatch, "/api/v1/games/"+gameID, s.coach, q.payload)
+		if r.status != http.StatusOK {
+			t.Fatalf("%s: %d %s", q.name, r.status, r.raw)
+		}
+		if notes := testNotes.drain(); len(notes) != 0 {
+			t.Errorf("%s should not push, got %d notifications", q.name, len(notes))
+		}
+	}
+
+	// A kickoff that actually moves is the squad's business.
+	if r := do(t, http.MethodPatch, "/api/v1/games/"+gameID, s.coach,
+		map[string]any{"kickoffAt": "2026-05-02T14:00:00Z"}); r.status != http.StatusOK {
+		t.Fatalf("move kickoff: %d %s", r.status, r.raw)
+	}
+	moved := testNotes.drain()
+	if len(moved) != 2 {
+		t.Fatalf("a moved kickoff should reach the player and the parent, got %d", len(moved))
+	}
+	if !strings.Contains(moved[0].note.Title, "Kickoff changed") {
+		t.Errorf("expected a kickoff notice, got %q", moved[0].note.Title)
+	}
+	if moved[0].note.Data["startsAt"] != "2026-05-02T14:00:00Z" {
+		t.Errorf("the payload should carry the new time, got %q", moved[0].note.Data["startsAt"])
+	}
+
+	// And so is a fixture that is off.
+	if r := do(t, http.MethodPatch, "/api/v1/games/"+gameID, s.coach,
+		map[string]any{"status": "cancelled"}); r.status != http.StatusOK {
+		t.Fatalf("cancel: %d %s", r.status, r.raw)
+	}
+	off := testNotes.drain()
+	if len(off) != 2 {
+		t.Fatalf("a cancellation should reach the squad, got %d", len(off))
+	}
+	if !strings.Contains(off[0].note.Title, "cancelled") || !strings.Contains(off[0].note.Body, "is off") {
+		t.Errorf("expected a cancellation notice, got %q / %q", off[0].note.Title, off[0].note.Body)
+	}
+	// Cancelling twice is not news.
+	if r := do(t, http.MethodPatch, "/api/v1/games/"+gameID, s.coach,
+		map[string]any{"status": "cancelled"}); r.status != http.StatusOK {
+		t.Fatalf("re-cancel: %d %s", r.status, r.raw)
+	}
+	if notes := testNotes.drain(); len(notes) != 0 {
+		t.Errorf("cancelling an already-cancelled fixture should not push again, got %d", len(notes))
+	}
+}
+
+// TestSchedulingTrainingAsksTheSquad — training a squad is expected at is the same ask,
+// and a plan with no team is not an event anybody attends.
+func TestSchedulingTrainingAsksTheSquad(t *testing.T) {
+	resetDB(t)
+	s := newAskedSquad(t, "trainask")
+
+	session := do(t, http.MethodPost, "/api/v1/sessions", s.coach, map[string]any{
+		"title": "Finishing", "teamId": s.teamID, "scheduledAt": "2026-05-01T17:00:00Z",
+		"blocks": []map[string]any{},
+	})
+	if session.status != http.StatusCreated {
+		t.Fatalf("create session: %d %s", session.status, session.raw)
+	}
+	notes := testNotes.drain()
+	if len(notes) != 2 {
+		t.Fatalf("training should reach the player and the parent, got %d", len(notes))
+	}
+	note := notes[0].note
+	if note.Data["type"] != "session" || note.Data["eventId"] != session.body["id"].(string) {
+		t.Errorf("the payload should name the session: %v", note.Data)
+	}
+	if !strings.Contains(note.Body, "Finishing") {
+		t.Errorf("the body should name the session, got %q", note.Body)
+	}
+
+	// A session a coach is drafting for themselves has no roster to tell.
+	solo := do(t, http.MethodPost, "/api/v1/sessions", s.coach, map[string]any{
+		"title": "Planning", "blocks": []map[string]any{},
+	})
+	if solo.status != http.StatusCreated {
+		t.Fatalf("create teamless session: %d %s", solo.status, solo.raw)
+	}
+	if n := testNotes.drain(); len(n) != 0 {
+		t.Errorf("a teamless session should tell nobody, got %d", len(n))
+	}
+}
+
+// TestAPlayerWhoLeftIsNoLongerAsked — the notify audience is the active roster, unlike
+// the sheet, which keeps a line for whoever was at the event. Asking someone who left the
+// club whether they are coming is the wrong question and, to their family, a strange one.
+func TestAPlayerWhoLeftIsNoLongerAsked(t *testing.T) {
+	resetDB(t)
+	s := newAskedSquad(t, "gone")
+	if r := do(t, http.MethodDelete, "/api/v1/teams/"+s.teamID+"/roster/"+s.playerID, s.coach, nil); r.status != http.StatusOK {
+		t.Fatalf("end roster: %d %s", r.status, r.raw)
+	}
+	testNotes.drain()
+
+	if r := do(t, http.MethodPost, "/api/v1/teams/"+s.teamID+"/games", s.coach,
+		map[string]any{"opponent": "Rivals"}); r.status != http.StatusCreated {
+		t.Fatalf("create game: %d %s", r.status, r.raw)
+	}
+	who := notified(testNotes.drain())
+	if who[s.playerID] {
+		t.Errorf("a player who left the team should not be asked, told: %v", who)
+	}
+	if !who[s.parentID] {
+		t.Errorf("the remaining squad's parent should still be asked, told: %v", who)
 	}
 }

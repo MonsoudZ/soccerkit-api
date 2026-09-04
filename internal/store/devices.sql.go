@@ -66,6 +66,61 @@ func (q *Queries) ListDeviceTokensForPerson(ctx context.Context, personID uuid.U
 	return items, nil
 }
 
+const listReachablePeopleForTeam = `-- name: ListReachablePeopleForTeam :many
+WITH people AS (
+    SELECT r.person_id FROM roster_memberships r
+    WHERE r.team_id = $2 AND r.left_on IS NULL
+    UNION
+    SELECT g.guardian_person_id AS person_id FROM guardianships g
+    WHERE g.child_person_id IN (
+        SELECT r.person_id FROM roster_memberships r
+        WHERE r.team_id = $2 AND r.left_on IS NULL
+    )
+)
+SELECT p.id FROM people pe
+JOIN persons p ON p.id = pe.person_id AND p.deleted = false
+WHERE p.id <> $1
+  AND EXISTS (SELECT 1 FROM device_tokens d WHERE d.person_id = p.id)
+`
+
+type ListReachablePeopleForTeamParams struct {
+	ActorPersonID uuid.UUID `json:"actor_person_id"`
+	TeamID        uuid.UUID `json:"team_id"`
+}
+
+// Who to tell when a team's fixture is scheduled, moved or called off: the squad, and the
+// parents of the squad. It is the RSVP's audience -- the people the register is asking --
+// so it is the roster and its guardians rather than everyone who can see the team.
+//
+// Filtered to people who have a device registered, which is a departure from how an
+// invitation notifies: that one tells a single named person and asks nothing about their
+// phone. A fixture fans out to a whole squad plus their families, and the delivery queue
+// is bounded and drained by one worker (see internal/push), so a coach entering a
+// season's fixtures in one sitting would otherwise push hundreds of deliveries for people
+// with nowhere to deliver to, and the drops would land on whoever was behind them.
+//
+// The actor is excluded. A coach who just moved a kickoff does not need their own phone
+// to tell them they moved it.
+func (q *Queries) ListReachablePeopleForTeam(ctx context.Context, arg ListReachablePeopleForTeamParams) ([]uuid.UUID, error) {
+	rows, err := q.db.Query(ctx, listReachablePeopleForTeam, arg.ActorPersonID, arg.TeamID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []uuid.UUID
+	for rows.Next() {
+		var id uuid.UUID
+		if err := rows.Scan(&id); err != nil {
+			return nil, err
+		}
+		items = append(items, id)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
 const upsertDeviceToken = `-- name: UpsertDeviceToken :one
 INSERT INTO device_tokens (token, person_id, platform)
 VALUES ($1, $2, $3)
