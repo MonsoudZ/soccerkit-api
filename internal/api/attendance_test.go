@@ -700,3 +700,49 @@ func TestAPlayerWhoLeftIsNoLongerAsked(t *testing.T) {
 		t.Errorf("the remaining squad's parent should still be asked, told: %v", who)
 	}
 }
+
+// TestMovingTrainingTellsTheSquad — the half that had no endpoint to move through until
+// PATCH /sessions/{id} existed. A moved kickoff pushed and moved training did not, which
+// is the more common change of the two.
+func TestMovingTrainingTellsTheSquad(t *testing.T) {
+	resetDB(t)
+	s := newAskedSquad(t, "movetrain")
+	session := do(t, http.MethodPost, "/api/v1/sessions", s.coach, map[string]any{
+		"title": "Finishing", "teamId": s.teamID, "scheduledAt": "2026-05-01T17:00:00Z",
+		"blocks": []map[string]any{},
+	})
+	if session.status != http.StatusCreated {
+		t.Fatalf("create session: %d %s", session.status, session.raw)
+	}
+	id := session.body["id"].(string)
+	testNotes.drain()
+
+	// A rename is not something anybody has to act on.
+	if r := do(t, http.MethodPatch, "/api/v1/sessions/"+id, s.coach,
+		map[string]any{"title": "Finishing & crossing"}); r.status != http.StatusOK {
+		t.Fatalf("rename: %d %s", r.status, r.raw)
+	}
+	if n := testNotes.drain(); len(n) != 0 {
+		t.Errorf("a rename should not push, got %d", len(n))
+	}
+
+	// A new time is.
+	if r := do(t, http.MethodPatch, "/api/v1/sessions/"+id, s.coach,
+		map[string]any{"scheduledAt": "2026-05-01T19:00:00Z"}); r.status != http.StatusOK {
+		t.Fatalf("move: %d %s", r.status, r.raw)
+	}
+	notes := testNotes.drain()
+	if len(notes) != 2 {
+		t.Fatalf("a moved session should reach the player and the parent, got %d", len(notes))
+	}
+	note := notes[0].note
+	if !strings.Contains(note.Title, "Training moved") {
+		t.Errorf("expected a moved-training notice, got %q", note.Title)
+	}
+	if note.Data["type"] != "session" || note.Data["eventId"] != id {
+		t.Errorf("the payload should name the session: %v", note.Data)
+	}
+	if note.Data["startsAt"] != "2026-05-01T19:00:00Z" {
+		t.Errorf("the payload should carry the new time, got %q", note.Data["startsAt"])
+	}
+}

@@ -1,8 +1,10 @@
 package api_test
 
 import (
+	"encoding/json"
 	"net/http"
 	"testing"
+	"time"
 )
 
 func TestSessionWithBlocks(t *testing.T) {
@@ -294,5 +296,200 @@ func TestSessionRejectsDrillFromAnotherOrg(t *testing.T) {
 	list := do(t, http.MethodGet, "/api/v1/sessions", mine, nil)
 	if n := len(list.arr()); n != 0 {
 		t.Errorf("no session should have been created, found %d", n)
+	}
+}
+
+// --- editing a session -------------------------------------------------------
+
+// TestSessionCanBeMovedAndRenamed is the gap this closes. Sessions could be created and
+// deleted but never edited, so a coach moving Tuesday training to Thursday had to delete
+// it and build it again — and since a session carries a register now, that threw away
+// everyone's reply with it.
+func TestSessionCanBeMovedAndRenamed(t *testing.T) {
+	resetDB(t)
+	coach, _ := signInCoach(t, "sess-edit@e.com")
+	team := do(t, http.MethodPost, "/api/v1/teams", coach, map[string]any{"name": "U13"})
+	teamID := team.body["id"].(string)
+
+	created := do(t, http.MethodPost, "/api/v1/sessions", coach, map[string]any{
+		"title": "Tuesdya", "teamId": teamID, "scheduledAt": "2026-06-02T18:00:00Z",
+		"notes": "shape work", "blocks": []map[string]any{{"title": "Warm-up"}},
+	})
+	if created.status != http.StatusCreated {
+		t.Fatalf("create: %d %s", created.status, created.raw)
+	}
+	id := created.body["id"].(string)
+
+	moved := do(t, http.MethodPatch, "/api/v1/sessions/"+id, coach, map[string]any{
+		"title": "Thursday", "scheduledAt": "2026-06-04T19:30:00Z",
+	})
+	if moved.status != http.StatusOK {
+		t.Fatalf("patch: %d %s", moved.status, moved.raw)
+	}
+	if moved.body["title"] != "Thursday" || moved.body["scheduledAt"] != "2026-06-04T19:30:00Z" {
+		t.Errorf("the edit should be reflected back: %s", moved.raw)
+	}
+	// Untouched fields stay put, and the plan is not rewritten by a rename.
+	if moved.body["notes"] != "shape work" {
+		t.Errorf("an absent key must leave its field alone: %s", moved.raw)
+	}
+	blocks, _ := moved.body["blocks"].([]any)
+	if len(blocks) != 1 {
+		t.Errorf("editing a session must not touch its blocks: %s", moved.raw)
+	}
+
+	// Explicit null clears; the session keeps its identity with no time on it.
+	cleared := do(t, http.MethodPatch, "/api/v1/sessions/"+id, coach, map[string]any{
+		"scheduledAt": nil, "notes": nil,
+	})
+	if cleared.status != http.StatusOK {
+		t.Fatalf("clear: %d %s", cleared.status, cleared.raw)
+	}
+	if cleared.body["scheduledAt"] != nil || cleared.body["notes"] != nil {
+		t.Errorf("null should clear these: %s", cleared.raw)
+	}
+	// And the usual PATCH hygiene.
+	if r := do(t, http.MethodPatch, "/api/v1/sessions/"+id, coach,
+		map[string]any{"blocks": []any{}}); r.status != http.StatusBadRequest {
+		t.Errorf("blocks are not editable here, expected 400, got %d %s", r.status, r.raw)
+	}
+	if r := do(t, http.MethodPatch, "/api/v1/sessions/"+id, coach,
+		map[string]any{"title": ""}); r.status != http.StatusBadRequest {
+		t.Errorf("a session cannot be renamed to nothing, expected 400, got %d %s", r.status, r.raw)
+	}
+	if r := do(t, http.MethodPatch, "/api/v1/sessions/"+id, coach,
+		map[string]any{"scheduledAt": "next tuesday"}); r.status != http.StatusBadRequest {
+		t.Errorf("expected 400 for an unparseable time, got %d %s", r.status, r.raw)
+	}
+}
+
+// TestSessionEditReachesTheApp — a REST edit that only touched the columns would be
+// invisible on the phone, and the app's next push would write the old values back over
+// it. Both halves are written, so a pull carries the change.
+func TestSessionEditReachesTheApp(t *testing.T) {
+	resetDB(t)
+	coach, _ := signInCoach(t, "sess-sync@e.com")
+	team := do(t, http.MethodPost, "/api/v1/teams", coach, map[string]any{"name": "U13"})
+	teamID := team.body["id"].(string)
+	created := do(t, http.MethodPost, "/api/v1/sessions", coach, map[string]any{
+		"title": "Old title", "teamId": teamID, "scheduledAt": "2026-06-02T18:00:00Z",
+		"notes": "old objective", "blocks": []map[string]any{},
+	})
+	if created.status != http.StatusCreated {
+		t.Fatalf("create: %d %s", created.status, created.raw)
+	}
+	id := created.body["id"].(string)
+
+	if r := do(t, http.MethodPatch, "/api/v1/sessions/"+id, coach, map[string]any{
+		"title": "New title", "notes": "new objective", "scheduledAt": "2026-06-04T19:30:00Z",
+	}); r.status != http.StatusOK {
+		t.Fatalf("patch: %d %s", r.status, r.raw)
+	}
+
+	pull := pullSync(t, coach, "")
+	if got := payloadField(t, pull, "Session", "title"); got != "New title" {
+		t.Errorf("the app would still see %q", got)
+	}
+	// The app calls it the objective; this API calls it notes. Same field.
+	if got := payloadField(t, pull, "Session", "objective"); got != "new objective" {
+		t.Errorf("the objective did not reach the payload, got %q", got)
+	}
+	// The date is a Swift Date — seconds since 2001 — so it arrives as a number, not a
+	// string, and it has to move with the column.
+	var record map[string]any
+	for _, rec := range pull.Records {
+		if rec.Type == "Session" {
+			if err := json.Unmarshal(rec.Payload, &record); err != nil {
+				t.Fatalf("decode session payload: %v", err)
+			}
+		}
+	}
+	date, ok := record["date"].(float64)
+	if !ok {
+		t.Fatalf("the session's date should be a number, got %T in %v", record["date"], record)
+	}
+	want := time.Date(2026, time.June, 4, 19, 30, 0, 0, time.UTC).
+		Sub(time.Date(2001, time.January, 1, 0, 0, 0, 0, time.UTC)).Seconds()
+	if date != want {
+		t.Errorf("the payload date is %v, want %v", date, want)
+	}
+	// A cleared time still leaves a date the app can decode — its record requires one,
+	// and a missing key loses the whole session.
+	if r := do(t, http.MethodPatch, "/api/v1/sessions/"+id, coach,
+		map[string]any{"scheduledAt": nil}); r.status != http.StatusOK {
+		t.Fatalf("clear: %d %s", r.status, r.raw)
+	}
+	after := pullSync(t, coach, "")
+	for _, rec := range after.Records {
+		if rec.Type != "Session" {
+			continue
+		}
+		var m map[string]any
+		if err := json.Unmarshal(rec.Payload, &m); err != nil {
+			t.Fatalf("decode: %v", err)
+		}
+		if _, ok := m["date"].(float64); !ok {
+			t.Errorf("a session with no time still needs a decodable date, got %v", m["date"])
+		}
+	}
+}
+
+// TestSessionCannotChangeTeamOnceItHasARegister — those replies are about a specific
+// squad's training. Carrying them to another team would attribute them to people who
+// were never asked.
+func TestSessionCannotChangeTeamOnceItHasARegister(t *testing.T) {
+	resetDB(t)
+	coach, _ := signInCoach(t, "sess-team@e.com")
+	one := do(t, http.MethodPost, "/api/v1/teams", coach, map[string]any{"name": "U13"})
+	two := do(t, http.MethodPost, "/api/v1/teams", coach, map[string]any{"name": "U15"})
+	oneID, twoID := one.body["id"].(string), two.body["id"].(string)
+	athlete := createAthlete(t, coach, "Register Kid")
+	if r := do(t, http.MethodPost, "/api/v1/teams/"+oneID+"/roster", coach,
+		map[string]any{"personId": athlete}); r.status != http.StatusCreated {
+		t.Fatalf("roster: %d %s", r.status, r.raw)
+	}
+	created := do(t, http.MethodPost, "/api/v1/sessions", coach, map[string]any{
+		"title": "Tuesday", "teamId": oneID, "blocks": []map[string]any{},
+	})
+	id := created.body["id"].(string)
+
+	// Before anyone has answered, a mistyped team is worth being able to fix.
+	if r := do(t, http.MethodPatch, "/api/v1/sessions/"+id, coach,
+		map[string]any{"teamId": twoID}); r.status != http.StatusOK {
+		t.Fatalf("moving an unanswered session should work: %d %s", r.status, r.raw)
+	}
+	if r := do(t, http.MethodPatch, "/api/v1/sessions/"+id, coach,
+		map[string]any{"teamId": oneID}); r.status != http.StatusOK {
+		t.Fatalf("move back: %d %s", r.status, r.raw)
+	}
+
+	// Once the register has an answer, it is somebody's statement about this squad.
+	if r := do(t, http.MethodPut, "/api/v1/sessions/"+id+"/rsvp", coach,
+		map[string]any{"personId": athlete, "status": "going"}); r.status != http.StatusOK {
+		t.Fatalf("rsvp: %d %s", r.status, r.raw)
+	}
+	if r := do(t, http.MethodPatch, "/api/v1/sessions/"+id, coach,
+		map[string]any{"teamId": twoID}); r.status != http.StatusConflict {
+		t.Errorf("expected 409 moving an answered session, got %d %s", r.status, r.raw)
+	}
+	// Everything else about it is still editable.
+	if r := do(t, http.MethodPatch, "/api/v1/sessions/"+id, coach,
+		map[string]any{"title": "Tuesday (moved indoors)"}); r.status != http.StatusOK {
+		t.Errorf("a rename should still work: %d %s", r.status, r.raw)
+	}
+}
+
+// TestSessionEditIsScopedToTheOrg — the same tenancy check every other route makes.
+func TestSessionEditIsScopedToTheOrg(t *testing.T) {
+	resetDB(t)
+	coach, _ := signInCoach(t, "sess-mine@e.com")
+	stranger, _ := signInCoach(t, "sess-theirs@e.com")
+	created := do(t, http.MethodPost, "/api/v1/sessions", coach, map[string]any{
+		"title": "Tuesday", "blocks": []map[string]any{},
+	})
+	id := created.body["id"].(string)
+	if r := do(t, http.MethodPatch, "/api/v1/sessions/"+id, stranger,
+		map[string]any{"title": "PWNED"}); r.status != http.StatusForbidden {
+		t.Errorf("cross-org session edit should be 403, got %d %s", r.status, r.raw)
 	}
 }

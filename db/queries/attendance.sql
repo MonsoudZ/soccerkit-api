@@ -104,3 +104,14 @@ LEFT JOIN attendances a
       AND (a.game_id = sqlc.narg('game_id') OR a.session_id = sqlc.narg('session_id'))
 WHERE @all_people::bool OR pe.person_id = ANY(@person_ids::uuid[])
 ORDER BY r.jersey_number NULLS LAST, p.display_name ASC;
+
+-- name: CountAnsweredAttendanceForSession :one
+-- Whether a session's register has been started, which is what decides whether it may
+-- still be moved to another team.
+--
+-- Counted on answers rather than rows: EnsureAttendance opens a blank line before either
+-- setter runs, so a row on its own means nothing happened. A line with an RSVP or a
+-- recorded status is somebody's statement about a specific squad's training, and carrying
+-- it over to a different squad would attribute it to people who were never asked.
+SELECT count(*) FROM attendances
+WHERE session_id = $1 AND (rsvp IS NOT NULL OR status IS NOT NULL);

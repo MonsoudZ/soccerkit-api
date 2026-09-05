@@ -84,6 +84,29 @@ func optionalInt32(raw json.RawMessage, field string) (*int32, error) {
 	return &n, nil
 }
 
+// optionalTimestamptz decodes an RFC3339 string or an explicit null, for the columns that
+// hold an instant rather than a day: a game's kickoff, a training session's start.
+//
+// Null is the point. It used to be json.Unmarshal straight into a string, where null is a
+// silent no-op that leaves "" behind and then fails RFC3339 parsing, so a cancelled
+// fixture's kickoff could not be unset (docs/AUDIT-2.md L3). That fix lived inline in
+// PATCH /games/{id} until sessions needed the same three behaviours -- which is the same
+// path the rest of this file took.
+func optionalTimestamptz(raw json.RawMessage, field string) (pgtype.Timestamptz, error) {
+	if string(raw) == "null" {
+		return pgtype.Timestamptz{Valid: false}, nil
+	}
+	var s string
+	if err := json.Unmarshal(raw, &s); err != nil {
+		return pgtype.Timestamptz{}, errValidation(field + " must be an RFC3339 timestamp or null")
+	}
+	t, err := time.Parse(time.RFC3339, s)
+	if err != nil {
+		return pgtype.Timestamptz{}, errValidation(field + " must be an RFC3339 timestamp or null")
+	}
+	return pgtype.Timestamptz{Time: t, Valid: true}, nil
+}
+
 // optionalDate decodes a "YYYY-MM-DD" string or an explicit null, matching the format
 // parseDate accepts on the create paths.
 func optionalDate(raw json.RawMessage, field string) (pgtype.Date, error) {

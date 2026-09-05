@@ -544,3 +544,77 @@ func (q *Queries) UpdateGame(ctx context.Context, arg UpdateGameParams) (Game, e
 	)
 	return i, err
 }
+
+const updateSession = `-- name: UpdateSession :one
+UPDATE sessions
+SET title        = COALESCE($1, title),
+    scheduled_at = CASE WHEN $2::bool THEN $3 ELSE scheduled_at END,
+    notes        = CASE WHEN $4::bool THEN $5 ELSE notes END,
+    team_id      = CASE WHEN $6::bool THEN $7 ELSE team_id END,
+    payload      = CASE WHEN $8::bool
+                        THEN COALESCE(payload, '{}'::jsonb) || $9::jsonb
+                        ELSE payload END,
+    seq          = nextval('sync_seq'),
+    updated_at   = now()
+WHERE id = $10
+RETURNING id, organization_id, author_person_id, team_id, title, scheduled_at, notes, created_at, updated_at, sync_account_id, payload, deleted, seq
+`
+
+type UpdateSessionParams struct {
+	Title          *string            `json:"title"`
+	SetScheduledAt bool               `json:"set_scheduled_at"`
+	ScheduledAt    pgtype.Timestamptz `json:"scheduled_at"`
+	SetNotes       bool               `json:"set_notes"`
+	Notes          *string            `json:"notes"`
+	SetTeamID      bool               `json:"set_team_id"`
+	TeamID         *uuid.UUID         `json:"team_id"`
+	PatchPayload   bool               `json:"patch_payload"`
+	PayloadPatch   []byte             `json:"payload_patch"`
+	ID             uuid.UUID          `json:"id"`
+}
+
+// Sessions could be created and deleted over REST but never edited, so a coach who moved
+// Tuesday training to Thursday had to delete the session and build it again -- taking its
+// register with it, now that a session has one. It is the same gap UpdateTeam closed for
+// teams, arriving late because nothing scheduled by a session used to be attended.
+//
+// Written twice, into the columns this API reads and into the payload a pull returns, for
+// the reason UpdateTeam sets out at length: a pull returns `payload`, so a column-only
+// edit is invisible on the phone and the app's next push writes the old values straight
+// back over it, with nothing logged and nobody told.
+//
+// Blocks are deliberately untouched. They are an ordered collection whose ids the payload
+// carries, so replacing them is a different operation from editing the session's own
+// fields -- folding the two together would mean every rename rewrote the plan, and a
+// caller who sent no blocks would erase one.
+func (q *Queries) UpdateSession(ctx context.Context, arg UpdateSessionParams) (Session, error) {
+	row := q.db.QueryRow(ctx, updateSession,
+		arg.Title,
+		arg.SetScheduledAt,
+		arg.ScheduledAt,
+		arg.SetNotes,
+		arg.Notes,
+		arg.SetTeamID,
+		arg.TeamID,
+		arg.PatchPayload,
+		arg.PayloadPatch,
+		arg.ID,
+	)
+	var i Session
+	err := row.Scan(
+		&i.ID,
+		&i.OrganizationID,
+		&i.AuthorPersonID,
+		&i.TeamID,
+		&i.Title,
+		&i.ScheduledAt,
+		&i.Notes,
+		&i.CreatedAt,
+		&i.UpdatedAt,
+		&i.SyncAccountID,
+		&i.Payload,
+		&i.Deleted,
+		&i.Seq,
+	)
+	return i, err
+}

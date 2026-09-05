@@ -1039,6 +1039,37 @@ paths:
             application/json:
               schema: { $ref: "#/components/schemas/Session" }
         "404": { $ref: "#/components/responses/Error" }
+    patch:
+      tags: [content]
+      summary: Move, rename or re-note a session
+      description: >
+        Every field is a three-state PATCH: omit to leave alone, send a value to set,
+        send explicit null to clear. A changed time pushes to the squad, the same as a
+        moved kickoff; a rename does not. Blocks are not editable here — replacing the
+        plan is a different operation from editing the session. Moving a session to
+        another team is refused once its register has been answered: those replies are
+        about a specific squad's training and cannot be carried onto another's.
+      security: [{ bearerAuth: [] }]
+      parameters: [{ $ref: "#/components/parameters/Id" }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/UpdateSessionRequest" }
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Session" }
+        "400": { $ref: "#/components/responses/Error" }
+        "403": { $ref: "#/components/responses/Error" }
+        "404": { $ref: "#/components/responses/Error" }
+        "409":
+          description: The session already has a register and cannot change team
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
     delete:
       tags: [content]
       summary: Delete a session
@@ -1671,6 +1702,13 @@ components:
         opponentScore: { type: integer, nullable: true }
         status: { type: string, enum: [scheduled, in_progress, completed, cancelled] }
         createdAt: { type: string, format: date-time }
+    UpdateSessionRequest:
+      type: object
+      properties:
+        title: { type: string }
+        teamId: { type: string, format: uuid, nullable: true }
+        scheduledAt: { type: string, format: date-time, nullable: true }
+        notes: { type: string, nullable: true }
     AttendanceEntry:
       type: object
       description: >-

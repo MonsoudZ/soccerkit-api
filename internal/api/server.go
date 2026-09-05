@@ -186,6 +186,7 @@ func (s *Server) Router() http.Handler {
 				r.Get("/", s.handleListSessions)
 				r.Post("/", s.handleCreateSession)
 				r.Get("/{id}", s.handleGetSession)
+				r.Patch("/{id}", s.handleUpdateSession)
 				r.Delete("/{id}", s.handleDeleteSession)
 				// Training has a register too, and it is the same one. These three do
 				// not carry the staff-only gate the rest of /sessions does -- see

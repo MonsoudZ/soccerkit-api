@@ -4,7 +4,6 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
-	"log"
 	"net/http"
 	"time"
 
@@ -169,26 +168,14 @@ func (s *Server) handleUpdateGame(w http.ResponseWriter, r *http.Request) {
 		params.SetOpponent, params.Opponent = true, opponent
 	}
 	if v, ok := raw["kickoffAt"]; ok {
-		// Explicit null clears it, the same as every other optional field here. This
-		// used to json.Unmarshal straight into a string, where JSON null is a silent
-		// no-op that leaves "" behind and then fails RFC3339 parsing — so a cancelled
-		// fixture's kickoff time could not be unset. See docs/AUDIT-2.md L3.
-		params.SetKickoffAt = true
-		if string(v) == "null" {
-			params.KickoffAt = nullTimestamptz()
-		} else {
-			var text string
-			if err := json.Unmarshal(v, &text); err != nil {
-				writeError(w, errValidation("kickoffAt must be an RFC3339 timestamp or null"))
-				return
-			}
-			t, perr := time.Parse(time.RFC3339, text)
-			if perr != nil {
-				writeError(w, errValidation("kickoffAt must be an RFC3339 timestamp or null"))
-				return
-			}
-			params.KickoffAt = timestamptz(t)
+		// Explicit null clears it, the same as every other optional field here — see
+		// optionalTimestamptz, which is where this decoding moved once sessions needed it.
+		kickoff, verr := optionalTimestamptz(v, "kickoffAt")
+		if verr != nil {
+			writeError(w, verr)
+			return
 		}
+		params.SetKickoffAt, params.KickoffAt = true, kickoff
 	}
 	if v, ok := raw["homeAway"]; ok {
 		homeAway, err := optionalString(v, "homeAway")
@@ -255,25 +242,17 @@ func (s *Server) notifyIfFixtureChanged(ctx context.Context, before, after store
 	if !cancelled && !moved {
 		return
 	}
-	// Checked before the team lookup below, so an unconfigured push costs nothing.
-	if s.notifier == nil {
-		return
-	}
-	team, err := s.store.GetTeam(ctx, after.TeamID)
-	if err != nil {
-		log.Printf("games: naming the team for a fixture notification: %v", err)
-		return
-	}
-	name := fixtureName(team.Name, after.Opponent)
-	// Cancellation wins when both changed. A squad told the time moved for a match that
-	// is off would turn up to the new one.
-	title, body := "Kickoff changed for "+team.Name,
-		name+" — the kickoff time has changed. Check you can still make it."
-	if cancelled {
-		title, body = "Fixture cancelled for "+team.Name, name+" is off."
-	}
-	s.notifySquad(ctx, after.TeamID, fixtureNote(
-		title, body, "game", after.ID, after.TeamID, timePtr(after.KickoffAt)))
+	s.notifyTeamByID(ctx, after.TeamID, func(teamName string) Notification {
+		name := fixtureName(teamName, after.Opponent)
+		// Cancellation wins when both changed. A squad told the time moved for a match
+		// that is off would turn up to the new one.
+		title, body := "Kickoff changed for "+teamName,
+			name+" — the kickoff time has changed. Check you can still make it."
+		if cancelled {
+			title, body = "Fixture cancelled for "+teamName, name+" is off."
+		}
+		return fixtureNote(title, body, "game", after.ID, after.TeamID, timePtr(after.KickoffAt))
+	})
 }
 
 // sameInstant compares two nullable timestamps, where "both unset" counts as unchanged.

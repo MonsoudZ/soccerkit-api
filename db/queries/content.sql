@@ -58,6 +58,34 @@ WHERE organization_id = $1
   AND (sqlc.narg('team_id')::uuid IS NULL OR team_id = sqlc.narg('team_id'))
 ORDER BY scheduled_at DESC NULLS LAST, created_at DESC;
 
+-- name: UpdateSession :one
+-- Sessions could be created and deleted over REST but never edited, so a coach who moved
+-- Tuesday training to Thursday had to delete the session and build it again -- taking its
+-- register with it, now that a session has one. It is the same gap UpdateTeam closed for
+-- teams, arriving late because nothing scheduled by a session used to be attended.
+--
+-- Written twice, into the columns this API reads and into the payload a pull returns, for
+-- the reason UpdateTeam sets out at length: a pull returns `payload`, so a column-only
+-- edit is invisible on the phone and the app's next push writes the old values straight
+-- back over it, with nothing logged and nobody told.
+--
+-- Blocks are deliberately untouched. They are an ordered collection whose ids the payload
+-- carries, so replacing them is a different operation from editing the session's own
+-- fields -- folding the two together would mean every rename rewrote the plan, and a
+-- caller who sent no blocks would erase one.
+UPDATE sessions
+SET title        = COALESCE(sqlc.narg('title'), title),
+    scheduled_at = CASE WHEN sqlc.arg('set_scheduled_at')::bool THEN sqlc.narg('scheduled_at') ELSE scheduled_at END,
+    notes        = CASE WHEN sqlc.arg('set_notes')::bool THEN sqlc.narg('notes') ELSE notes END,
+    team_id      = CASE WHEN sqlc.arg('set_team_id')::bool THEN sqlc.narg('team_id') ELSE team_id END,
+    payload      = CASE WHEN sqlc.arg('patch_payload')::bool
+                        THEN COALESCE(payload, '{}'::jsonb) || sqlc.arg('payload_patch')::jsonb
+                        ELSE payload END,
+    seq          = nextval('sync_seq'),
+    updated_at   = now()
+WHERE id = sqlc.arg('id')
+RETURNING *;
+
 -- name: DeleteSession :exec
 -- Tombstoned, not dropped — see DeleteTeam.
 UPDATE sessions SET deleted = true, seq = nextval('sync_seq'), updated_at = now(),

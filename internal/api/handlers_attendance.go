@@ -370,6 +370,21 @@ func (s *Server) notifySquad(ctx context.Context, teamID uuid.UUID, note Notific
 	}
 }
 
+// notifyTeamByID is notifySquad for a caller holding a team's id but not its name, which
+// every message here needs. The build function runs only once there is a name and a
+// notifier, so an unconfigured push costs neither the lookup nor the message.
+func (s *Server) notifyTeamByID(ctx context.Context, teamID uuid.UUID, build func(teamName string) Notification) {
+	if s.notifier == nil {
+		return
+	}
+	team, err := s.store.GetTeam(ctx, teamID)
+	if err != nil {
+		log.Printf("attendance: naming team %s for a notification: %v", teamID, err)
+		return
+	}
+	s.notifySquad(ctx, teamID, build(team.Name))
+}
+
 // fixtureNote builds one of these messages, and is where the same decision gets made for
 // all of them: no time in the text.
 //

@@ -3,7 +3,6 @@ package api
 import (
 	"encoding/json"
 	"errors"
-	"log"
 	"net/http"
 	"time"
 
@@ -216,15 +215,13 @@ func (s *Server) handleCreateSession(w http.ResponseWriter, r *http.Request) {
 	// push. Only when the session has a team: without one there is no roster to tell, and
 	// a plan a coach is drafting for themselves is not an event anybody attends.
 	if teamID != nil {
-		if team, terr := s.store.GetTeam(r.Context(), *teamID); terr == nil {
-			s.notifySquad(r.Context(), team.ID, fixtureNote(
-				"New training for "+team.Name,
+		s.notifyTeamByID(r.Context(), *teamID, func(teamName string) Notification {
+			return fixtureNote(
+				"New training for "+teamName,
 				session.Title+" — can you make it?",
-				"session", session.ID, team.ID, timePtr(session.ScheduledAt),
-			))
-		} else {
-			log.Printf("sessions: naming the team for a training notification: %v", terr)
-		}
+				"session", session.ID, *teamID, timePtr(session.ScheduledAt),
+			)
+		})
 	}
 	writeJSON(w, http.StatusCreated, sessionDTO(session, blocks))
 }
@@ -287,6 +284,157 @@ func (s *Server) handleGetSession(w http.ResponseWriter, r *http.Request) {
 		blocks[i] = sessionBlockRowDTO(b)
 	}
 	writeJSON(w, http.StatusOK, sessionDTO(session, blocks))
+}
+
+// updatableSessionFields is the set PATCH /sessions/{id} accepts. Blocks are not in it:
+// see UpdateSession in db/queries/content.sql for why editing the plan is a different
+// operation from editing the session.
+var updatableSessionFields = map[string]bool{
+	"title": true, "teamId": true, "scheduledAt": true, "notes": true,
+}
+
+// handleUpdateSession moves, renames and re-notes a training session.
+//
+// Sessions were the one scheduled thing that could be created and deleted but never
+// edited, so moving Tuesday training to Thursday meant deleting it and building it again
+// — and since a session now carries a register, that threw away everyone's reply along
+// with it. It is also why a moved kickoff pushed to the squad and moved training did not:
+// there was no endpoint for training to move through.
+//
+// Every field here is in the sync contract, so each is written twice — once into the
+// column this API reads, once into the payload a pull returns. See UpdateSession.
+func (s *Server) handleUpdateSession(w http.ResponseWriter, r *http.Request) {
+	oc, err := s.requireCoach(r)
+	if err != nil {
+		writeError(w, err)
+		return
+	}
+	session, err := s.sessionInOrg(r, oc)
+	if err != nil {
+		writeError(w, err)
+		return
+	}
+	raw, err := decodePatch(r, updatableSessionFields)
+	if err != nil {
+		writeError(w, err)
+		return
+	}
+
+	params := store.UpdateSessionParams{ID: session.ID}
+	patch := syncPatch{}
+	if v, ok := raw["title"]; ok {
+		title, verr := requiredString(v, "title")
+		if verr != nil {
+			writeError(w, verr)
+			return
+		}
+		params.Title = &title
+		patch.set("title", title)
+	}
+	if v, ok := raw["notes"]; ok {
+		notes, verr := optionalString(v, "notes")
+		if verr != nil {
+			writeError(w, verr)
+			return
+		}
+		params.SetNotes, params.Notes = true, notes
+		// The app calls it the objective; this API calls it notes. Same field, and
+		// newSessionPayload already maps it that way on the create path.
+		patch.set("objective", syncString(notes))
+	}
+	if v, ok := raw["scheduledAt"]; ok {
+		when, verr := optionalTimestamptz(v, "scheduledAt")
+		if verr != nil {
+			writeError(w, verr)
+			return
+		}
+		params.SetScheduledAt, params.ScheduledAt = true, when
+		// The app's record requires a date and loses the whole session without one, so a
+		// cleared schedule falls back to when the session was created — the same answer
+		// newSessionPayload gives a session created without a time. The column is still
+		// NULL; it is only the payload that cannot be empty here.
+		date := session.CreatedAt.Time
+		if when.Valid {
+			date = when.Time
+		}
+		patch.set("date", swiftDate(date))
+	}
+	if v, ok := raw["teamId"]; ok {
+		rawTeam, verr := optionalString(v, "teamId")
+		if verr != nil {
+			writeError(w, verr)
+			return
+		}
+		teamID, terr := s.optionalTeamInOrg(r, oc, rawTeam)
+		if terr != nil {
+			writeError(w, terr)
+			return
+		}
+		if !sameTeam(session.TeamID, teamID) {
+			// Moving a session whose register has been started would carry one squad's
+			// replies onto another squad's training, attributing them to people who were
+			// never asked. Before anyone has answered there is nothing to carry, which is
+			// when a mistyped team is worth being able to fix.
+			answered, cerr := s.store.CountAnsweredAttendanceForSession(r.Context(), &session.ID)
+			if cerr != nil {
+				writeError(w, cerr)
+				return
+			}
+			if answered > 0 {
+				writeError(w, errConflict(
+					"that session already has a register; create a new session for the other team"))
+				return
+			}
+		}
+		params.SetTeamID, params.TeamID = true, teamID
+		// Written as null when cleared rather than left out. `||` merges keys and cannot
+		// remove one, so an omitted key would leave the old team id in the payload and
+		// put the session on a team the server says it is not on. teamID is optional in
+		// the app's record, which is what makes null safe to decode here.
+		if teamID != nil {
+			patch.set("teamID", teamID.String())
+		} else {
+			patch.set("teamID", nil)
+		}
+	}
+	params.PayloadPatch, params.PatchPayload = patch.marshal()
+
+	updated, err := s.store.UpdateSession(r.Context(), params)
+	if err != nil {
+		writeError(w, err)
+		return
+	}
+	// Training that moved is the squad's business, exactly as a kickoff that moved is.
+	// Only the time: a renamed session is not something anybody has to act on.
+	if !sameInstant(session.ScheduledAt, updated.ScheduledAt) && updated.TeamID != nil {
+		teamID := *updated.TeamID
+		s.notifyTeamByID(r.Context(), teamID, func(teamName string) Notification {
+			return fixtureNote(
+				"Training moved for "+teamName,
+				updated.Title+" — the time has changed. Check you can still make it.",
+				"session", updated.ID, teamID, timePtr(updated.ScheduledAt),
+			)
+		})
+	}
+
+	blockRows, err := s.store.ListSessionBlocks(r.Context(), updated.ID)
+	if err != nil {
+		writeError(w, err)
+		return
+	}
+	blocks := make([]SessionBlock, len(blockRows))
+	for i, b := range blockRows {
+		blocks[i] = sessionBlockRowDTO(b)
+	}
+	writeJSON(w, http.StatusOK, sessionDTO(updated, blocks))
+}
+
+// sameTeam compares two optional team ids, where "both unset" counts as unchanged.
+func sameTeam(a, b *uuid.UUID) bool {
+	if a == nil || b == nil {
+		return a == nil && b == nil
+	}
+	return *a == *b
 }
 
 func (s *Server) handleDeleteSession(w http.ResponseWriter, r *http.Request) {

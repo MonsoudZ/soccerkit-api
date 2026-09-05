@@ -12,6 +12,25 @@ import (
 	"github.com/jackc/pgx/v5/pgtype"
 )
 
+const countAnsweredAttendanceForSession = `-- name: CountAnsweredAttendanceForSession :one
+SELECT count(*) FROM attendances
+WHERE session_id = $1 AND (rsvp IS NOT NULL OR status IS NOT NULL)
+`
+
+// Whether a session's register has been started, which is what decides whether it may
+// still be moved to another team.
+//
+// Counted on answers rather than rows: EnsureAttendance opens a blank line before either
+// setter runs, so a row on its own means nothing happened. A line with an RSVP or a
+// recorded status is somebody's statement about a specific squad's training, and carrying
+// it over to a different squad would attribute it to people who were never asked.
+func (q *Queries) CountAnsweredAttendanceForSession(ctx context.Context, sessionID *uuid.UUID) (int64, error) {
+	row := q.db.QueryRow(ctx, countAnsweredAttendanceForSession, sessionID)
+	var count int64
+	err := row.Scan(&count)
+	return count, err
+}
+
 const ensureAttendance = `-- name: EnsureAttendance :exec
 
 INSERT INTO attendances (game_id, session_id, person_id)

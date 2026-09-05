@@ -33,6 +33,14 @@ type Querier interface {
 	// with a permanently 500ing aggregate. numeric has no such ceiling, and the average of
 	// values that each fit in float8 always fits in float8 on the way back out.
 	AggregateScoresForPerson(ctx context.Context, arg AggregateScoresForPersonParams) ([]AggregateScoresForPersonRow, error)
+	// Whether a session's register has been started, which is what decides whether it may
+	// still be moved to another team.
+	//
+	// Counted on answers rather than rows: EnsureAttendance opens a blank line before either
+	// setter runs, so a row on its own means nothing happened. A line with an RSVP or a
+	// recorded status is somebody's statement about a specific squad's training, and carrying
+	// it over to a different squad would attribute it to people who were never asked.
+	CountAnsweredAttendanceForSession(ctx context.Context, sessionID *uuid.UUID) (int64, error)
 	// How many of these ids are live drills in this organization. handleCreateSession asks
 	// once for every drill its blocks reference and compares the answer with the number of
 	// distinct ids it asked about; fewer means at least one block points at a drill that is
@@ -541,6 +549,21 @@ type Querier interface {
 	// need no propagation and must not be invented into a payload the app would not
 	// recognise.
 	UpdatePerson(ctx context.Context, arg UpdatePersonParams) (Person, error)
+	// Sessions could be created and deleted over REST but never edited, so a coach who moved
+	// Tuesday training to Thursday had to delete the session and build it again -- taking its
+	// register with it, now that a session has one. It is the same gap UpdateTeam closed for
+	// teams, arriving late because nothing scheduled by a session used to be attended.
+	//
+	// Written twice, into the columns this API reads and into the payload a pull returns, for
+	// the reason UpdateTeam sets out at length: a pull returns `payload`, so a column-only
+	// edit is invisible on the phone and the app's next push writes the old values straight
+	// back over it, with nothing logged and nobody told.
+	//
+	// Blocks are deliberately untouched. They are an ordered collection whose ids the payload
+	// carries, so replacing them is a different operation from editing the session's own
+	// fields -- folding the two together would mean every rename rewrote the plan, and a
+	// caller who sent no blocks would erase one.
+	UpdateSession(ctx context.Context, arg UpdateSessionParams) (Session, error)
 	// A REST edit has to reach the app, which is why this writes the record twice.
 	//
 	// A sync pull returns `payload`, not these columns, so updating the columns alone would
