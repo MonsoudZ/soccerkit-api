@@ -218,6 +218,81 @@ func (s *Server) handleTeamAttendance(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
+// handlePersonAttendance is the same register read from the athlete's side.
+//
+// Mirrors GET /persons/{id}/aggregate, which does this for evaluation scores, and takes
+// the same gate: personVisibleTo, so a parent gets their own child, a player themselves,
+// and staff the athletes of the organization they run.
+//
+// The universe is not the current roster. An athlete who moved up in January did not stop
+// having attended the autumn, so it is every event of every team they were rostered on
+// while it happened -- see AggregateAttendanceForPerson, which is the first query here to
+// read the roster's time bounds rather than only its open rows.
+func (s *Server) handlePersonAttendance(w http.ResponseWriter, r *http.Request) {
+	oc, err := s.resolveOrg(r)
+	if err != nil {
+		writeError(w, err)
+		return
+	}
+	personID, err := pathUUID(r, "id")
+	if err != nil {
+		writeError(w, err)
+		return
+	}
+	if err := s.personVisibleTo(r.Context(), oc, personID); err != nil {
+		writeError(w, err)
+		return
+	}
+	from, to, err := attendanceWindow(r)
+	if err != nil {
+		writeError(w, err)
+		return
+	}
+	games, sessions, err := attendanceKinds(r)
+	if err != nil {
+		writeError(w, err)
+		return
+	}
+	// An optional narrowing to one team, for the caller who is asking about a season
+	// rather than a career. Checked against the organization like any other team id from
+	// a request, so it cannot be used to ask whether a team elsewhere exists.
+	var onlyTeam *uuid.UUID
+	if raw := r.URL.Query().Get("teamId"); raw != "" {
+		id, perr := parseUUIDParam(raw, "teamId")
+		if perr != nil {
+			writeError(w, perr)
+			return
+		}
+		if _, terr := s.teamByIDInOrg(r.Context(), oc, id); terr != nil {
+			writeError(w, terr)
+			return
+		}
+		onlyTeam = &id
+	}
+
+	rows, err := s.store.AggregateAttendanceForPerson(r.Context(), store.AggregateAttendanceForPersonParams{
+		PersonID: personID, OrganizationID: oc.orgID,
+		IncludeGames: games, IncludeSessions: sessions,
+		StartingFrom: from, StartingTo: to, OnlyTeamID: onlyTeam,
+	})
+	if err != nil {
+		writeError(w, err)
+		return
+	}
+
+	out := PersonAttendance{
+		PersonID: personID, From: queryStrPtr(r, "from"), To: queryStrPtr(r, "to"),
+		Teams: make([]TeamAttendanceLine, 0, len(rows)),
+	}
+	for _, row := range rows {
+		line := personTeamLineDTO(row)
+		out.Events += line.Events
+		out.Overall = out.Overall.add(line.AttendanceTally)
+		out.Teams = append(out.Teams, line)
+	}
+	writeJSON(w, http.StatusOK, out)
+}
+
 // attendanceWindow reads the optional from/to bounds.
 //
 // Days, not instants, because a coach thinks in dates: `from` opens at the start of its

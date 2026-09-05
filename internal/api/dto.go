@@ -334,16 +334,15 @@ type AttendanceSheet struct {
 	Entries   []AttendanceEntry `json:"entries"`
 }
 
-// AttendanceRecord is one player's season, rather than one player's Saturday: the same
-// register counted down instead of across.
-type AttendanceRecord struct {
-	PersonID     uuid.UUID `json:"personId"`
-	DisplayName  string    `json:"displayName"`
-	JerseyNumber *int32    `json:"jerseyNumber"`
-	Present      int64     `json:"present"`
-	Absent       int64     `json:"absent"`
-	Late         int64     `json:"late"`
-	Excused      int64     `json:"excused"`
+// AttendanceTally is what "turning up" adds up to over more than one fixture. Embedded
+// rather than repeated, so a squad's line, an athlete's line and their total all mean the
+// same thing by the same arithmetic -- particularly the rate, whose definition is a
+// judgement rather than a sum and would otherwise be a comment in three places.
+type AttendanceTally struct {
+	Present int64 `json:"present"`
+	Absent  int64 `json:"absent"`
+	Late    int64 `json:"late"`
+	Excused int64 `json:"excused"`
 	// NotRecorded is the honest half of every number above it. A squad nobody registered
 	// and a squad that all turned up look identical without it, and a coach reading a
 	// column of zeroes deserves to know which of the two they are looking at.
@@ -359,17 +358,71 @@ type AttendanceRecord struct {
 	Rate *float64 `json:"rate"`
 }
 
+// tally builds one from the counts, which is the only place the rate is decided.
+func tally(present, absent, late, excused, notRecorded, noShows int64) AttendanceTally {
+	t := AttendanceTally{
+		Present: present, Absent: absent, Late: late, Excused: excused,
+		NotRecorded: notRecorded, NoShows: noShows,
+	}
+	if known := present + late + absent; known > 0 {
+		rate := float64(present+late) / float64(known)
+		t.Rate = &rate
+	}
+	return t
+}
+
+// add sums two tallies. The counts add; the rate is recomputed from the totals, because
+// an average of two rates is not the rate of the two seasons combined -- a player with
+// one appearance in six and nineteen in twenty is not turning up half the time.
+func (t AttendanceTally) add(o AttendanceTally) AttendanceTally {
+	return tally(t.Present+o.Present, t.Absent+o.Absent, t.Late+o.Late,
+		t.Excused+o.Excused, t.NotRecorded+o.NotRecorded, t.NoShows+o.NoShows)
+}
+
+// AttendanceRecord is one player's season, rather than one player's Saturday: the same
+// register counted down instead of across.
+type AttendanceRecord struct {
+	PersonID     uuid.UUID `json:"personId"`
+	DisplayName  string    `json:"displayName"`
+	JerseyNumber *int32    `json:"jerseyNumber"`
+	AttendanceTally
+}
+
 func attendanceRecordDTO(r store.AggregateAttendanceForTeamRow) AttendanceRecord {
-	rec := AttendanceRecord{
+	return AttendanceRecord{
 		PersonID: r.PersonID, DisplayName: r.DisplayName, JerseyNumber: r.JerseyNumber,
-		Present: r.Present, Absent: r.Absent, Late: r.Late, Excused: r.Excused,
-		NotRecorded: r.NotRecorded, NoShows: r.NoShows,
+		AttendanceTally: tally(r.Present, r.Absent, r.Late, r.Excused, r.NotRecorded, r.NoShows),
 	}
-	if known := r.Present + r.Late + r.Absent; known > 0 {
-		rate := float64(r.Present+r.Late) / float64(known)
-		rec.Rate = &rate
+}
+
+// TeamAttendanceLine is one team's slice of an athlete's record.
+type TeamAttendanceLine struct {
+	TeamID   uuid.UUID `json:"teamId"`
+	TeamName string    `json:"teamName"`
+	Events   int64     `json:"events"`
+	AttendanceTally
+}
+
+func personTeamLineDTO(r store.AggregateAttendanceForPersonRow) TeamAttendanceLine {
+	return TeamAttendanceLine{
+		TeamID: r.TeamID, TeamName: r.TeamName, Events: r.Events,
+		AttendanceTally: tally(r.Present, r.Absent, r.Late, r.Excused, r.NotRecorded, r.NoShows),
 	}
-	return rec
+}
+
+// PersonAttendance is one athlete's record across the teams they have played for.
+//
+// Split by team rather than flattened, because the split is the information: an athlete
+// who plays up an age group has two records, and a player who moved clubs mid-season has
+// one that ended and one that started. Overall is the same numbers summed, so a client
+// that only wants the headline does not have to add them up itself and get the rate wrong.
+type PersonAttendance struct {
+	PersonID uuid.UUID            `json:"personId"`
+	Events   int64                `json:"events"`
+	From     *string              `json:"from"`
+	To       *string              `json:"to"`
+	Overall  AttendanceTally      `json:"overall"`
+	Teams    []TeamAttendanceLine `json:"teams"`
 }
 
 // TeamAttendance is the squad's record over a window.

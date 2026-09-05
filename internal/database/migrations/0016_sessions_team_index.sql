@@ -1,0 +1,11 @@
+-- Find a team's training without reading every session in the database.
+--
+-- sessions has carried team_id since 0001 and nothing has ever looked one up by it: the
+-- list endpoint filters by organization, and everything else arrives with a session id in
+-- hand. The attendance aggregates are the first readers that start from a team -- one
+-- squad's record over a season, and one athlete's across the teams they have played for --
+-- and both scan sessions by team_id on every call.
+--
+-- games already has idx_games_team from 0001. This is the same index for the other half
+-- of what a squad turns up to.
+CREATE INDEX idx_sessions_team ON sessions (team_id);

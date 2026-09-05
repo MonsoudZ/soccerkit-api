@@ -12,6 +12,154 @@ import (
 	"github.com/jackc/pgx/v5/pgtype"
 )
 
+const aggregateAttendanceForPerson = `-- name: AggregateAttendanceForPerson :many
+WITH memberships AS (
+    SELECT r.team_id, r.joined_on, r.left_on
+    FROM roster_memberships r
+    WHERE r.person_id = $2
+), events AS (
+    SELECT g.id AS event_id, 'game'::text AS kind, g.team_id, g.kickoff_at AS starts_at
+    FROM games g
+    WHERE g.team_id IN (SELECT team_id FROM memberships) AND g.status <> 'cancelled'
+    UNION ALL
+    SELECT s.id AS event_id, 'session'::text AS kind, s.team_id, s.scheduled_at AS starts_at
+    FROM sessions s
+    WHERE s.team_id IN (SELECT team_id FROM memberships) AND s.deleted = false
+), theirs AS (
+    SELECT e.event_id, e.kind, e.team_id FROM events e
+    WHERE ($3::bool OR e.kind <> 'game')
+      AND ($4::bool OR e.kind <> 'session')
+      AND ($5::timestamptz IS NULL OR e.starts_at >= $5)
+      AND ($6::timestamptz IS NULL OR e.starts_at <= $6)
+      AND ($7::uuid IS NULL OR e.team_id = $7)
+      AND (
+        EXISTS (
+          SELECT 1 FROM memberships m
+          WHERE m.team_id = e.team_id
+            AND (e.starts_at IS NULL
+              OR (e.starts_at::date >= m.joined_on
+                  AND (m.left_on IS NULL OR e.starts_at::date <= m.left_on)))
+        )
+        -- Or they were actually marked at it. The roster window says which events an
+        -- athlete was *expected* at; a line with an answer or a status on it is evidence
+        -- they were involved, and evidence outranks the window. Without this, a coach who
+        -- rosters a player today and then back-fills last month's register writes a fact
+        -- that never appears in that player's own record -- the roster row starts today,
+        -- so every event behind it falls outside the window and silently vanishes.
+        --
+        -- A blank line does not count: EnsureAttendance opens one before either setter
+        -- runs, so a row on its own is not evidence of anything.
+        OR EXISTS (
+          SELECT 1 FROM attendances a2
+          WHERE a2.person_id = $2
+            AND ((e.kind = 'game' AND a2.game_id = e.event_id)
+              OR (e.kind = 'session' AND a2.session_id = e.event_id))
+            AND (a2.rsvp IS NOT NULL OR a2.status IS NOT NULL)
+        )
+      )
+)
+SELECT t.id AS team_id, t.name AS team_name,
+       count(*) AS events,
+       count(*) FILTER (WHERE a.status = 'present') AS present,
+       count(*) FILTER (WHERE a.status = 'absent')  AS absent,
+       count(*) FILTER (WHERE a.status = 'late')    AS late,
+       count(*) FILTER (WHERE a.status = 'excused') AS excused,
+       count(*) FILTER (WHERE a.status IS NULL)     AS not_recorded,
+       count(*) FILTER (WHERE a.rsvp = 'going' AND a.status = 'absent') AS no_shows
+FROM theirs ev
+JOIN teams t ON t.id = ev.team_id
+            AND t.deleted = false
+            AND t.organization_id = $1
+LEFT JOIN attendances a
+       ON a.person_id = $2
+      AND ((ev.kind = 'game' AND a.game_id = ev.event_id)
+        OR (ev.kind = 'session' AND a.session_id = ev.event_id))
+GROUP BY t.id, t.name
+ORDER BY t.name ASC
+`
+
+type AggregateAttendanceForPersonParams struct {
+	OrganizationID  uuid.UUID          `json:"organization_id"`
+	PersonID        uuid.UUID          `json:"person_id"`
+	IncludeGames    bool               `json:"include_games"`
+	IncludeSessions bool               `json:"include_sessions"`
+	StartingFrom    pgtype.Timestamptz `json:"starting_from"`
+	StartingTo      pgtype.Timestamptz `json:"starting_to"`
+	OnlyTeamID      *uuid.UUID         `json:"only_team_id"`
+}
+
+type AggregateAttendanceForPersonRow struct {
+	TeamID      uuid.UUID `json:"team_id"`
+	TeamName    string    `json:"team_name"`
+	Events      int64     `json:"events"`
+	Present     int64     `json:"present"`
+	Absent      int64     `json:"absent"`
+	Late        int64     `json:"late"`
+	Excused     int64     `json:"excused"`
+	NotRecorded int64     `json:"not_recorded"`
+	NoShows     int64     `json:"no_shows"`
+}
+
+// One athlete's record, across the teams they have played for, a line per team.
+//
+// The team aggregate asks "how is this squad turning up" and can take the current roster
+// as its universe. This asks the mirrored question about a person, and the current roster
+// is the wrong answer to it: an athlete who moved from U12 to U14 in January did not stop
+// having attended U12's autumn, and a player who left the club still has the season they
+// played. So the universe is every event of every team they were rostered on *while it
+// happened* -- which is what roster_memberships being time-bounded is for, and the first
+// query in this service to actually read those bounds rather than just the open ones.
+//
+// The overlap is inclusive at both ends: an event on the day someone joined, or on the day
+// they left, is one they were there for. Compared as dates rather than instants, which
+// means UTC -- the same limitation the attendance window carries, and it can only move an
+// event across a boundary on the exact day of a transfer.
+//
+// An event with no date is counted for any membership on that team. It cannot be placed in
+// a window, and dropping it would hide a fixture the athlete was actually marked at; the
+// EXISTS is what keeps a rejoined player from counting it twice.
+//
+// Scoped to one organization. A person may hold roster spots in two clubs, and the caller
+// was cleared to see them in exactly one -- returning the other club's teams here would be
+// a disclosure that personVisibleTo never authorized.
+func (q *Queries) AggregateAttendanceForPerson(ctx context.Context, arg AggregateAttendanceForPersonParams) ([]AggregateAttendanceForPersonRow, error) {
+	rows, err := q.db.Query(ctx, aggregateAttendanceForPerson,
+		arg.OrganizationID,
+		arg.PersonID,
+		arg.IncludeGames,
+		arg.IncludeSessions,
+		arg.StartingFrom,
+		arg.StartingTo,
+		arg.OnlyTeamID,
+	)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []AggregateAttendanceForPersonRow
+	for rows.Next() {
+		var i AggregateAttendanceForPersonRow
+		if err := rows.Scan(
+			&i.TeamID,
+			&i.TeamName,
+			&i.Events,
+			&i.Present,
+			&i.Absent,
+			&i.Late,
+			&i.Excused,
+			&i.NotRecorded,
+			&i.NoShows,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
 const aggregateAttendanceForTeam = `-- name: AggregateAttendanceForTeam :many
 WITH events AS (
     SELECT g.id AS event_id, 'game'::text AS kind, g.kickoff_at AS starts_at

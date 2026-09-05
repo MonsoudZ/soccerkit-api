@@ -134,6 +134,9 @@ func (s *Server) Router() http.Handler {
 				r.Post("/{id}/guardians", s.handleAddGuardian)
 				r.Delete("/{id}/guardians/{personId}", s.handleRemoveGuardian)
 				r.Get("/{id}/aggregate", s.handlePersonAggregate)
+				// The same register from the athlete's side: their record across the
+				// teams they were rostered on while each event happened.
+				r.Get("/{id}/attendance", s.handlePersonAttendance)
 			})
 
 			// Teams & time-bounded roster

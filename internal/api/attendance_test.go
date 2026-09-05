@@ -1,6 +1,7 @@
 package api_test
 
 import (
+	"context"
 	"fmt"
 	"net/http"
 	"strings"
@@ -954,5 +955,232 @@ func TestTheSeasonIsScopedLikeTheSheet(t *testing.T) {
 	stranger, _ := signInCoach(t, "seasonscope-stranger@e.com")
 	if r := do(t, http.MethodGet, "/api/v1/teams/"+c.teamID+"/attendance", stranger, nil); r.status != http.StatusForbidden {
 		t.Errorf("cross-org aggregate should be 403, got %d %s", r.status, r.raw)
+	}
+}
+
+// TestAnAthletesRecordFollowsThemBetweenTeams is the reason this is not just the team
+// aggregate filtered by person: an athlete who moved up in January did not stop having
+// attended the autumn, and their current roster is the wrong universe for their record.
+func TestAnAthletesRecordFollowsThemBetweenTeams(t *testing.T) {
+	resetDB(t)
+	coach, _ := signInCoach(t, "career-coach@e.com")
+	young := do(t, http.MethodPost, "/api/v1/teams", coach, map[string]any{"name": "U12"})
+	older := do(t, http.MethodPost, "/api/v1/teams", coach, map[string]any{"name": "U14"})
+	youngID, olderID := young.body["id"].(string), older.body["id"].(string)
+	athlete := createAthlete(t, coach, "Moved Up")
+
+	// Autumn on U12, then a transfer, then spring on U14.
+	if r := do(t, http.MethodPost, "/api/v1/teams/"+youngID+"/roster", coach,
+		map[string]any{"personId": athlete, "joinedOn": "2025-09-01"}); r.status != http.StatusCreated {
+		t.Fatalf("roster U12: %d %s", r.status, r.raw)
+	}
+	autumn := do(t, http.MethodPost, "/api/v1/sessions", coach, map[string]any{
+		"title": "Autumn", "teamId": youngID, "scheduledAt": "2025-10-07T18:00:00Z",
+		"blocks": []map[string]any{},
+	})
+	if autumn.status != http.StatusCreated {
+		t.Fatalf("autumn session: %d %s", autumn.status, autumn.raw)
+	}
+	if r := do(t, http.MethodPatch, "/api/v1/sessions/"+autumn.body["id"].(string)+
+		"/attendance/"+athlete, coach, map[string]any{"status": "present"}); r.status != http.StatusOK {
+		t.Fatalf("mark autumn: %d %s", r.status, r.raw)
+	}
+	// They leave U12 at the end of December and join U14.
+	if _, err := testPool.Exec(context.Background(),
+		`UPDATE roster_memberships SET left_on = '2025-12-31', status = 'inactive'
+		 WHERE person_id = $1 AND team_id = $2`, athlete, youngID); err != nil {
+		t.Fatalf("end membership: %v", err)
+	}
+	if r := do(t, http.MethodPost, "/api/v1/teams/"+olderID+"/roster", coach,
+		map[string]any{"personId": athlete, "joinedOn": "2026-01-01"}); r.status != http.StatusCreated {
+		t.Fatalf("roster U14: %d %s", r.status, r.raw)
+	}
+	spring := do(t, http.MethodPost, "/api/v1/sessions", coach, map[string]any{
+		"title": "Spring", "teamId": olderID, "scheduledAt": "2026-02-03T18:00:00Z",
+		"blocks": []map[string]any{},
+	})
+	if r := do(t, http.MethodPatch, "/api/v1/sessions/"+spring.body["id"].(string)+
+		"/attendance/"+athlete, coach, map[string]any{"status": "absent"}); r.status != http.StatusOK {
+		t.Fatalf("mark spring: %d %s", r.status, r.raw)
+	}
+
+	// A U12 session held after they left is not theirs to have missed.
+	after := do(t, http.MethodPost, "/api/v1/sessions", coach, map[string]any{
+		"title": "After they left", "teamId": youngID, "scheduledAt": "2026-02-10T18:00:00Z",
+		"blocks": []map[string]any{},
+	})
+	if after.status != http.StatusCreated {
+		t.Fatalf("later U12 session: %d %s", after.status, after.raw)
+	}
+
+	rec := do(t, http.MethodGet, "/api/v1/persons/"+athlete+"/attendance", coach, nil)
+	if rec.status != http.StatusOK {
+		t.Fatalf("person attendance: %d %s", rec.status, rec.raw)
+	}
+	if events, _ := rec.body["events"].(float64); events != 2 {
+		t.Errorf("their record is the two events they were rostered for, got %v (%s)", events, rec.raw)
+	}
+	teams := rec.body["teams"].([]any)
+	if len(teams) != 2 {
+		t.Fatalf("expected a line per team, got %s", rec.raw)
+	}
+	byName := map[string]map[string]any{}
+	for _, row := range teams {
+		m := row.(map[string]any)
+		byName[m["teamName"].(string)] = m
+	}
+	if got := byName["U12"]; got["present"].(float64) != 1 || got["events"].(float64) != 1 {
+		t.Errorf("the autumn on U12 should survive the move: %v", got)
+	}
+	if got := byName["U14"]; got["absent"].(float64) != 1 {
+		t.Errorf("the spring on U14 is theirs too: %v", got)
+	}
+	// One turned up of two known, across both teams — and the overall rate is computed
+	// from the totals, not averaged from the two lines (which would also be 0.5 here only
+	// by coincidence of equal sizes, so the sizes are checked above).
+	overall := rec.body["overall"].(map[string]any)
+	if overall["present"].(float64) != 1 || overall["absent"].(float64) != 1 {
+		t.Errorf("overall should sum the teams: %v", overall)
+	}
+	if overall["rate"].(float64) != 0.5 {
+		t.Errorf("overall rate = %v, want 0.5", overall["rate"])
+	}
+
+	// Narrowed to one team, it is that season alone.
+	one := do(t, http.MethodGet, "/api/v1/persons/"+athlete+"/attendance?teamId="+youngID, coach, nil)
+	if one.status != http.StatusOK {
+		t.Fatalf("narrowed: %d %s", one.status, one.raw)
+	}
+	if len(one.body["teams"].([]any)) != 1 || one.body["events"].(float64) != 1 {
+		t.Errorf("teamId should narrow to that team's events: %s", one.raw)
+	}
+}
+
+// TestAnAthletesRecordIsScopedLikeThePerson — the same gate the rest of /persons takes,
+// which is what keeps one family out of another's.
+func TestAnAthletesRecordIsScopedLikeThePerson(t *testing.T) {
+	resetDB(t)
+	c := newClub(t, "recscope")
+	if r := do(t, http.MethodPost, "/api/v1/sessions", c.coach, map[string]any{
+		"title": "Tuesday", "teamId": c.teamID, "scheduledAt": soon(),
+		"blocks": []map[string]any{},
+	}); r.status != http.StatusCreated {
+		t.Fatalf("create session: %d %s", r.status, r.raw)
+	}
+
+	mine := doIn(t, http.MethodGet, "/api/v1/persons/"+c.childID+"/attendance", c.parent, c.orgID, nil)
+	if mine.status != http.StatusOK {
+		t.Fatalf("a parent must see their own child's record: %d %s", mine.status, mine.raw)
+	}
+	if mine.body["events"].(float64) != 1 {
+		t.Errorf("expected the one session, got %s", mine.raw)
+	}
+	// Another family's child is 404, not 403: these ids are not enumerable and answering
+	// "forbidden" would confirm one exists.
+	if r := doIn(t, http.MethodGet, "/api/v1/persons/"+c.otherID+"/attendance", c.parent,
+		c.orgID, nil); r.status != http.StatusNotFound {
+		t.Errorf("another family's child should be 404, got %d %s", r.status, r.raw)
+	}
+	stranger, _ := signInCoach(t, "recscope-stranger@e.com")
+	if r := do(t, http.MethodGet, "/api/v1/persons/"+c.childID+"/attendance", stranger, nil); r.status != http.StatusNotFound {
+		t.Errorf("a stranger should be 404, got %d %s", r.status, r.raw)
+	}
+}
+
+// TestAnAthletesRecordStopsAtTheOrganization — a person may be rostered in two clubs, and
+// the caller was cleared to see them in exactly one.
+func TestAnAthletesRecordStopsAtTheOrganization(t *testing.T) {
+	resetDB(t)
+	// One club, with a coach who can see the athlete.
+	here, _ := signInCoach(t, "twoclub-here@e.com")
+	hereOrg := orgOf(t, here)
+	athlete := createAthlete(t, here, "Two Clubs")
+	hereTeam := do(t, http.MethodPost, "/api/v1/teams", here, map[string]any{"name": "Here U12"})
+	hereTeamID := hereTeam.body["id"].(string)
+	if r := do(t, http.MethodPost, "/api/v1/teams/"+hereTeamID+"/roster", here,
+		map[string]any{"personId": athlete}); r.status != http.StatusCreated {
+		t.Fatalf("roster here: %d %s", r.status, r.raw)
+	}
+	if r := do(t, http.MethodPost, "/api/v1/sessions", here, map[string]any{
+		"title": "Here", "teamId": hereTeamID, "scheduledAt": soon(),
+		"blocks": []map[string]any{},
+	}); r.status != http.StatusCreated {
+		t.Fatalf("session here: %d %s", r.status, r.raw)
+	}
+
+	// A second club rosters the same athlete and trains twice.
+	there, _ := signInCoach(t, "twoclub-there@e.com")
+	thereTeam := do(t, http.MethodPost, "/api/v1/teams", there, map[string]any{"name": "There U12"})
+	thereTeamID := thereTeam.body["id"].(string)
+	if _, err := testPool.Exec(context.Background(),
+		`INSERT INTO roster_memberships (person_id, team_id) VALUES ($1, $2)`,
+		athlete, thereTeamID); err != nil {
+		t.Fatalf("roster there: %v", err)
+	}
+	if r := do(t, http.MethodPost, "/api/v1/sessions", there, map[string]any{
+		"title": "There", "teamId": thereTeamID, "scheduledAt": soon(),
+		"blocks": []map[string]any{},
+	}); r.status != http.StatusCreated {
+		t.Fatalf("session there: %d %s", r.status, r.raw)
+	}
+
+	rec := doIn(t, http.MethodGet, "/api/v1/persons/"+athlete+"/attendance", here, hereOrg, nil)
+	if rec.status != http.StatusOK {
+		t.Fatalf("person attendance: %d %s", rec.status, rec.raw)
+	}
+	teams := rec.body["teams"].([]any)
+	if len(teams) != 1 || teams[0].(map[string]any)["teamName"] != "Here U12" {
+		t.Errorf("the other club's team must not appear: %s", rec.raw)
+	}
+	if rec.body["events"].(float64) != 1 {
+		t.Errorf("only this organization's events count: %s", rec.raw)
+	}
+}
+
+// TestARecordedFactOutranksTheRosterWindow — the roster window says which events an
+// athlete was expected at, but a coach who rosters a player today and back-fills last
+// month's register has written a fact about them, and a record that hides it is wrong.
+func TestARecordedFactOutranksTheRosterWindow(t *testing.T) {
+	resetDB(t)
+	coach, _ := signInCoach(t, "backfill@e.com")
+	team := do(t, http.MethodPost, "/api/v1/teams", coach, map[string]any{"name": "U12"})
+	teamID := team.body["id"].(string)
+	athlete := createAthlete(t, coach, "Late Signing")
+
+	// A session held well before anyone put them on the roster.
+	past := do(t, http.MethodPost, "/api/v1/sessions", coach, map[string]any{
+		"title": "Before they joined", "teamId": teamID, "scheduledAt": "2025-01-06T18:00:00Z",
+		"blocks": []map[string]any{},
+	})
+	if past.status != http.StatusCreated {
+		t.Fatalf("create session: %d %s", past.status, past.raw)
+	}
+	// Rostered today, so the window starts today and the session is behind it.
+	if r := do(t, http.MethodPost, "/api/v1/teams/"+teamID+"/roster", coach,
+		map[string]any{"personId": athlete}); r.status != http.StatusCreated {
+		t.Fatalf("roster: %d %s", r.status, r.raw)
+	}
+
+	// Nothing recorded: the session is outside their window and not theirs.
+	before := do(t, http.MethodGet, "/api/v1/persons/"+athlete+"/attendance", coach, nil)
+	if before.status != http.StatusOK {
+		t.Fatalf("person attendance: %d %s", before.status, before.raw)
+	}
+	if events, _ := before.body["events"].(float64); events != 0 {
+		t.Errorf("an event before they joined is not theirs to have missed, got %v", events)
+	}
+
+	// The coach back-fills it. Now there is evidence, and evidence outranks the window.
+	if r := do(t, http.MethodPatch, "/api/v1/sessions/"+past.body["id"].(string)+
+		"/attendance/"+athlete, coach, map[string]any{"status": "present"}); r.status != http.StatusOK {
+		t.Fatalf("back-fill: %d %s", r.status, r.raw)
+	}
+	after := do(t, http.MethodGet, "/api/v1/persons/"+athlete+"/attendance", coach, nil)
+	if events, _ := after.body["events"].(float64); events != 1 {
+		t.Fatalf("a recorded fact must appear in their record, got %v (%s)", events, after.raw)
+	}
+	overall := after.body["overall"].(map[string]any)
+	if overall["present"].(float64) != 1 || overall["rate"].(float64) != 1 {
+		t.Errorf("the back-filled attendance should count: %v", overall)
 	}
 }

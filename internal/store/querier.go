@@ -17,6 +17,29 @@ type Querier interface {
 	// Idempotent: a coach already on a team stays on it, and the create path can call this
 	// without first asking.
 	AddTeamStaff(ctx context.Context, arg AddTeamStaffParams) error
+	// One athlete's record, across the teams they have played for, a line per team.
+	//
+	// The team aggregate asks "how is this squad turning up" and can take the current roster
+	// as its universe. This asks the mirrored question about a person, and the current roster
+	// is the wrong answer to it: an athlete who moved from U12 to U14 in January did not stop
+	// having attended U12's autumn, and a player who left the club still has the season they
+	// played. So the universe is every event of every team they were rostered on *while it
+	// happened* -- which is what roster_memberships being time-bounded is for, and the first
+	// query in this service to actually read those bounds rather than just the open ones.
+	//
+	// The overlap is inclusive at both ends: an event on the day someone joined, or on the day
+	// they left, is one they were there for. Compared as dates rather than instants, which
+	// means UTC -- the same limitation the attendance window carries, and it can only move an
+	// event across a boundary on the exact day of a transfer.
+	//
+	// An event with no date is counted for any membership on that team. It cannot be placed in
+	// a window, and dropping it would hide a fixture the athlete was actually marked at; the
+	// EXISTS is what keeps a rejoined player from counting it twice.
+	//
+	// Scoped to one organization. A person may hold roster spots in two clubs, and the caller
+	// was cleared to see them in exactly one -- returning the other club's teams here would be
+	// a disclosure that personVisibleTo never authorized.
+	AggregateAttendanceForPerson(ctx context.Context, arg AggregateAttendanceForPersonParams) ([]AggregateAttendanceForPersonRow, error)
 	// The register read down the season instead of across one fixture.
 	//
 	// A coach's real question is not "who is coming on Saturday" but "who keeps missing

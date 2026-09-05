@@ -700,6 +700,46 @@ paths:
                   roles: { type: array, items: { $ref: "#/components/schemas/Role" } }
         "404": { $ref: "#/components/responses/Error" }
         "409": { $ref: "#/components/responses/Error" }
+  /api/v1/persons/{id}/attendance:
+    get:
+      tags: [persons, attendance]
+      summary: One athlete's attendance record, across the teams they have played for
+      description: >
+        The register from the athlete's side, split by team because the split is the
+        information — playing up an age group is two records, and a mid-season move is one
+        that ended and one that started. The universe is every event of every team they
+        were rostered on *while it happened*, not their current teams: an athlete who moved
+        up in January did not stop having attended the autumn. Scoped by the same gate as
+        the rest of /persons, and to the organization the caller is acting in — a person
+        rostered in two clubs does not leak one to the other.
+      security: [{ bearerAuth: [] }]
+      parameters:
+        - { $ref: "#/components/parameters/Id" }
+        - { $ref: "#/components/parameters/OrgHeader" }
+        - in: query
+          name: from
+          description: Start of the window, inclusive, from the start of that day (UTC).
+          schema: { type: string, format: date }
+        - in: query
+          name: to
+          description: End of the window, inclusive, to the end of that day (UTC).
+          schema: { type: string, format: date }
+        - in: query
+          name: type
+          schema: { type: string, enum: [game, session] }
+        - in: query
+          name: teamId
+          description: Narrow to one team — a season rather than a career.
+          schema: { type: string, format: uuid }
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/PersonAttendance" }
+        "400": { $ref: "#/components/responses/Error" }
+        "404": { $ref: "#/components/responses/Error" }
+
   /api/v1/teams:
     get:
       tags: [teams]
@@ -1749,6 +1789,63 @@ components:
         teamId: { type: string, format: uuid, nullable: true }
         scheduledAt: { type: string, format: date-time, nullable: true }
         notes: { type: string, nullable: true }
+    AttendanceTally:
+      type: object
+      description: >-
+        What "turning up" adds up to over more than one fixture. The same shape wherever
+        attendance is counted, so a squad's line, an athlete's line and their total all
+        mean the same thing by the same arithmetic.
+      properties:
+        present: { type: integer }
+        absent: { type: integer }
+        late: { type: integer }
+        excused: { type: integer }
+        notRecorded:
+          type: integer
+          description: >-
+            The honest half of every number beside it. A squad nobody registered and a
+            squad that all turned up look identical without it.
+        noShows:
+          type: integer
+          description: >-
+            Said going and did not turn up. No per-fixture sheet can show this — it only
+            exists once both halves of a line are read together over a season.
+        rate:
+          type: number
+          format: double
+          nullable: true
+          description: >-
+            present+late over present+late+absent — turned up, of the times we know
+            whether they turned up. Excused is in neither half: an approved absence is not
+            a player letting the team down. Null when nothing was recorded either way,
+            because a rate over no observations is unknown rather than zero.
+    TeamAttendanceLine:
+      type: object
+      description: One team's slice of an athlete's record.
+      allOf:
+        - $ref: "#/components/schemas/AttendanceTally"
+        - type: object
+          properties:
+            teamId: { type: string, format: uuid }
+            teamName: { type: string }
+            events: { type: integer }
+    PersonAttendance:
+      type: object
+      properties:
+        personId: { type: string, format: uuid }
+        events: { type: integer }
+        from: { type: string, format: date, nullable: true }
+        to: { type: string, format: date, nullable: true }
+        overall:
+          allOf:
+            - $ref: "#/components/schemas/AttendanceTally"
+          description: >-
+            The same numbers summed. The counts add; the rate is recomputed from the
+            totals, because an average of two rates is not the rate of two seasons
+            combined.
+        teams:
+          type: array
+          items: { $ref: "#/components/schemas/TeamAttendanceLine" }
     AttendanceRecord:
       type: object
       description: One player's season — the same register counted down instead of across.
