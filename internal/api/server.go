@@ -150,6 +150,9 @@ func (s *Server) Router() http.Handler {
 				r.Post("/{id}/roster", s.handleAddRoster)
 				r.Delete("/{id}/roster/{personId}", s.handleEndRoster)
 				// Game day
+				// The register read down the season rather than across one fixture:
+				// who keeps missing training, which no per-event sheet can answer.
+				r.Get("/{id}/attendance", s.handleTeamAttendance)
 				r.Get("/{id}/games", s.handleListGames)
 				r.Post("/{id}/games", s.handleCreateGame)
 			})

@@ -12,6 +12,121 @@ import (
 	"github.com/jackc/pgx/v5/pgtype"
 )
 
+const aggregateAttendanceForTeam = `-- name: AggregateAttendanceForTeam :many
+WITH events AS (
+    SELECT g.id AS event_id, 'game'::text AS kind, g.kickoff_at AS starts_at
+    FROM games g
+    WHERE g.team_id = $1 AND g.status <> 'cancelled'
+    UNION ALL
+    SELECT s.id AS event_id, 'session'::text AS kind, s.scheduled_at AS starts_at
+    FROM sessions s
+    WHERE s.team_id = $1 AND s.deleted = false
+), scoped AS (
+    SELECT event_id, kind, starts_at FROM events
+    WHERE ($2::bool OR kind <> 'game')
+      AND ($3::bool OR kind <> 'session')
+      AND ($4::timestamptz IS NULL OR starts_at >= $4)
+      AND ($5::timestamptz IS NULL OR starts_at <= $5)
+)
+SELECT p.id AS person_id, p.display_name, r.jersey_number,
+       count(*) AS events,
+       count(*) FILTER (WHERE a.status = 'present') AS present,
+       count(*) FILTER (WHERE a.status = 'absent')  AS absent,
+       count(*) FILTER (WHERE a.status = 'late')    AS late,
+       count(*) FILTER (WHERE a.status = 'excused') AS excused,
+       count(*) FILTER (WHERE a.status IS NULL)     AS not_recorded,
+       -- Said they were coming and did not turn up. The single most actionable number
+       -- here after the rate, and one no per-fixture sheet can show: it only exists once
+       -- the two halves of a line are read together across a season.
+       count(*) FILTER (WHERE a.rsvp = 'going' AND a.status = 'absent') AS no_shows
+FROM roster_memberships r
+JOIN persons p ON p.id = r.person_id AND p.deleted = false
+CROSS JOIN scoped e
+LEFT JOIN attendances a
+       ON a.person_id = r.person_id
+      AND ((e.kind = 'game' AND a.game_id = e.event_id)
+        OR (e.kind = 'session' AND a.session_id = e.event_id))
+WHERE r.team_id = $1 AND r.left_on IS NULL
+GROUP BY p.id, p.display_name, r.jersey_number
+ORDER BY r.jersey_number NULLS LAST, p.display_name ASC
+`
+
+type AggregateAttendanceForTeamParams struct {
+	TeamID          uuid.UUID          `json:"team_id"`
+	IncludeGames    bool               `json:"include_games"`
+	IncludeSessions bool               `json:"include_sessions"`
+	StartingFrom    pgtype.Timestamptz `json:"starting_from"`
+	StartingTo      pgtype.Timestamptz `json:"starting_to"`
+}
+
+type AggregateAttendanceForTeamRow struct {
+	PersonID     uuid.UUID `json:"person_id"`
+	DisplayName  string    `json:"display_name"`
+	JerseyNumber *int32    `json:"jersey_number"`
+	Events       int64     `json:"events"`
+	Present      int64     `json:"present"`
+	Absent       int64     `json:"absent"`
+	Late         int64     `json:"late"`
+	Excused      int64     `json:"excused"`
+	NotRecorded  int64     `json:"not_recorded"`
+	NoShows      int64     `json:"no_shows"`
+}
+
+// The register read down the season instead of across one fixture.
+//
+// A coach's real question is not "who is coming on Saturday" but "who keeps missing
+// training", and until now the only way to ask it was to open every sheet in turn and
+// count by hand. This is that count, one line per player.
+//
+// The universe is the active squad times the team's events in the window, not the
+// attendance rows: a player who was never marked at all has to appear as somebody who
+// missed six sessions, and driving this off `attendances` would show them as having a
+// clean record because silence leaves no row. That is what `not_recorded` separates out —
+// a squad nobody registered and a squad that turned up are the same numbers otherwise.
+//
+// A cancelled game drops out. Nobody attends a match that was called off, and counting it
+// as an absence would punish a squad for a coach's decision.
+//
+// Rows with no date are in the window only when no window was asked for: `starts_at >=
+// NULL` is NULL and so fails the filter, which is the wanted answer — a fixture with no
+// time cannot be placed in March.
+func (q *Queries) AggregateAttendanceForTeam(ctx context.Context, arg AggregateAttendanceForTeamParams) ([]AggregateAttendanceForTeamRow, error) {
+	rows, err := q.db.Query(ctx, aggregateAttendanceForTeam,
+		arg.TeamID,
+		arg.IncludeGames,
+		arg.IncludeSessions,
+		arg.StartingFrom,
+		arg.StartingTo,
+	)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []AggregateAttendanceForTeamRow
+	for rows.Next() {
+		var i AggregateAttendanceForTeamRow
+		if err := rows.Scan(
+			&i.PersonID,
+			&i.DisplayName,
+			&i.JerseyNumber,
+			&i.Events,
+			&i.Present,
+			&i.Absent,
+			&i.Late,
+			&i.Excused,
+			&i.NotRecorded,
+			&i.NoShows,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
 const countAnsweredAttendanceForSession = `-- name: CountAnsweredAttendanceForSession :one
 SELECT count(*) FROM attendances
 WHERE session_id = $1 AND (rsvp IS NOT NULL OR status IS NOT NULL)

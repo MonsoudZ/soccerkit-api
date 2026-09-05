@@ -4,8 +4,10 @@ import (
 	"context"
 	"log"
 	"net/http"
+	"time"
 
 	"github.com/google/uuid"
+	"github.com/jackc/pgx/v5/pgtype"
 
 	"github.com/monsoudz/soccerkit-api/internal/store"
 )
@@ -136,6 +138,135 @@ func (s *Server) attendanceSheet(resolve eventResolver) http.HandlerFunc {
 			EventType: ev.kind, EventID: ev.eventID(), TeamID: ev.teamID,
 			Counts: countAttendance(rows), Entries: entries,
 		})
+	}
+}
+
+// --- the season, not the Saturday -------------------------------------------
+
+// handleTeamAttendance answers the question a coach actually has.
+//
+// The per-event sheet answers "who is coming on Saturday". Nobody asks that twice; what
+// they ask all season is "who keeps missing training", and until now the only way to find
+// out was to open every sheet in turn and count by hand.
+//
+// Scoped exactly as the sheet is — staff see the squad, a family sees itself — because a
+// column of absences beside a child's name is a more pointed disclosure than a single
+// fixture's line, not a lesser one.
+func (s *Server) handleTeamAttendance(w http.ResponseWriter, r *http.Request) {
+	oc, err := s.resolveOrg(r)
+	if err != nil {
+		writeError(w, err)
+		return
+	}
+	team, err := s.teamInOrg(r, oc)
+	if err != nil {
+		writeError(w, err)
+		return
+	}
+	from, to, err := attendanceWindow(r)
+	if err != nil {
+		writeError(w, err)
+		return
+	}
+	games, sessions, err := attendanceKinds(r)
+	if err != nil {
+		writeError(w, err)
+		return
+	}
+
+	rows, err := s.store.AggregateAttendanceForTeam(r.Context(), store.AggregateAttendanceForTeamParams{
+		TeamID: team.ID, IncludeGames: games, IncludeSessions: sessions,
+		StartingFrom: from, StartingTo: to,
+	})
+	if err != nil {
+		writeError(w, err)
+		return
+	}
+
+	// Every row counted the same events, so the window's size is any row's total. With no
+	// rows there is nothing to read it off — an empty squad, or a window with no fixtures
+	// in it, and both are honestly reported as zero.
+	var events int64
+	if len(rows) > 0 {
+		events = rows[0].Events
+	}
+
+	records := make([]AttendanceRecord, 0, len(rows))
+	if oc.isStaff() {
+		for _, row := range rows {
+			records = append(records, attendanceRecordDTO(row))
+		}
+	} else {
+		mine, merr := s.ownPeople(r.Context(), oc)
+		if merr != nil {
+			writeError(w, merr)
+			return
+		}
+		for _, row := range rows {
+			if mine[row.PersonID] {
+				records = append(records, attendanceRecordDTO(row))
+			}
+		}
+		if len(records) == 0 {
+			writeError(w, errForbidden("you are not connected to that team"))
+			return
+		}
+	}
+	writeJSON(w, http.StatusOK, TeamAttendance{
+		TeamID: team.ID, Events: events,
+		From: queryStrPtr(r, "from"), To: queryStrPtr(r, "to"), Records: records,
+	})
+}
+
+// attendanceWindow reads the optional from/to bounds.
+//
+// Days, not instants, because a coach thinks in dates: `from` opens at the start of its
+// day and `to` closes at the end of its own, so a single-day window is a day rather than
+// an empty instant. Both are read as UTC, which is the same limitation the notifications
+// have and for the same reason — nothing in the schema says what timezone a club keeps,
+// so a club far enough east will see a late fixture fall on the neighbouring day. Worth
+// naming here rather than discovering from a total that is one match short.
+func attendanceWindow(r *http.Request) (from, to pgtype.Timestamptz, err error) {
+	parse := func(key string, endOfDay bool) (pgtype.Timestamptz, error) {
+		raw := r.URL.Query().Get(key)
+		if raw == "" {
+			return nullTimestamptz(), nil
+		}
+		day, perr := time.Parse("2006-01-02", raw)
+		if perr != nil {
+			return nullTimestamptz(), errValidation(key + " must be a YYYY-MM-DD date")
+		}
+		if endOfDay {
+			day = day.Add(24*time.Hour - time.Nanosecond)
+		}
+		return timestamptz(day), nil
+	}
+	if from, err = parse("from", false); err != nil {
+		return
+	}
+	to, err = parse("to", true)
+	if err != nil {
+		return
+	}
+	if from.Valid && to.Valid && to.Time.Before(from.Time) {
+		return from, to, errValidation("to must not be earlier than from")
+	}
+	return from, to, nil
+}
+
+// attendanceKinds reads the optional `type` filter. Absent means both, because "how is
+// this squad turning up" is a question about everything they are expected at; the filter
+// exists because the sharper question — who keeps missing *training* — is about one kind.
+func attendanceKinds(r *http.Request) (games, sessions bool, err error) {
+	switch r.URL.Query().Get("type") {
+	case "":
+		return true, true, nil
+	case "game":
+		return true, false, nil
+	case "session":
+		return false, true, nil
+	default:
+		return false, false, errValidation("type must be game or session")
 	}
 }
 

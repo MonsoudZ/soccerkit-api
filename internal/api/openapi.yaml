@@ -1078,6 +1078,46 @@ paths:
       responses:
         "200": { $ref: "#/components/responses/Ok" }
 
+  /api/v1/teams/{id}/attendance:
+    get:
+      tags: [attendance]
+      summary: The squad's attendance record over a window — who keeps missing
+      description: >
+        The register counted down the season instead of across one fixture. One line per
+        rostered player over the team's games and training in the window, with the counts,
+        the no-shows (said going, did not turn up), and a rate. Scoped like the per-event
+        sheet: staff see the squad, a player sees themselves, a parent their children —
+        a column of absences beside a child's name is a more pointed disclosure than one
+        fixture's line, not a lesser one. Cancelled games are excluded; nobody attends a
+        match that was called off. Dates are read as UTC, so a club far enough east will
+        see a late fixture fall on the neighbouring day.
+      security: [{ bearerAuth: [] }]
+      parameters:
+        - { $ref: "#/components/parameters/Id" }
+        - in: query
+          name: from
+          description: Start of the window, inclusive, from the start of that day (UTC).
+          schema: { type: string, format: date }
+        - in: query
+          name: to
+          description: End of the window, inclusive, to the end of that day (UTC).
+          schema: { type: string, format: date }
+        - in: query
+          name: type
+          description: >
+            Limit to one kind of event. Omit for both — "who keeps missing training" is
+            the sharper question and the reason this filter exists.
+          schema: { type: string, enum: [game, session] }
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/TeamAttendance" }
+        "400": { $ref: "#/components/responses/Error" }
+        "403": { $ref: "#/components/responses/Error" }
+        "404": { $ref: "#/components/responses/Error" }
+
   /api/v1/teams/{id}/games:
     get:
       tags: [games]
@@ -1709,6 +1749,50 @@ components:
         teamId: { type: string, format: uuid, nullable: true }
         scheduledAt: { type: string, format: date-time, nullable: true }
         notes: { type: string, nullable: true }
+    AttendanceRecord:
+      type: object
+      description: One player's season — the same register counted down instead of across.
+      properties:
+        personId: { type: string, format: uuid }
+        displayName: { type: string }
+        jerseyNumber: { type: integer, nullable: true }
+        present: { type: integer }
+        absent: { type: integer }
+        late: { type: integer }
+        excused: { type: integer }
+        notRecorded:
+          type: integer
+          description: >-
+            The honest half of every number beside it. A squad nobody registered and a
+            squad that all turned up look identical without it.
+        noShows:
+          type: integer
+          description: >-
+            Said going and did not turn up. No per-fixture sheet can show this — it only
+            exists once both halves of a line are read together over a season.
+        rate:
+          type: number
+          format: double
+          nullable: true
+          description: >-
+            present+late over present+late+absent — turned up, of the times we know
+            whether they turned up. Excused is in neither half: an approved absence is not
+            a player letting the team down. Null when nothing was recorded either way,
+            because a rate over no observations is unknown rather than zero.
+    TeamAttendance:
+      type: object
+      properties:
+        teamId: { type: string, format: uuid }
+        events:
+          type: integer
+          description: >-
+            How many fixtures the window covered — the denominator every record is read
+            against. Stays the squad's even when the records are narrowed to one family.
+        from: { type: string, format: date, nullable: true }
+        to: { type: string, format: date, nullable: true }
+        records:
+          type: array
+          items: { $ref: "#/components/schemas/AttendanceRecord" }
     AttendanceEntry:
       type: object
       description: >-

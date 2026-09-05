@@ -17,6 +17,25 @@ type Querier interface {
 	// Idempotent: a coach already on a team stays on it, and the create path can call this
 	// without first asking.
 	AddTeamStaff(ctx context.Context, arg AddTeamStaffParams) error
+	// The register read down the season instead of across one fixture.
+	//
+	// A coach's real question is not "who is coming on Saturday" but "who keeps missing
+	// training", and until now the only way to ask it was to open every sheet in turn and
+	// count by hand. This is that count, one line per player.
+	//
+	// The universe is the active squad times the team's events in the window, not the
+	// attendance rows: a player who was never marked at all has to appear as somebody who
+	// missed six sessions, and driving this off `attendances` would show them as having a
+	// clean record because silence leaves no row. That is what `not_recorded` separates out —
+	// a squad nobody registered and a squad that turned up are the same numbers otherwise.
+	//
+	// A cancelled game drops out. Nobody attends a match that was called off, and counting it
+	// as an absence would punish a squad for a coach's decision.
+	//
+	// Rows with no date are in the window only when no window was asked for: `starts_at >=
+	// NULL` is NULL and so fails the filter, which is the wanted answer — a fixture with no
+	// time cannot be placed in March.
+	AggregateAttendanceForTeam(ctx context.Context, arg AggregateAttendanceForTeamParams) ([]AggregateAttendanceForTeamRow, error)
 	// The moat query: cross-instance aggregation of scored fields for one athlete,
 	// optionally scoped to a context. Powers readiness means, effort trends, etc.
 	//

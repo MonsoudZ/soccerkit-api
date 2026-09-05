@@ -115,3 +115,59 @@ ORDER BY r.jersey_number NULLS LAST, p.display_name ASC;
 -- it over to a different squad would attribute it to people who were never asked.
 SELECT count(*) FROM attendances
 WHERE session_id = $1 AND (rsvp IS NOT NULL OR status IS NOT NULL);
+
+-- name: AggregateAttendanceForTeam :many
+-- The register read down the season instead of across one fixture.
+--
+-- A coach's real question is not "who is coming on Saturday" but "who keeps missing
+-- training", and until now the only way to ask it was to open every sheet in turn and
+-- count by hand. This is that count, one line per player.
+--
+-- The universe is the active squad times the team's events in the window, not the
+-- attendance rows: a player who was never marked at all has to appear as somebody who
+-- missed six sessions, and driving this off `attendances` would show them as having a
+-- clean record because silence leaves no row. That is what `not_recorded` separates out —
+-- a squad nobody registered and a squad that turned up are the same numbers otherwise.
+--
+-- A cancelled game drops out. Nobody attends a match that was called off, and counting it
+-- as an absence would punish a squad for a coach's decision.
+--
+-- Rows with no date are in the window only when no window was asked for: `starts_at >=
+-- NULL` is NULL and so fails the filter, which is the wanted answer — a fixture with no
+-- time cannot be placed in March.
+WITH events AS (
+    SELECT g.id AS event_id, 'game'::text AS kind, g.kickoff_at AS starts_at
+    FROM games g
+    WHERE g.team_id = @team_id AND g.status <> 'cancelled'
+    UNION ALL
+    SELECT s.id AS event_id, 'session'::text AS kind, s.scheduled_at AS starts_at
+    FROM sessions s
+    WHERE s.team_id = @team_id AND s.deleted = false
+), scoped AS (
+    SELECT event_id, kind, starts_at FROM events
+    WHERE (@include_games::bool OR kind <> 'game')
+      AND (@include_sessions::bool OR kind <> 'session')
+      AND (sqlc.narg('starting_from')::timestamptz IS NULL OR starts_at >= sqlc.narg('starting_from'))
+      AND (sqlc.narg('starting_to')::timestamptz IS NULL OR starts_at <= sqlc.narg('starting_to'))
+)
+SELECT p.id AS person_id, p.display_name, r.jersey_number,
+       count(*) AS events,
+       count(*) FILTER (WHERE a.status = 'present') AS present,
+       count(*) FILTER (WHERE a.status = 'absent')  AS absent,
+       count(*) FILTER (WHERE a.status = 'late')    AS late,
+       count(*) FILTER (WHERE a.status = 'excused') AS excused,
+       count(*) FILTER (WHERE a.status IS NULL)     AS not_recorded,
+       -- Said they were coming and did not turn up. The single most actionable number
+       -- here after the rate, and one no per-fixture sheet can show: it only exists once
+       -- the two halves of a line are read together across a season.
+       count(*) FILTER (WHERE a.rsvp = 'going' AND a.status = 'absent') AS no_shows
+FROM roster_memberships r
+JOIN persons p ON p.id = r.person_id AND p.deleted = false
+CROSS JOIN scoped e
+LEFT JOIN attendances a
+       ON a.person_id = r.person_id
+      AND ((e.kind = 'game' AND a.game_id = e.event_id)
+        OR (e.kind = 'session' AND a.session_id = e.event_id))
+WHERE r.team_id = @team_id AND r.left_on IS NULL
+GROUP BY p.id, p.display_name, r.jersey_number
+ORDER BY r.jersey_number NULLS LAST, p.display_name ASC;

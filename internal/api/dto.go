@@ -334,6 +334,56 @@ type AttendanceSheet struct {
 	Entries   []AttendanceEntry `json:"entries"`
 }
 
+// AttendanceRecord is one player's season, rather than one player's Saturday: the same
+// register counted down instead of across.
+type AttendanceRecord struct {
+	PersonID     uuid.UUID `json:"personId"`
+	DisplayName  string    `json:"displayName"`
+	JerseyNumber *int32    `json:"jerseyNumber"`
+	Present      int64     `json:"present"`
+	Absent       int64     `json:"absent"`
+	Late         int64     `json:"late"`
+	Excused      int64     `json:"excused"`
+	// NotRecorded is the honest half of every number above it. A squad nobody registered
+	// and a squad that all turned up look identical without it, and a coach reading a
+	// column of zeroes deserves to know which of the two they are looking at.
+	NotRecorded int64 `json:"notRecorded"`
+	// NoShows said they were coming and did not turn up. No per-fixture sheet can show
+	// this: it only exists once the two halves of a line are read together over a season.
+	NoShows int64 `json:"noShows"`
+	// Rate is present+late over present+late+absent — turned up, of the times we know
+	// whether they turned up. Excused is deliberately in neither half: an approved
+	// absence is not a player letting the team down, and counting it against them would
+	// make the number punish the families who called ahead. Null when nothing was
+	// recorded either way, because a rate over no observations is not zero, it is unknown.
+	Rate *float64 `json:"rate"`
+}
+
+func attendanceRecordDTO(r store.AggregateAttendanceForTeamRow) AttendanceRecord {
+	rec := AttendanceRecord{
+		PersonID: r.PersonID, DisplayName: r.DisplayName, JerseyNumber: r.JerseyNumber,
+		Present: r.Present, Absent: r.Absent, Late: r.Late, Excused: r.Excused,
+		NotRecorded: r.NotRecorded, NoShows: r.NoShows,
+	}
+	if known := r.Present + r.Late + r.Absent; known > 0 {
+		rate := float64(r.Present+r.Late) / float64(known)
+		rec.Rate = &rate
+	}
+	return rec
+}
+
+// TeamAttendance is the squad's record over a window.
+type TeamAttendance struct {
+	TeamID uuid.UUID `json:"teamId"`
+	// Events is how many fixtures the window covered, which is the denominator every
+	// number below is read against. It stays the squad's even when the records are
+	// narrowed to one family, for the reason AttendanceSheet's counts do.
+	Events  int64              `json:"events"`
+	From    *string            `json:"from"`
+	To      *string            `json:"to"`
+	Records []AttendanceRecord `json:"records"`
+}
+
 type ScoreAggregate struct {
 	Key     string  `json:"key"`
 	Label   string  `json:"label"`

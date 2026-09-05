@@ -746,3 +746,213 @@ func TestMovingTrainingTellsTheSquad(t *testing.T) {
 		t.Errorf("the payload should carry the new time, got %q", note.Data["startsAt"])
 	}
 }
+
+// --- the season, not the Saturday --------------------------------------------
+
+// recordFor pulls one player's line out of a team attendance response.
+func recordFor(t *testing.T, r resp, personID string) map[string]any {
+	t.Helper()
+	rows, ok := r.body["records"].([]any)
+	if !ok {
+		t.Fatalf("no records in %s", r.raw)
+	}
+	for _, row := range rows {
+		m := row.(map[string]any)
+		if m["personId"] == personID {
+			return m
+		}
+	}
+	t.Fatalf("no record for %s in %s", personID, r.raw)
+	return nil
+}
+
+// TestTheSeasonReadsDownNotAcross is the question a coach actually has. The per-event
+// sheet answers "who is coming on Saturday"; nobody asks that twice.
+func TestTheSeasonReadsDownNotAcross(t *testing.T) {
+	resetDB(t)
+	s := newSquad(t, "season")
+
+	// Three training sessions and a match, all on the team.
+	var sessions []string
+	for _, day := range []string{"2026-03-03", "2026-03-10", "2026-03-17"} {
+		r := do(t, http.MethodPost, "/api/v1/sessions", s.coach, map[string]any{
+			"title": day, "teamId": s.teamID, "scheduledAt": day + "T18:00:00Z",
+			"blocks": []map[string]any{},
+		})
+		if r.status != http.StatusCreated {
+			t.Fatalf("create session: %d %s", r.status, r.raw)
+		}
+		sessions = append(sessions, r.body["id"].(string))
+	}
+	game := do(t, http.MethodPost, "/api/v1/teams/"+s.teamID+"/games", s.coach, map[string]any{
+		"opponent": "Rivals", "kickoffAt": "2026-03-21T10:00:00Z",
+	})
+	gameID := game.body["id"].(string)
+
+	// The player turns up twice, is late once, and misses the match having said they
+	// were coming — the no-show a per-fixture sheet cannot surface.
+	mark := func(path, person, status string) {
+		t.Helper()
+		if r := do(t, http.MethodPatch, path+"/attendance/"+person, s.coach,
+			map[string]any{"status": status}); r.status != http.StatusOK {
+			t.Fatalf("mark %s: %d %s", status, r.status, r.raw)
+		}
+	}
+	mark("/api/v1/sessions/"+sessions[0], s.playerID, "present")
+	mark("/api/v1/sessions/"+sessions[1], s.playerID, "present")
+	mark("/api/v1/sessions/"+sessions[2], s.playerID, "late")
+	if r := do(t, http.MethodPut, "/api/v1/games/"+gameID+"/rsvp", s.coach,
+		map[string]any{"personId": s.playerID, "status": "going"}); r.status != http.StatusOK {
+		t.Fatalf("rsvp: %d %s", r.status, r.raw)
+	}
+	mark("/api/v1/games/"+gameID, s.playerID, "absent")
+	// The teammate is marked at nothing at all.
+
+	all := do(t, http.MethodGet, "/api/v1/teams/"+s.teamID+"/attendance", s.coach, nil)
+	if all.status != http.StatusOK {
+		t.Fatalf("aggregate: %d %s", all.status, all.raw)
+	}
+	// newSquad already made a game and a session, so the window is those two plus these
+	// four. What matters is that every player is counted against the same number.
+	events, _ := all.body["events"].(float64)
+	if events != 6 {
+		t.Fatalf("expected six events in the window, got %v (%s)", events, all.raw)
+	}
+
+	player := recordFor(t, all, s.playerID)
+	if player["present"].(float64) != 2 || player["late"].(float64) != 1 || player["absent"].(float64) != 1 {
+		t.Errorf("the player's season is wrong: %v", player)
+	}
+	if player["noShows"].(float64) != 1 {
+		t.Errorf("said going and did not turn up should be a no-show: %v", player)
+	}
+	// present+late over present+late+absent = 3/4.
+	if rate := player["rate"].(float64); rate != 0.75 {
+		t.Errorf("rate = %v, want 0.75", rate)
+	}
+
+	// The teammate was never marked. That must read as "we do not know", not as a clean
+	// record — the whole reason notRecorded is reported separately.
+	mate := recordFor(t, all, s.mateID)
+	if mate["notRecorded"].(float64) != 6 {
+		t.Errorf("an unmarked player should show every event as not recorded: %v", mate)
+	}
+	if mate["rate"] != nil {
+		t.Errorf("a rate over no observations is unknown, not zero: %v", mate["rate"])
+	}
+}
+
+// TestTheSeasonCanBeNarrowed — "who keeps missing training" is about one kind of event,
+// and a season is a window rather than all of history.
+func TestTheSeasonCanBeNarrowed(t *testing.T) {
+	resetDB(t)
+	s := newSquad(t, "narrow")
+	if r := do(t, http.MethodPost, "/api/v1/sessions", s.coach, map[string]any{
+		"title": "March", "teamId": s.teamID, "scheduledAt": "2026-03-03T18:00:00Z",
+		"blocks": []map[string]any{},
+	}); r.status != http.StatusCreated {
+		t.Fatalf("create session: %d %s", r.status, r.raw)
+	}
+	if r := do(t, http.MethodPost, "/api/v1/teams/"+s.teamID+"/games", s.coach, map[string]any{
+		"opponent": "Rivals", "kickoffAt": "2026-03-21T10:00:00Z",
+	}); r.status != http.StatusCreated {
+		t.Fatalf("create game: %d %s", r.status, r.raw)
+	}
+
+	base := "/api/v1/teams/" + s.teamID + "/attendance"
+	eventsIn := func(query string) float64 {
+		t.Helper()
+		r := do(t, http.MethodGet, base+query, s.coach, nil)
+		if r.status != http.StatusOK {
+			t.Fatalf("aggregate%s: %d %s", query, r.status, r.raw)
+		}
+		n, _ := r.body["events"].(float64)
+		return n
+	}
+
+	// The window. newSquad's own fixtures are in April and outside it.
+	if got := eventsIn("?from=2026-03-01&to=2026-03-31"); got != 2 {
+		t.Errorf("March should hold two events, got %v", got)
+	}
+	if got := eventsIn("?from=2026-03-01&to=2026-03-10"); got != 1 {
+		t.Errorf("the first half of March should hold one, got %v", got)
+	}
+	// An inclusive single day, not an empty instant.
+	if got := eventsIn("?from=2026-03-21&to=2026-03-21"); got != 1 {
+		t.Errorf("a one-day window should hold that day's match, got %v", got)
+	}
+	// The kind.
+	if got := eventsIn("?from=2026-03-01&to=2026-03-31&type=session"); got != 1 {
+		t.Errorf("March holds one training session, got %v", got)
+	}
+	if got := eventsIn("?from=2026-03-01&to=2026-03-31&type=game"); got != 1 {
+		t.Errorf("March holds one match, got %v", got)
+	}
+
+	for _, bad := range []string{"?from=March", "?to=2026-13-01", "?type=practice", "?from=2026-03-31&to=2026-03-01"} {
+		if r := do(t, http.MethodGet, base+bad, s.coach, nil); r.status != http.StatusBadRequest {
+			t.Errorf("%s should be 400, got %d %s", bad, r.status, r.raw)
+		}
+	}
+}
+
+// TestACancelledMatchIsNotAnAbsence — nobody attends a match that was called off, and
+// counting it against a squad would punish them for a coach's decision.
+func TestACancelledMatchIsNotAnAbsence(t *testing.T) {
+	resetDB(t)
+	s := newSquad(t, "calledoff")
+	before := do(t, http.MethodGet, "/api/v1/teams/"+s.teamID+"/attendance", s.coach, nil)
+	was, _ := before.body["events"].(float64)
+
+	if r := do(t, http.MethodPatch, "/api/v1/games/"+s.gameID, s.coach,
+		map[string]any{"status": "cancelled"}); r.status != http.StatusOK {
+		t.Fatalf("cancel: %d %s", r.status, r.raw)
+	}
+	after := do(t, http.MethodGet, "/api/v1/teams/"+s.teamID+"/attendance", s.coach, nil)
+	now, _ := after.body["events"].(float64)
+	if now != was-1 {
+		t.Errorf("a cancelled match should leave the count, was %v now %v", was, now)
+	}
+}
+
+// TestTheSeasonIsScopedLikeTheSheet — a column of absences beside a child's name is a
+// more pointed disclosure than one fixture's line, not a lesser one.
+func TestTheSeasonIsScopedLikeTheSheet(t *testing.T) {
+	resetDB(t)
+	c := newClub(t, "seasonscope")
+	if r := do(t, http.MethodPost, "/api/v1/sessions", c.coach, map[string]any{
+		"title": "Tuesday", "teamId": c.teamID, "scheduledAt": "2026-03-03T18:00:00Z",
+		"blocks": []map[string]any{},
+	}); r.status != http.StatusCreated {
+		t.Fatalf("create session: %d %s", r.status, r.raw)
+	}
+
+	// The coach sees the squad.
+	staff := do(t, http.MethodGet, "/api/v1/teams/"+c.teamID+"/attendance", c.coach, nil)
+	if staff.status != http.StatusOK {
+		t.Fatalf("staff aggregate: %d %s", staff.status, staff.raw)
+	}
+	if rows := staff.body["records"].([]any); len(rows) != 2 {
+		t.Fatalf("a coach sees the squad, got %d", len(rows))
+	}
+
+	// The parent sees their own child and nobody else's — with the squad's event count
+	// over it, the same way the per-fixture sheet keeps its counts whole.
+	parent := doIn(t, http.MethodGet, "/api/v1/teams/"+c.teamID+"/attendance", c.parent, c.orgID, nil)
+	if parent.status != http.StatusOK {
+		t.Fatalf("parent aggregate: %d %s", parent.status, parent.raw)
+	}
+	rows := parent.body["records"].([]any)
+	if len(rows) != 1 || rows[0].(map[string]any)["personId"] != c.childID {
+		t.Errorf("a parent sees their own child's record and no others: %s", parent.raw)
+	}
+	if events, _ := parent.body["events"].(float64); events != 1 {
+		t.Errorf("the event count is the squad's, got %v", events)
+	}
+
+	// And a stranger gets nothing at all.
+	stranger, _ := signInCoach(t, "seasonscope-stranger@e.com")
+	if r := do(t, http.MethodGet, "/api/v1/teams/"+c.teamID+"/attendance", stranger, nil); r.status != http.StatusForbidden {
+		t.Errorf("cross-org aggregate should be 403, got %d %s", r.status, r.raw)
+	}
+}
