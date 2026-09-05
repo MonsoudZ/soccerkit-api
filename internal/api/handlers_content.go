@@ -226,14 +226,19 @@ func (s *Server) handleCreateSession(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusCreated, sessionDTO(session, blocks))
 }
 
+// handleListSessions lists training. Staff get the organization's; everyone else gets the
+// sessions of teams they are connected to, without the plan.
+//
+// It used to be staff-only outright, which is the coaching-library instinct applied one
+// level too wide. The drills and the block list are a coach's work; that a squad trains at
+// six on Tuesday is logistics, and the family expected there could not see it — while the
+// reminder push this service sends says "training is coming up, can you make it?" So the
+// split moves down one level: the schedule is for whoever is expected at it, the plan
+// stays with staff.
 func (s *Server) handleListSessions(w http.ResponseWriter, r *http.Request) {
 	oc, err := s.resolveOrg(r)
 	if err != nil {
 		writeError(w, err)
-		return
-	}
-	if !oc.isStaff() {
-		writeError(w, errForbidden("only staff can see the coaching library"))
 		return
 	}
 	var teamFilter *uuid.UUID
@@ -245,8 +250,9 @@ func (s *Server) handleListSessions(w http.ResponseWriter, r *http.Request) {
 		}
 		teamFilter = &id
 	}
-	sessions, err := s.store.ListSessionsInOrg(r.Context(), store.ListSessionsInOrgParams{
+	sessions, err := s.store.ListSessionsVisibleInOrg(r.Context(), store.ListSessionsVisibleInOrgParams{
 		OrganizationID: oc.orgID, TeamID: teamFilter,
+		SeeAll: oc.isStaff(), PersonID: oc.callerID,
 	})
 	if err != nil {
 		writeError(w, err)
@@ -254,24 +260,51 @@ func (s *Server) handleListSessions(w http.ResponseWriter, r *http.Request) {
 	}
 	out := make([]Session, len(sessions))
 	for i, sess := range sessions {
+		// No blocks on a list for anybody, staff included — that has always been the
+		// shape of this endpoint, and GET /sessions/{id} is where a plan is read.
 		out[i] = sessionDTO(sess, nil)
 	}
 	writeJSON(w, http.StatusOK, out)
 }
 
+// handleGetSession reads one session. Staff get the plan with it; a player or a parent
+// gets the session and not its blocks.
+//
+// This is the endpoint a training reminder deep-links to. The push carries a session id
+// and says "can you make it?", and until now the tap landed on a 403 for exactly the
+// people it was addressed to — they could reach /sessions/{id}/attendance and reply, to a
+// register that could not tell them what it was for.
 func (s *Server) handleGetSession(w http.ResponseWriter, r *http.Request) {
 	oc, err := s.resolveOrg(r)
 	if err != nil {
 		writeError(w, err)
 		return
 	}
-	if !oc.isStaff() {
-		writeError(w, errForbidden("only staff can see the coaching library"))
-		return
-	}
 	session, err := s.sessionInOrg(r, oc)
 	if err != nil {
 		writeError(w, err)
+		return
+	}
+	if !oc.isStaff() {
+		// 404 rather than 403, matching sessionInOrg's own answer for a session that is
+		// not the caller's to see: a distinct "forbidden" would confirm that this id names
+		// a real session in a club they have nothing to do with.
+		if session.TeamID == nil {
+			writeError(w, errNotFound("session not found"))
+			return
+		}
+		connected, cerr := s.store.PersonConnectedToTeam(r.Context(), store.PersonConnectedToTeamParams{
+			TeamID: *session.TeamID, PersonID: oc.callerID,
+		})
+		if cerr != nil {
+			writeError(w, cerr)
+			return
+		}
+		if !connected {
+			writeError(w, errNotFound("session not found"))
+			return
+		}
+		writeJSON(w, http.StatusOK, sessionDTO(session, nil))
 		return
 	}
 	blockRows, err := s.store.ListSessionBlocks(r.Context(), session.ID)

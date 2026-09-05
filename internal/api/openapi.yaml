@@ -626,6 +626,25 @@ paths:
       responses:
         "200": { $ref: "#/components/responses/Ok" }
         "400": { $ref: "#/components/responses/Error" }
+  /api/v1/me/children:
+    get:
+      tags: [me]
+      summary: The children you are a recorded guardian of
+      description: >
+        The first call a parent's app can make. Guardianships were readable only from the
+        child's side — GET /persons/{id}/guardians, which needs the id you are trying to
+        find — so a parent had to walk GET /teams and a team's roster to discover their own
+        children, and a child not currently rostered anywhere could not be found at all.
+        Not scoped to an organization: a guardianship is a fact about two people rather
+        than about a club, the same way GET /me/teams is per-account.
+      security: [{ bearerAuth: [] }]
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema: { type: array, items: { $ref: "#/components/schemas/Person" } }
+
   /api/v1/me/teams:
     get:
       tags: [me]
@@ -1036,6 +1055,11 @@ paths:
     get:
       tags: [content]
       summary: List training sessions
+      description: >
+        Staff get the organization's training; a player gets their teams', a parent their
+        children's. Never with blocks — the plan is read one session at a time, and only
+        by staff. A session with no team reaches nobody but staff: a plan a coach drafted
+        for themselves is not on anybody's calendar.
       security: [{ bearerAuth: [] }]
       parameters:
         - { $ref: "#/components/parameters/OrgHeader" }
@@ -1069,7 +1093,13 @@ paths:
   /api/v1/sessions/{id}:
     get:
       tags: [content]
-      summary: Get a session with its blocks
+      summary: Get a session — with its blocks for staff, without them for a family
+      description: >
+        This is what a training reminder deep-links to, so it has to answer for the people
+        the push was addressed to. Staff get the session and its plan. A player rostered on
+        its team, or a parent of one, gets the session — title, time, team — and no blocks:
+        the schedule is for whoever is expected at it, the plan stays with staff. Anyone
+        else gets 404, not 403, so the id cannot be used to confirm a session exists.
       security: [{ bearerAuth: [] }]
       parameters: [{ $ref: "#/components/parameters/Id" }]
       responses:

@@ -382,7 +382,20 @@ type Querier interface {
 	// say what it is replacing and refuse to strip the last admin.
 	ListRolesForPersonInOrg(ctx context.Context, arg ListRolesForPersonInOrgParams) ([]string, error)
 	ListSessionBlocks(ctx context.Context, sessionID uuid.UUID) ([]ListSessionBlocksRow, error)
-	ListSessionsInOrg(ctx context.Context, arg ListSessionsInOrgParams) ([]Session, error)
+	// The training a caller may see, which is a different set per role -- the same shape
+	// ListTeamsVisibleInOrg settles on, and for the same reason.
+	//
+	// It replaces a plain org-wide list behind a staff-only gate. That gate was about the
+	// coaching library, which is the right instinct applied one level too wide: the drills and
+	// the plan are a coach's work, but the fact that a squad trains at six on Tuesday is
+	// logistics, and a family that is expected there could not see it. The block list is what
+	// stays staff-only, and the handler withholds it -- see handleGetSession.
+	//
+	// `see_all` is the whole of the role logic. Everyone else gets the sessions of teams they
+	// are connected to: a player by being rostered, a parent through a child. A session with
+	// no team reaches nobody but staff, which is correct -- a plan a coach drafted for
+	// themselves is not on anybody's calendar.
+	ListSessionsVisibleInOrg(ctx context.Context, arg ListSessionsVisibleInOrgParams) ([]Session, error)
 	// The delta an account hasn't seen: synced rows across every source, ordered by
 	// the shared cursor. Projected tables contribute their type; sync_documents
 	// carries its own.
@@ -457,6 +470,13 @@ type Querier interface {
 	// parents of every unanswered player are in the set even though the players themselves
 	// may not be.
 	ListUnansweredReachablePeopleForEvent(ctx context.Context, arg ListUnansweredReachablePeopleForEventParams) ([]uuid.UUID, error)
+	// Is this caller part of this team, as a player or through a child?
+	//
+	// The one question every non-staff read about a team comes down to, asked here for a team
+	// the caller named rather than folded into a list. GET /sessions/{id} is the first caller:
+	// a push about training deep-links to a session id, and answering it needs this without
+	// listing the club's whole schedule to find out.
+	PersonConnectedToTeam(ctx context.Context, arg PersonConnectedToTeamParams) (bool, error)
 	// Whether this Person can sign in. PATCH /persons/{id} uses it to keep a coach's edit
 	// rights to the loginless athletes they manage, the same population POST /persons can
 	// create -- someone with an account edits their own row.

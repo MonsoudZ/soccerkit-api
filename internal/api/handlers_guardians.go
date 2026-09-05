@@ -130,3 +130,30 @@ func (s *Server) guardianPair(r *http.Request, pathKey string) (child, guardian 
 	}
 	return childID, guardianID, orgCtx, nil
 }
+
+// handleListMyChildren answers the question a parent's app has to ask first.
+//
+// Guardianships have only ever been readable from the child's side -- GET
+// /persons/{id}/guardians, which needs the child's id to ask for it. A parent opening the
+// app has their own id and nothing else, so finding their children meant GET /teams, then
+// a team detail, then reading the roster the server had already narrowed to them: three
+// calls to learn something the guardianships table answers directly, and none of them work
+// for a child who is not currently rostered anywhere.
+//
+// Not scoped to an organization, deliberately. A guardianship is a fact about two people
+// rather than about a club, so this is the caller's own family and not their membership of
+// anything -- the same reasoning that keeps GET /me/teams per-account. Every other read of
+// these children still goes through personVisibleTo, which is where the club's boundaries
+// are enforced.
+func (s *Server) handleListMyChildren(w http.ResponseWriter, r *http.Request) {
+	children, err := s.store.ListChildren(r.Context(), personIDFrom(r.Context()))
+	if err != nil {
+		writeError(w, err)
+		return
+	}
+	out := make([]Person, len(children))
+	for i, child := range children {
+		out[i] = personDTO(child)
+	}
+	writeJSON(w, http.StatusOK, out)
+}

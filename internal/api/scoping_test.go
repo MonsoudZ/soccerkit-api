@@ -108,6 +108,11 @@ func TestAParentSeesTheirChildsTeam(t *testing.T) {
 // TestTheCoachingLibraryIsStaffOnly is the matrix's seeSharedLibrary. Drills, session
 // plans and evaluation templates were readable by anyone holding any membership, so a
 // player could read every drill and every session plan in the club.
+//
+// The line has since moved down one level for training, and this test moved with it. The
+// library is the coach's work — the drills, the block list, the measuring stick — and it
+// stays closed. That a squad trains at six on Tuesday is logistics, and hiding it from the
+// family expected there was the instinct applied one level too wide.
 func TestTheCoachingLibraryIsStaffOnly(t *testing.T) {
 	resetDB(t)
 	admin, _ := signInCoach(t, "lib-admin@e.com")
@@ -125,14 +130,26 @@ func TestTheCoachingLibraryIsStaffOnly(t *testing.T) {
 
 	for _, path := range []string{
 		"/api/v1/drills",
-		"/api/v1/sessions",
-		"/api/v1/sessions/" + session.body["id"].(string),
 		"/api/v1/templates",
 	} {
 		r := doIn(t, http.MethodGet, path, player, orgID, nil)
 		if r.status != http.StatusForbidden {
 			t.Errorf("%s should be staff-only, got %d %s", path, r.status, r.raw)
 		}
+	}
+
+	// Training is where the line moved, and it moved down a level rather than away. The
+	// schedule is for whoever is expected at it — see
+	// TestAFamilyCanSeeTheTrainingTheyAreExpectedAt — so this player, who is on no team,
+	// gets an empty list rather than a 403: "your training" is a question with an answer.
+	if rows := doIn(t, http.MethodGet, "/api/v1/sessions", player, orgID, nil).arr(); len(rows) != 0 {
+		t.Errorf("a player on no team is expected at no training, got %d", len(rows))
+	}
+	// And this session has no team, so it is on nobody's calendar. 404, because a 403
+	// would confirm the id names something real.
+	if r := doIn(t, http.MethodGet, "/api/v1/sessions/"+session.body["id"].(string),
+		player, orgID, nil); r.status != http.StatusNotFound {
+		t.Errorf("a teamless plan should be 404 to a player, got %d %s", r.status, r.raw)
 	}
 	// Staff still read it.
 	if r := do(t, http.MethodGet, "/api/v1/drills", admin, nil); r.status != http.StatusOK {
@@ -309,4 +326,143 @@ func teamStaffBackfillSQL(t *testing.T) string {
 		t.Fatal("0013 no longer contains the backfill this test exists to cover")
 	}
 	return string(source)[i:]
+}
+
+// TestAFamilyCanSeeTheTrainingTheyAreExpectedAt closes the loop the reminder push opened.
+//
+// GET /sessions was staff-only outright, which is the coaching-library instinct applied
+// one level too wide: the plan is a coach's work, but a family expected at training could
+// not see that it exists — while this service pushes them "training is coming up, can you
+// make it?" and deep-links to a session id the tap then could not fetch.
+func TestAFamilyCanSeeTheTrainingTheyAreExpectedAt(t *testing.T) {
+	resetDB(t)
+	c := newClub(t, "sched")
+	drill := do(t, http.MethodPost, "/api/v1/drills", c.coach, map[string]any{"name": "Rondo"})
+	if drill.status != http.StatusCreated {
+		t.Fatalf("create drill: %d %s", drill.status, drill.raw)
+	}
+	session := do(t, http.MethodPost, "/api/v1/sessions", c.coach, map[string]any{
+		"title": "Tuesday", "teamId": c.teamID, "scheduledAt": "2026-06-02T18:00:00Z",
+		"blocks": []map[string]any{{"title": "Warm-up", "drillId": drill.body["id"].(string)}},
+	})
+	if session.status != http.StatusCreated {
+		t.Fatalf("create session: %d %s", session.status, session.raw)
+	}
+	sessionID := session.body["id"].(string)
+
+	// The parent can now find it, and read the one the push points at.
+	list := doIn(t, http.MethodGet, "/api/v1/sessions", c.parent, c.orgID, nil)
+	if list.status != http.StatusOK {
+		t.Fatalf("parent session list: %d %s", list.status, list.raw)
+	}
+	rows := list.arr()
+	if len(rows) != 1 || rows[0].(map[string]any)["title"] != "Tuesday" {
+		t.Fatalf("a parent should see their child's training: %s", list.raw)
+	}
+	one := doIn(t, http.MethodGet, "/api/v1/sessions/"+sessionID, c.parent, c.orgID, nil)
+	if one.status != http.StatusOK {
+		t.Fatalf("the reminder deep-links here: %d %s", one.status, one.raw)
+	}
+	if one.body["title"] != "Tuesday" || one.body["scheduledAt"] != "2026-06-02T18:00:00Z" {
+		t.Errorf("a family needs the title and the time: %s", one.raw)
+	}
+	// And not the plan. The blocks are the coach's work and the drill library with them.
+	if _, ok := one.body["blocks"]; ok {
+		t.Errorf("a family must not get the block list: %s", one.raw)
+	}
+	// The library itself is still closed.
+	if r := doIn(t, http.MethodGet, "/api/v1/drills", c.parent, c.orgID, nil); r.status != http.StatusForbidden {
+		t.Errorf("drills stay staff-only, got %d %s", r.status, r.raw)
+	}
+
+	// Staff still get the whole thing.
+	staff := do(t, http.MethodGet, "/api/v1/sessions/"+sessionID, c.coach, nil)
+	blocks, ok := staff.body["blocks"].([]any)
+	if !ok || len(blocks) != 1 {
+		t.Errorf("a coach still gets the plan: %s", staff.raw)
+	}
+}
+
+// TestTrainingForATeamYouAreNotOnStaysHidden — the other half of the same rule.
+func TestTrainingForATeamYouAreNotOnStaysHidden(t *testing.T) {
+	resetDB(t)
+	c := newClub(t, "hidden")
+	other := do(t, http.MethodPost, "/api/v1/teams", c.coach, map[string]any{"name": "U16"})
+	otherID := other.body["id"].(string)
+	theirs := do(t, http.MethodPost, "/api/v1/sessions", c.coach, map[string]any{
+		"title": "Not yours", "teamId": otherID, "blocks": []map[string]any{},
+	})
+	if theirs.status != http.StatusCreated {
+		t.Fatalf("create session: %d %s", theirs.status, theirs.raw)
+	}
+	// A session with no team is nobody's calendar but the coach's.
+	solo := do(t, http.MethodPost, "/api/v1/sessions", c.coach, map[string]any{
+		"title": "Planning", "blocks": []map[string]any{},
+	})
+	if solo.status != http.StatusCreated {
+		t.Fatalf("create teamless session: %d %s", solo.status, solo.raw)
+	}
+
+	if rows := doIn(t, http.MethodGet, "/api/v1/sessions", c.parent, c.orgID, nil).arr(); len(rows) != 0 {
+		t.Errorf("a parent whose child is on neither team should see nothing, got %s",
+			doIn(t, http.MethodGet, "/api/v1/sessions", c.parent, c.orgID, nil).raw)
+	}
+	for _, tc := range []struct{ name, id string }{
+		{"another team's training", theirs.body["id"].(string)},
+		{"a teamless plan", solo.body["id"].(string)},
+	} {
+		r := doIn(t, http.MethodGet, "/api/v1/sessions/"+tc.id, c.parent, c.orgID, nil)
+		// 404 rather than 403: a distinct "forbidden" would confirm the id names a real
+		// session.
+		if r.status != http.StatusNotFound {
+			t.Errorf("%s should be 404, got %d %s", tc.name, r.status, r.raw)
+		}
+	}
+	// Staff see both.
+	if rows := do(t, http.MethodGet, "/api/v1/sessions", c.coach, nil).arr(); len(rows) != 2 {
+		t.Errorf("a coach sees the organization's training, got %d", len(rows))
+	}
+}
+
+// TestAParentCanFindTheirOwnChildren — the first call a parent's app makes. Guardianships
+// were readable only from the child's side, which needs the id you are trying to find.
+func TestAParentCanFindTheirOwnChildren(t *testing.T) {
+	resetDB(t)
+	c := newClub(t, "kids")
+
+	mine := do(t, http.MethodGet, "/api/v1/me/children", c.parent, nil)
+	if mine.status != http.StatusOK {
+		t.Fatalf("me/children: %d %s", mine.status, mine.raw)
+	}
+	rows := mine.arr()
+	if len(rows) != 1 {
+		t.Fatalf("expected the one child they are guardian of, got %s", mine.raw)
+	}
+	child := rows[0].(map[string]any)
+	if child["id"] != c.childID || child["displayName"] != "My Child" {
+		t.Errorf("expected their own child, got %v", child)
+	}
+	// The record they are entitled to, whole — this is their child.
+	if child["medicalNotes"] != "peanut allergy" {
+		t.Errorf("a guardian gets their child's record: %v", child)
+	}
+
+	// A second child shows up without any other call changing.
+	second := do(t, http.MethodPost, "/api/v1/persons", c.coach,
+		map[string]any{"displayName": "Second Child"})
+	if second.status != http.StatusCreated {
+		t.Fatalf("create second child: %d %s", second.status, second.raw)
+	}
+	if r := do(t, http.MethodPost, "/api/v1/persons/"+second.body["id"].(string)+"/guardians",
+		c.coach, map[string]any{"personId": c.parentID}); r.status != http.StatusCreated {
+		t.Fatalf("link second child: %d %s", r.status, r.raw)
+	}
+	if rows := do(t, http.MethodGet, "/api/v1/me/children", c.parent, nil).arr(); len(rows) != 2 {
+		t.Errorf("expected two children, got %d", len(rows))
+	}
+	// A child who is on no roster is still theirs — the walk through GET /teams could
+	// never have found this one.
+	if rows := do(t, http.MethodGet, "/api/v1/me/children", c.coach, nil).arr(); len(rows) != 0 {
+		t.Errorf("a coach is guardian of nobody here, got %d", len(rows))
+	}
 }

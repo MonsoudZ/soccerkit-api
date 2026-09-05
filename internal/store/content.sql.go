@@ -441,21 +441,50 @@ func (q *Queries) ListSessionBlocks(ctx context.Context, sessionID uuid.UUID) ([
 	return items, nil
 }
 
-const listSessionsInOrg = `-- name: ListSessionsInOrg :many
-SELECT id, organization_id, author_person_id, team_id, title, scheduled_at, notes, created_at, updated_at, sync_account_id, payload, deleted, seq, reminder_sent_at FROM sessions
-WHERE organization_id = $1
-  AND deleted = false
-  AND ($2::uuid IS NULL OR team_id = $2)
-ORDER BY scheduled_at DESC NULLS LAST, created_at DESC
+const listSessionsVisibleInOrg = `-- name: ListSessionsVisibleInOrg :many
+SELECT s.id, s.organization_id, s.author_person_id, s.team_id, s.title, s.scheduled_at, s.notes, s.created_at, s.updated_at, s.sync_account_id, s.payload, s.deleted, s.seq, s.reminder_sent_at FROM sessions s
+WHERE s.organization_id = $1
+  AND s.deleted = false
+  AND ($2::uuid IS NULL OR s.team_id = $2)
+  AND (
+    $3::bool
+    OR (s.team_id IS NOT NULL AND EXISTS (
+        SELECT 1 FROM roster_memberships r
+        WHERE r.team_id = s.team_id AND r.left_on IS NULL
+          AND (r.person_id = $4
+            OR r.person_id IN (SELECT child_person_id FROM guardianships
+                                WHERE guardian_person_id = $4))))
+  )
+ORDER BY s.scheduled_at DESC NULLS LAST, s.created_at DESC
 `
 
-type ListSessionsInOrgParams struct {
+type ListSessionsVisibleInOrgParams struct {
 	OrganizationID uuid.UUID  `json:"organization_id"`
 	TeamID         *uuid.UUID `json:"team_id"`
+	SeeAll         bool       `json:"see_all"`
+	PersonID       uuid.UUID  `json:"person_id"`
 }
 
-func (q *Queries) ListSessionsInOrg(ctx context.Context, arg ListSessionsInOrgParams) ([]Session, error) {
-	rows, err := q.db.Query(ctx, listSessionsInOrg, arg.OrganizationID, arg.TeamID)
+// The training a caller may see, which is a different set per role -- the same shape
+// ListTeamsVisibleInOrg settles on, and for the same reason.
+//
+// It replaces a plain org-wide list behind a staff-only gate. That gate was about the
+// coaching library, which is the right instinct applied one level too wide: the drills and
+// the plan are a coach's work, but the fact that a squad trains at six on Tuesday is
+// logistics, and a family that is expected there could not see it. The block list is what
+// stays staff-only, and the handler withholds it -- see handleGetSession.
+//
+// `see_all` is the whole of the role logic. Everyone else gets the sessions of teams they
+// are connected to: a player by being rostered, a parent through a child. A session with
+// no team reaches nobody but staff, which is correct -- a plan a coach drafted for
+// themselves is not on anybody's calendar.
+func (q *Queries) ListSessionsVisibleInOrg(ctx context.Context, arg ListSessionsVisibleInOrgParams) ([]Session, error) {
+	rows, err := q.db.Query(ctx, listSessionsVisibleInOrg,
+		arg.OrganizationID,
+		arg.TeamID,
+		arg.SeeAll,
+		arg.PersonID,
+	)
 	if err != nil {
 		return nil, err
 	}
@@ -487,6 +516,34 @@ func (q *Queries) ListSessionsInOrg(ctx context.Context, arg ListSessionsInOrgPa
 		return nil, err
 	}
 	return items, nil
+}
+
+const personConnectedToTeam = `-- name: PersonConnectedToTeam :one
+SELECT EXISTS (
+    SELECT 1 FROM roster_memberships r
+    WHERE r.team_id = $1 AND r.left_on IS NULL
+      AND (r.person_id = $2
+        OR r.person_id IN (SELECT child_person_id FROM guardianships
+                            WHERE guardian_person_id = $2))
+)
+`
+
+type PersonConnectedToTeamParams struct {
+	TeamID   uuid.UUID `json:"team_id"`
+	PersonID uuid.UUID `json:"person_id"`
+}
+
+// Is this caller part of this team, as a player or through a child?
+//
+// The one question every non-staff read about a team comes down to, asked here for a team
+// the caller named rather than folded into a list. GET /sessions/{id} is the first caller:
+// a push about training deep-links to a session id, and answering it needs this without
+// listing the club's whole schedule to find out.
+func (q *Queries) PersonConnectedToTeam(ctx context.Context, arg PersonConnectedToTeamParams) (bool, error) {
+	row := q.db.QueryRow(ctx, personConnectedToTeam, arg.TeamID, arg.PersonID)
+	var exists bool
+	err := row.Scan(&exists)
+	return exists, err
 }
 
 const updateGame = `-- name: UpdateGame :one

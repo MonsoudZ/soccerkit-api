@@ -109,6 +109,10 @@ func (s *Server) Router() http.Handler {
 			// The teams this person is rostered on — narrower than GET /teams, which
 			// answers what they may see rather than what they are part of.
 			r.Get("/me/teams", s.handleListMyTeams)
+			// The children this person is a recorded guardian of. A parent opening
+			// the app holds their own id and nothing else, and everything else about
+			// a child needs the child's.
+			r.Get("/me/children", s.handleListMyChildren)
 
 			// Where to reach this person. Registered on launch, dropped on sign-out.
 			r.Post("/me/devices", s.handleRegisterDevice)

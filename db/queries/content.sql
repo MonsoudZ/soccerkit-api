@@ -51,12 +51,49 @@ RETURNING *;
 -- name: GetSession :one
 SELECT * FROM sessions WHERE id = $1 AND deleted = false;
 
--- name: ListSessionsInOrg :many
-SELECT * FROM sessions
-WHERE organization_id = $1
-  AND deleted = false
-  AND (sqlc.narg('team_id')::uuid IS NULL OR team_id = sqlc.narg('team_id'))
-ORDER BY scheduled_at DESC NULLS LAST, created_at DESC;
+-- name: ListSessionsVisibleInOrg :many
+-- The training a caller may see, which is a different set per role -- the same shape
+-- ListTeamsVisibleInOrg settles on, and for the same reason.
+--
+-- It replaces a plain org-wide list behind a staff-only gate. That gate was about the
+-- coaching library, which is the right instinct applied one level too wide: the drills and
+-- the plan are a coach's work, but the fact that a squad trains at six on Tuesday is
+-- logistics, and a family that is expected there could not see it. The block list is what
+-- stays staff-only, and the handler withholds it -- see handleGetSession.
+--
+-- `see_all` is the whole of the role logic. Everyone else gets the sessions of teams they
+-- are connected to: a player by being rostered, a parent through a child. A session with
+-- no team reaches nobody but staff, which is correct -- a plan a coach drafted for
+-- themselves is not on anybody's calendar.
+SELECT s.* FROM sessions s
+WHERE s.organization_id = sqlc.arg('organization_id')
+  AND s.deleted = false
+  AND (sqlc.narg('team_id')::uuid IS NULL OR s.team_id = sqlc.narg('team_id'))
+  AND (
+    sqlc.arg('see_all')::bool
+    OR (s.team_id IS NOT NULL AND EXISTS (
+        SELECT 1 FROM roster_memberships r
+        WHERE r.team_id = s.team_id AND r.left_on IS NULL
+          AND (r.person_id = sqlc.arg('person_id')
+            OR r.person_id IN (SELECT child_person_id FROM guardianships
+                                WHERE guardian_person_id = sqlc.arg('person_id')))))
+  )
+ORDER BY s.scheduled_at DESC NULLS LAST, s.created_at DESC;
+
+-- name: PersonConnectedToTeam :one
+-- Is this caller part of this team, as a player or through a child?
+--
+-- The one question every non-staff read about a team comes down to, asked here for a team
+-- the caller named rather than folded into a list. GET /sessions/{id} is the first caller:
+-- a push about training deep-links to a session id, and answering it needs this without
+-- listing the club's whole schedule to find out.
+SELECT EXISTS (
+    SELECT 1 FROM roster_memberships r
+    WHERE r.team_id = @team_id AND r.left_on IS NULL
+      AND (r.person_id = @person_id
+        OR r.person_id IN (SELECT child_person_id FROM guardianships
+                            WHERE guardian_person_id = @person_id))
+);
 
 -- name: UpdateSession :one
 -- Sessions could be created and deleted over REST but never edited, so a coach who moved
