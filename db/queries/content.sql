@@ -76,6 +76,10 @@ ORDER BY scheduled_at DESC NULLS LAST, created_at DESC;
 UPDATE sessions
 SET title        = COALESCE(sqlc.narg('title'), title),
     scheduled_at = CASE WHEN sqlc.arg('set_scheduled_at')::bool THEN sqlc.narg('scheduled_at') ELSE scheduled_at END,
+    -- Re-armed when the time actually moves, for the reason UpdateGame gives.
+    reminder_sent_at = CASE WHEN sqlc.arg('set_scheduled_at')::bool
+                                 AND scheduled_at IS DISTINCT FROM sqlc.narg('scheduled_at')
+                            THEN NULL ELSE reminder_sent_at END,
     notes        = CASE WHEN sqlc.arg('set_notes')::bool THEN sqlc.narg('notes') ELSE notes END,
     team_id      = CASE WHEN sqlc.arg('set_team_id')::bool THEN sqlc.narg('team_id') ELSE team_id END,
     payload      = CASE WHEN sqlc.arg('patch_payload')::bool
@@ -127,6 +131,14 @@ SELECT * FROM games WHERE team_id = $1 ORDER BY kickoff_at DESC NULLS LAST, crea
 UPDATE games
 SET opponent       = CASE WHEN sqlc.arg('set_opponent')::bool THEN sqlc.narg('opponent') ELSE opponent END,
     kickoff_at     = CASE WHEN sqlc.arg('set_kickoff_at')::bool THEN sqlc.narg('kickoff_at') ELSE kickoff_at END,
+    -- A fixture that moved has not been chased at its new time, whatever it was chased at
+    -- before, so the claim is released and the sweep may pick it up again. IS DISTINCT
+    -- FROM rather than <>, because either side may be NULL and a kickoff being cleared is
+    -- as much of a change as one being moved; the left side is still the old value here,
+    -- which is what makes "did it actually change" answerable in one statement.
+    reminder_sent_at = CASE WHEN sqlc.arg('set_kickoff_at')::bool
+                                 AND kickoff_at IS DISTINCT FROM sqlc.narg('kickoff_at')
+                            THEN NULL ELSE reminder_sent_at END,
     home_away      = CASE WHEN sqlc.arg('set_home_away')::bool THEN sqlc.narg('home_away') ELSE home_away END,
     our_score      = CASE WHEN sqlc.arg('set_scores')::bool THEN sqlc.narg('our_score') ELSE our_score END,
     opponent_score = CASE WHEN sqlc.arg('set_scores')::bool THEN sqlc.narg('opponent_score') ELSE opponent_score END,

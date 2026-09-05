@@ -74,7 +74,18 @@ func run() error {
 		srv.SetNotifier(pushNotifier{sender})
 		log.Printf("push notifications enabled (bundle %s, %s)", cfg.APNsBundleID, apnsHostName(cfg))
 	} else {
-		log.Printf("push notifications disabled (APNS_* unset); invitations will not notify")
+		log.Printf("push notifications disabled (APNS_* unset); invitations and fixtures will not notify")
+	}
+
+	// Chase the squads that have not replied to a fixture starting soon. Started only
+	// where push is configured, because the sweep claims each fixture as it chases it --
+	// a sweep with nowhere to deliver would mark a whole fixture list as chased, and a
+	// service that later turned push on would find nothing left to remind anyone about.
+	if srv.RemindersEnabled() {
+		remindCtx, stopReminders := context.WithCancel(ctx)
+		defer stopReminders()
+		go srv.RunReminders(remindCtx)
+		log.Println("fixture reminders enabled")
 	}
 
 	// Every timeout, not just the header one. middleware.Timeout bounds how long a

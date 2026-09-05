@@ -95,7 +95,7 @@ const createGame = `-- name: CreateGame :one
 
 INSERT INTO games (organization_id, team_id, opponent, kickoff_at, home_away)
 VALUES ($1, $2, $3, $4, $5)
-RETURNING id, organization_id, team_id, opponent, kickoff_at, home_away, our_score, opponent_score, status, created_at, updated_at
+RETURNING id, organization_id, team_id, opponent, kickoff_at, home_away, our_score, opponent_score, status, created_at, updated_at, reminder_sent_at
 `
 
 type CreateGameParams struct {
@@ -128,6 +128,7 @@ func (q *Queries) CreateGame(ctx context.Context, arg CreateGameParams) (Game, e
 		&i.Status,
 		&i.CreatedAt,
 		&i.UpdatedAt,
+		&i.ReminderSentAt,
 	)
 	return i, err
 }
@@ -136,7 +137,7 @@ const createSession = `-- name: CreateSession :one
 
 INSERT INTO sessions (id, organization_id, author_person_id, sync_account_id, team_id, title, scheduled_at, notes, payload, seq)
 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, nextval('sync_seq'))
-RETURNING id, organization_id, author_person_id, team_id, title, scheduled_at, notes, created_at, updated_at, sync_account_id, payload, deleted, seq
+RETURNING id, organization_id, author_person_id, team_id, title, scheduled_at, notes, created_at, updated_at, sync_account_id, payload, deleted, seq, reminder_sent_at
 `
 
 type CreateSessionParams struct {
@@ -188,6 +189,7 @@ func (q *Queries) CreateSession(ctx context.Context, arg CreateSessionParams) (S
 		&i.Payload,
 		&i.Deleted,
 		&i.Seq,
+		&i.ReminderSentAt,
 	)
 	return i, err
 }
@@ -269,7 +271,7 @@ func (q *Queries) GetDrill(ctx context.Context, id uuid.UUID) (Drill, error) {
 }
 
 const getGame = `-- name: GetGame :one
-SELECT id, organization_id, team_id, opponent, kickoff_at, home_away, our_score, opponent_score, status, created_at, updated_at FROM games WHERE id = $1
+SELECT id, organization_id, team_id, opponent, kickoff_at, home_away, our_score, opponent_score, status, created_at, updated_at, reminder_sent_at FROM games WHERE id = $1
 `
 
 func (q *Queries) GetGame(ctx context.Context, id uuid.UUID) (Game, error) {
@@ -287,12 +289,13 @@ func (q *Queries) GetGame(ctx context.Context, id uuid.UUID) (Game, error) {
 		&i.Status,
 		&i.CreatedAt,
 		&i.UpdatedAt,
+		&i.ReminderSentAt,
 	)
 	return i, err
 }
 
 const getSession = `-- name: GetSession :one
-SELECT id, organization_id, author_person_id, team_id, title, scheduled_at, notes, created_at, updated_at, sync_account_id, payload, deleted, seq FROM sessions WHERE id = $1 AND deleted = false
+SELECT id, organization_id, author_person_id, team_id, title, scheduled_at, notes, created_at, updated_at, sync_account_id, payload, deleted, seq, reminder_sent_at FROM sessions WHERE id = $1 AND deleted = false
 `
 
 func (q *Queries) GetSession(ctx context.Context, id uuid.UUID) (Session, error) {
@@ -312,6 +315,7 @@ func (q *Queries) GetSession(ctx context.Context, id uuid.UUID) (Session, error)
 		&i.Payload,
 		&i.Deleted,
 		&i.Seq,
+		&i.ReminderSentAt,
 	)
 	return i, err
 }
@@ -353,7 +357,7 @@ func (q *Queries) ListDrillsInOrg(ctx context.Context, organizationID uuid.UUID)
 }
 
 const listGamesForTeam = `-- name: ListGamesForTeam :many
-SELECT id, organization_id, team_id, opponent, kickoff_at, home_away, our_score, opponent_score, status, created_at, updated_at FROM games WHERE team_id = $1 ORDER BY kickoff_at DESC NULLS LAST, created_at DESC
+SELECT id, organization_id, team_id, opponent, kickoff_at, home_away, our_score, opponent_score, status, created_at, updated_at, reminder_sent_at FROM games WHERE team_id = $1 ORDER BY kickoff_at DESC NULLS LAST, created_at DESC
 `
 
 func (q *Queries) ListGamesForTeam(ctx context.Context, teamID uuid.UUID) ([]Game, error) {
@@ -377,6 +381,7 @@ func (q *Queries) ListGamesForTeam(ctx context.Context, teamID uuid.UUID) ([]Gam
 			&i.Status,
 			&i.CreatedAt,
 			&i.UpdatedAt,
+			&i.ReminderSentAt,
 		); err != nil {
 			return nil, err
 		}
@@ -437,7 +442,7 @@ func (q *Queries) ListSessionBlocks(ctx context.Context, sessionID uuid.UUID) ([
 }
 
 const listSessionsInOrg = `-- name: ListSessionsInOrg :many
-SELECT id, organization_id, author_person_id, team_id, title, scheduled_at, notes, created_at, updated_at, sync_account_id, payload, deleted, seq FROM sessions
+SELECT id, organization_id, author_person_id, team_id, title, scheduled_at, notes, created_at, updated_at, sync_account_id, payload, deleted, seq, reminder_sent_at FROM sessions
 WHERE organization_id = $1
   AND deleted = false
   AND ($2::uuid IS NULL OR team_id = $2)
@@ -472,6 +477,7 @@ func (q *Queries) ListSessionsInOrg(ctx context.Context, arg ListSessionsInOrgPa
 			&i.Payload,
 			&i.Deleted,
 			&i.Seq,
+			&i.ReminderSentAt,
 		); err != nil {
 			return nil, err
 		}
@@ -487,13 +493,21 @@ const updateGame = `-- name: UpdateGame :one
 UPDATE games
 SET opponent       = CASE WHEN $1::bool THEN $2 ELSE opponent END,
     kickoff_at     = CASE WHEN $3::bool THEN $4 ELSE kickoff_at END,
+    -- A fixture that moved has not been chased at its new time, whatever it was chased at
+    -- before, so the claim is released and the sweep may pick it up again. IS DISTINCT
+    -- FROM rather than <>, because either side may be NULL and a kickoff being cleared is
+    -- as much of a change as one being moved; the left side is still the old value here,
+    -- which is what makes "did it actually change" answerable in one statement.
+    reminder_sent_at = CASE WHEN $3::bool
+                                 AND kickoff_at IS DISTINCT FROM $4
+                            THEN NULL ELSE reminder_sent_at END,
     home_away      = CASE WHEN $5::bool THEN $6 ELSE home_away END,
     our_score      = CASE WHEN $7::bool THEN $8 ELSE our_score END,
     opponent_score = CASE WHEN $7::bool THEN $9 ELSE opponent_score END,
     status         = COALESCE($10, status),
     updated_at     = now()
 WHERE id = $11
-RETURNING id, organization_id, team_id, opponent, kickoff_at, home_away, our_score, opponent_score, status, created_at, updated_at
+RETURNING id, organization_id, team_id, opponent, kickoff_at, home_away, our_score, opponent_score, status, created_at, updated_at, reminder_sent_at
 `
 
 type UpdateGameParams struct {
@@ -541,6 +555,7 @@ func (q *Queries) UpdateGame(ctx context.Context, arg UpdateGameParams) (Game, e
 		&i.Status,
 		&i.CreatedAt,
 		&i.UpdatedAt,
+		&i.ReminderSentAt,
 	)
 	return i, err
 }
@@ -549,6 +564,10 @@ const updateSession = `-- name: UpdateSession :one
 UPDATE sessions
 SET title        = COALESCE($1, title),
     scheduled_at = CASE WHEN $2::bool THEN $3 ELSE scheduled_at END,
+    -- Re-armed when the time actually moves, for the reason UpdateGame gives.
+    reminder_sent_at = CASE WHEN $2::bool
+                                 AND scheduled_at IS DISTINCT FROM $3
+                            THEN NULL ELSE reminder_sent_at END,
     notes        = CASE WHEN $4::bool THEN $5 ELSE notes END,
     team_id      = CASE WHEN $6::bool THEN $7 ELSE team_id END,
     payload      = CASE WHEN $8::bool
@@ -557,7 +576,7 @@ SET title        = COALESCE($1, title),
     seq          = nextval('sync_seq'),
     updated_at   = now()
 WHERE id = $10
-RETURNING id, organization_id, author_person_id, team_id, title, scheduled_at, notes, created_at, updated_at, sync_account_id, payload, deleted, seq
+RETURNING id, organization_id, author_person_id, team_id, title, scheduled_at, notes, created_at, updated_at, sync_account_id, payload, deleted, seq, reminder_sent_at
 `
 
 type UpdateSessionParams struct {
@@ -615,6 +634,7 @@ func (q *Queries) UpdateSession(ctx context.Context, arg UpdateSessionParams) (S
 		&i.Payload,
 		&i.Deleted,
 		&i.Seq,
+		&i.ReminderSentAt,
 	)
 	return i, err
 }

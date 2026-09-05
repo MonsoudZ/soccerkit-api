@@ -27,6 +27,10 @@ var (
 	// TestOpenAPISpecMatchesTheRouter can walk the routes it mounts.
 	testRouter http.Handler
 	testNotes  *recordingNotifier
+	// testAPI is the Server behind testRouter, kept for the work that runs beside the
+	// router rather than through it — the reminder sweep, which cmd/api drives on a
+	// ticker and a test drives one pass at a time.
+	testAPI *api.Server
 )
 
 // recordingNotifier captures what the handlers asked to have delivered.
@@ -86,6 +90,7 @@ func TestMain(m *testing.M) {
 	// which this can answer. Delivery itself is internal/push's to prove.
 	testNotes = &recordingNotifier{}
 	srv.SetNotifier(testNotes)
+	testAPI = srv
 	testRouter = srv.Router()
 	testServer = httptest.NewServer(testRouter)
 

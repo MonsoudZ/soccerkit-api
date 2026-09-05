@@ -128,6 +128,7 @@ type Game struct {
 	Status         string             `json:"status"`
 	CreatedAt      pgtype.Timestamptz `json:"created_at"`
 	UpdatedAt      pgtype.Timestamptz `json:"updated_at"`
+	ReminderSentAt pgtype.Timestamptz `json:"reminder_sent_at"`
 }
 
 type Guardianship struct {
@@ -234,6 +235,7 @@ type Session struct {
 	Payload        []byte             `json:"payload"`
 	Deleted        bool               `json:"deleted"`
 	Seq            *int64             `json:"seq"`
+	ReminderSentAt pgtype.Timestamptz `json:"reminder_sent_at"`
 }
 
 type SessionBlock struct {
